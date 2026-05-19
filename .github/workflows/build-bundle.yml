@@ -72,6 +72,23 @@ jobs:
           repository: ${{ github.repository_owner }}/openddil-demo
           path: openddil-demo
 
+      # openddil-contracts gitignores gen/ (per its .gitignore: "Generated
+      # Protobuf code is built on demand via `make` and never committed").
+      # The bundle Dockerfile COPYs openddil-contracts/gen/python/, so we
+      # have to run codegen against the fresh checkout before docker build
+      # — otherwise the COPY fails with "path not found in build context."
+      #
+      # The Makefile's `python` target uses raw `protoc --python_out`, no
+      # gRPC plugin — only protobuf-compiler is needed.
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Generate Python proto bindings in openddil-contracts
+        run: |
+          make -C openddil-contracts python
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
