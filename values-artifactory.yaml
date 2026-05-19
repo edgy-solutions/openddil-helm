@@ -93,30 +93,20 @@ restate:
   image:
     repository: <ARTIFACTORY>/restatedev/restate
 
-# --- Template-hardcoded images (NOT overridable via values today) -----------
-# Three images are hardcoded in chart templates and DO NOT have repository
-# overrides in values.yaml:
+# --- Template-internal utility images (chart 0.1.2+) ------------------------
+# atlas runs the postgres-schema-init Job's Atlas migration step (critical
+# — blocks install if unavailable); alpine is the schema-init Job's no-op
+# main container (also critical); curlimages/curl runs the helm-test
+# connectivity pods (only needed for `helm test`, non-critical).
 #
-#   - arigaio/atlas:latest          (postgres-schema-init Job, atlas-apply
-#                                    step) — CRITICAL: blocks install
-#   - alpine:3.20                   (postgres-schema-init Job, main "no-op"
-#                                    container) — CRITICAL: blocks install
-#   - curlimages/curl:8.9.1         (helm-test connectivity pods) — only
-#                                    needed for `helm test`
-#
-# If your cluster forbids upstream pulls entirely, you have two options:
-#
-#   (a) Pull-through cache: configure your registry mirror in
-#       containerd/Docker daemon to redirect docker.io and ghcr.io
-#       pulls through your Artifactory. Cluster-admin-side change;
-#       no chart edit needed.
-#
-#   (b) Chart-template patch: parameterize these three images in
-#       templates/postgres-schema-init.yaml and templates/tests/
-#       connectivity.yaml so they accept values.yaml overrides. Not yet
-#       done in this chart — flagged as a follow-up. The script still
-#       mirrors them; just no override surface here yet.
-#
-# Until (a) or (b), the script's mirror of these images won't be USED
-# unless the cluster can resolve "arigaio/atlas:latest" through some
-# mirror configuration.
+# Parameterized in chart version 0.1.2 (templates/postgres-schema-init.yaml
+# + templates/tests/connectivity.yaml). Earlier chart versions had these
+# hardcoded — if you're on 0.1.1 or earlier, these overrides are silently
+# ignored and you need a pull-through cache instead.
+utilities:
+  atlas:
+    repository: <ARTIFACTORY>/arigaio/atlas
+  alpine:
+    repository: <ARTIFACTORY>/library/alpine
+  curl:
+    repository: <ARTIFACTORY>/curlimages/curl

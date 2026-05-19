@@ -267,6 +267,34 @@ frontend:
     limits:   { cpu: 200m, memory: 256Mi }
   port: 80
 
+# --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
+# Three small images referenced by chart templates rather than by service-
+# level definitions. Parameterized here so a private-registry deployment
+# (Artifactory etc.) can redirect all three to a mirror via values
+# overrides. Pairs with values-artifactory.yaml.
+#
+# - atlas: arigaio/atlas runs the Atlas migration step in the postgres-
+#   schema-init Job. CRITICAL — without it, the migration step doesn't run
+#   and postgres-hq comes up with zero tables.
+# - alpine: the no-op "complete" main container of the postgres-schema-
+#   init Job. CRITICAL — Job pod won't reach Ready without it; Job
+#   never completes; install hangs.
+# - curl: curlimages/curl runs the electric-sync + frontend connectivity
+#   helm-test pods. NON-critical — only used when running `helm test`.
+utilities:
+  atlas:
+    repository: arigaio/atlas
+    tag: latest
+    pullPolicy: IfNotPresent
+  alpine:
+    repository: alpine
+    tag: "3.20"
+    pullPolicy: IfNotPresent
+  curl:
+    repository: curlimages/curl
+    tag: "8.9.1"
+    pullPolicy: IfNotPresent
+
 # --- Ingress ----------------------------------------------------------------
 # Two routes on one host:
 #   /            -> frontend (nginx-served static SPA)

@@ -70,8 +70,8 @@ spec:
         # only the subcommand arguments (matches the docker-compose
         # atlas-init service exactly).
         - name: atlas-apply
-          image: arigaio/atlas:latest
-          imagePullPolicy: IfNotPresent
+          image: "{{ .Values.utilities.atlas.repository }}:{{ .Values.utilities.atlas.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.atlas.pullPolicy "root" .) }}
           args:
             - migrate
             - apply
@@ -116,7 +116,8 @@ spec:
       # and the Job is marked Complete.
       containers:
         - name: complete
-          image: alpine:3.20
+          image: "{{ .Values.utilities.alpine.repository }}:{{ .Values.utilities.alpine.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.alpine.pullPolicy "root" .) }}
           command: ["true"]
       volumes:
         - name: bundle-shared

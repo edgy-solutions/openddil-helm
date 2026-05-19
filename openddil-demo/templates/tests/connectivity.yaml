@@ -165,8 +165,8 @@ spec:
   {{- end }}
   containers:
     - name: curl
-      image: curlimages/curl:8.9.1
-      imagePullPolicy: IfNotPresent
+      image: "{{ .Values.utilities.curl.repository }}:{{ .Values.utilities.curl.tag }}"
+      imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.curl.pullPolicy "root" .) }}
       command:
         - sh
         - -c
@@ -200,8 +200,8 @@ spec:
   {{- end }}
   containers:
     - name: curl
-      image: curlimages/curl:8.9.1
-      imagePullPolicy: IfNotPresent
+      image: "{{ .Values.utilities.curl.repository }}:{{ .Values.utilities.curl.tag }}"
+      imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.curl.pullPolicy "root" .) }}
       command:
         - sh
         - -c
