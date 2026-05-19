@@ -1,0 +1,106 @@
+name: Build and publish runtime-bundle image
+
+# Builds ghcr.io/edgy-solutions/openddil/runtime-bundle:latest from a
+# composed checkout of FOUR sibling openddil-* repos. This workflow
+# replaces the local `scripts/build-bundle.sh` for users who want
+# registry-driven builds.
+#
+# Triggers:
+#   * push to master of THIS repo (e.g. someone edits the Dockerfile)
+#   * manual workflow_dispatch (e.g. rebuild after openddil-contracts
+#     adds a new proto without anything in openddil-helm changing)
+#
+# Cross-repo "rebuild when any source changes" wiring is intentionally
+# left out — would require `repository_dispatch` triggers fired from
+# each source repo's own workflow, which adds a coordination layer we
+# don't need yet. Manual dispatch + push-to-helm covers the common
+# cases (Dockerfile edit, dependency bump, schema change).
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - "bundle/**"
+      - ".github/workflows/build-bundle.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Additional tag besides :latest (optional, e.g. v0.2.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      # Each repo gets checked out to a sibling path under $GITHUB_WORKSPACE
+      # so the Dockerfile's COPY openddil-contracts/... etc. work without
+      # any layout transformation. GITHUB_TOKEN suffices for public repos
+      # in the same org; if any of these go private, swap to a PAT secret
+      # (e.g. ${{ secrets.OPENDDIL_READ_PAT }}) with `token:` on each
+      # checkout step.
+      - name: Checkout openddil-helm (self)
+        uses: actions/checkout@v4
+        with:
+          path: openddil-helm
+
+      - name: Checkout openddil-contracts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-contracts
+          path: openddil-contracts
+
+      - name: Checkout openddil-stack
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-stack
+          path: openddil-stack
+
+      - name: Checkout openddil-tactical-agents
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-tactical-agents
+          path: openddil-tactical-agents
+
+      - name: Checkout openddil-demo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-demo
+          path: openddil-demo
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: always :latest. Additionally :<input.tag> if the workflow
+      # was triggered via workflow_dispatch with a tag specified.
+      - name: Compute tags
+        id: tags
+        run: |
+          T="ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle:latest"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            T="$T,ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle:${{ github.event.inputs.tag }}"
+          fi
+          echo "tags=$T" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push runtime-bundle
+        uses: docker/build-push-action@v5
+        with:
+          # Build context = workspace root (parent of all 5 checked-out
+          # repos). The Dockerfile's COPY paths (openddil-contracts/proto,
+          # openddil-stack/schema, etc.) resolve relative to this context.
+          context: .
+          file: openddil-helm/bundle/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # No build-args — the bundle image has none.
