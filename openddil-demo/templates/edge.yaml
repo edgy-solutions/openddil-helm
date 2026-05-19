@@ -1,0 +1,378 @@
+{{- /*
+   edge.yaml — per-edge services. Loops over .Values.edges to produce one
+   of each below per edge:
+     * sensor-ingest (DIS UDP ingestion, NodePort UDP service for external
+       simulator access)
+     * redpanda-connect (DIS Bronze → Silver mapper, ontology+proto-aware)
+     * faust-edge (per-asset processing, prognostics)
+     * edge-hq-bridge (Kafka MirrorMaker analogue: edge cluster → HQ cluster
+       via toxiproxy)
+     * projector (Kafka → Postgres projection for ElectricSQL consumers)
+*/}}
+{{- $root := . -}}
+{{- range .Values.edges }}
+{{- $edge := . }}
+{{- $edgeBroker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $edge.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
+{{- $hqBroker := printf "%s-redpanda-hq%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.redpandaHq.kafkaPort) }}
+
+# ===========================================================================
+# sensor-ingest-{{ $edge.id }} — DIS UDP ingestion
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-sensor-ingest-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: sensor-ingest
+          image: {{ include "openddil.image" (dict "name" $root.Values.sensorIngest.image.name "tag" $root.Values.sensorIngest.image.tag "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.sensorIngest.image.pullPolicy "root" $root) }}
+          command: ["python", "dis_ingestor.py"]
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ $edgeBroker | quote }}
+            - name: KAFKA_TOPIC
+              value: "ingress-dis-raw"
+            - name: OPENDDIL_EDGE_ID
+              value: {{ $edge.id | quote }}
+            - name: OPENDDIL_REGION_ID
+              value: {{ $edge.region | quote }}
+            - name: UDP_PORT
+              value: {{ $edge.udpPort | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app"
+          ports:
+            - name: dis-udp
+              protocol: UDP
+              containerPort: {{ $edge.udpPort }}
+            - name: http
+              containerPort: {{ $root.Values.sensorIngest.httpPort }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+          resources:
+            {{- toYaml $root.Values.sensorIngest.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# Service exposing the UDP port. ClusterIP by default (in-namespace
+# producers + kubectl port-forward). Set sensorIngest.externalAccess.
+# enabled=true if a producer OUTSIDE the cluster needs UDP into this
+# edge — that flips the type to NodePort and exposes udpPort on every
+# node. ClusterIP is correct for 443-only / no-NodePort clusters.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-sensor-ingest-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  type: {{ if $root.Values.sensorIngest.externalAccess.enabled }}NodePort{{ else }}ClusterIP{{ end }}
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 4 }}
+  ports:
+    - name: dis-udp
+      protocol: UDP
+      port: {{ $edge.udpPort }}
+      targetPort: dis-udp
+      {{- if $root.Values.sensorIngest.externalAccess.enabled }}
+      nodePort: {{ $edge.udpPort }}
+      {{- end }}
+    - name: http
+      protocol: TCP
+      port: {{ $root.Values.sensorIngest.httpPort }}
+      targetPort: http
+---
+# ===========================================================================
+# redpanda-connect-{{ $edge.id }} — DIS Bronze → Silver mapper
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-redpanda-connect-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Connect yaml hardcodes /proto (proto import path) and /ontology
+        # (sim-dis-mapping.yaml ontology file). Init container delivers
+        # those subtrees, plus the base connect.yaml and dynamic mappings.
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/ontology"   "dst" "ontology")
+            (dict "src" "demo/openddil-base-connect.yaml" "dst" "connect.yaml")
+            (dict "src" "demo/dynamic-mappings" "dst" "mappings")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: connect
+          image: "{{ $root.Values.redpandaConnect.image.repository }}:{{ $root.Values.redpandaConnect.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.redpandaConnect.image.pullPolicy "root" $root) }}
+          args: ["--chilled", "run", "-r", "/mappings/*.yaml", "/connect.yaml"]
+          env:
+            - name: REDPANDA_BROKER
+              value: {{ $edgeBroker | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $root.Values.redpandaConnect.httpPort }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: bundle-shared
+              mountPath: /connect.yaml
+              subPath: connect.yaml
+            - name: bundle-shared
+              mountPath: /mappings
+              subPath: mappings
+          resources:
+            {{- toYaml $root.Values.redpandaConnect.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# faust-edge-{{ $edge.id }} — per-asset processing + prognostics
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-faust-edge-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "faust-edge-%s" $edge.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "faust-edge-%s" $edge.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "faust-edge-%s" $edge.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
+            (dict "src" "contracts/gen/python/google"   "dst" "app-google")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: faust-edge
+          image: {{ include "openddil.image" (dict "name" $root.Values.faustEdge.image.name "tag" $root.Values.faustEdge.image.tag "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.faustEdge.image.pullPolicy "root" $root) }}
+          workingDir: /tmp
+          env:
+            - name: PYTHONPATH
+              value: "/app"
+            - name: FAUST_APP_ID
+              value: {{ printf "openddil-%s" $edge.id | quote }}
+            - name: KAFKA_BROKERS
+              value: {{ $edgeBroker | quote }}
+            - name: OPENDDIL_EDGE_ID
+              value: {{ $edge.id | quote }}
+            - name: OPENDDIL_REGION_ID
+              value: {{ $edge.region | quote }}
+            {{- range $k, $v := $root.Values.faustEdge.prognosticsEnv }}
+            - name: {{ printf "PROGNOSTICS_%s" $k | quote }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            # openddil/ and google/ proto packages are subPath-mounted into
+            # /app where the faust-edge image expects them (matches the
+            # docker-compose mount pattern at openddil-tactical-agents/edge/).
+            - name: bundle-shared
+              mountPath: /app/openddil
+              subPath: app-openddil
+            - name: bundle-shared
+              mountPath: /app/google
+              subPath: app-google
+          resources:
+            {{- toYaml $root.Values.faustEdge.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# edge-hq-bridge-{{ $edge.id }} — edge cluster → HQ cluster via toxiproxy
+# ===========================================================================
+# redpanda-connect-edge-NN.yaml is a per-edge bridge config. Bundle ships
+# each variant; we subPath-mount the right one based on $edge.id.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-edge-hq-bridge-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" (printf "demo/redpanda-connect-%s.yaml" $edge.id) "dst" "connect.yaml")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: bridge
+          image: "{{ $root.Values.edgeHqBridge.image.repository }}:{{ $root.Values.edgeHqBridge.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.edgeHqBridge.image.pullPolicy "root" $root) }}
+          args: ["--chilled", "run", "/connect.yaml"]
+          env:
+            # Edge-broker env so the connect config (which uses ${EDGE_BROKER}
+            # placeholders) can resolve at runtime. Mirror the docker-compose
+            # env binding pattern.
+            - name: EDGE_BROKER
+              value: {{ $edgeBroker | quote }}
+            - name: HQ_BROKER
+              # Bridge consumes from edge cluster, produces to redpanda-hq
+              # — but the produce path goes THROUGH toxiproxy. The hq broker
+              # advertises toxiproxy:8474, so the client's bootstrap address
+              # can still be the redpanda-hq Service (it'll be redirected to
+              # toxiproxy after the first metadata response). Keeping bootstrap
+              # = toxiproxy directly is simpler and matches docker-compose.
+              value: {{ printf "%s-toxiproxy%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.toxiproxy.apiPort) | quote }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /connect.yaml
+              subPath: connect.yaml
+          resources:
+            {{- toYaml $root.Values.edgeHqBridge.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# projector-{{ $edge.id }} — Kafka → Postgres projection
+# ===========================================================================
+# Subscribes to per-edge topics on the edge cluster, projects state into
+# postgres-hq. Per-edge projectors run alongside projector-hq (in hub.yaml)
+# so per-edge topics like telemetry-latest-state populate on every edge
+# while hq-only topics (regional rollups) populate from projector-hq.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-projector-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: projector
+          image: {{ include "openddil.image" (dict "name" $root.Values.projector.image.name "tag" $root.Values.projector.image.tag "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.projector.image.pullPolicy "root" $root) }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ $edgeBroker | quote }}
+            - name: POSTGRES_DSN
+              value: {{ printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
+                  $root.Values.postgresHq.auth.username
+                  $root.Values.postgresHq.auth.password
+                  $root.Release.Name
+                  (include "openddil.svcDomain" $root)
+                  (int $root.Values.postgresHq.port)
+                  $root.Values.postgresHq.auth.database
+                | quote }}
+            - name: METRICS_PORT
+              value: {{ $root.Values.projector.port | quote }}
+            - name: RATE_LIMIT_PER_SEC
+              value: "10"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+            - name: OPENDDIL_EDGE_ID
+              value: {{ $edge.id | quote }}
+            - name: OPENDDIL_REGION_ID
+              value: {{ $edge.region | quote }}
+            - name: BUFFER_MONITOR_ENABLED
+              value: "true"
+          ports:
+            - name: metrics
+              containerPort: {{ $root.Values.projector.port }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+          resources:
+            {{- toYaml $root.Values.projector.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+{{- end }}

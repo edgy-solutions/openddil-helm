@@ -94,11 +94,36 @@ ghcr.io` for write access to the org.
 
 ## Known smells / follow-ups
 
-- The published `hub-restate-projector` image bakes `hub_restate_projector.py`,
-  but docker-compose runs `restate_hub.py` via bind mount. Helm preserves
-  the docker-compose runtime behavior by mounting `restate_hub.py` from
-  the bundle. Long-term fix: decide which script is canonical and bake
-  the right one into the image in openddil-tactical-agents.
-- Customer overlay (sim-a feed) not yet ported — first-cut OSS only.
+- **Frontend electric URL is build-baked**. The published
+  `ghcr.io/edgy-solutions/openddil/frontend:latest` image bakes
+  `VITE_ELECTRIC_URL=http://localhost:5133/v1/shape` (Vite is a build-time
+  framework — no runtime env override). In-cluster the browser can't reach
+  `localhost:5133`, so the role views' live shapes will not load.
+
+  Fix requires a frontend image rebuild with EITHER:
+  1. `VITE_ELECTRIC_URL=/electric/v1/shape` (relative) + add a
+     `location /electric/ { proxy_pass http://electric-sync:5133; }`
+     block to `openddil-demo/frontend/nginx.conf`. Same-origin path, no
+     CORS issues, ingress already routes `/electric/` to `electric-sync`.
+  2. `VITE_ELECTRIC_URL=https://<your-ingress-host>/electric/v1/shape`
+     (absolute) — also relies on the same ingress route.
+
+  Until that rebuild + republish happens, the chart installs cleanly and
+  every backend container runs, but the role views won't show live data
+  in the browser.
+
+- **`hub-restate-projector` image divergence**: the published image bakes
+  `hub_restate_projector.py`, but docker-compose runs `restate_hub.py`
+  via bind mount. Helm preserves the docker-compose runtime behavior by
+  mounting `restate_hub.py` from the bundle. Long-term fix: decide which
+  script is canonical and bake the right one into the image in
+  `openddil-tactical-agents`.
+
+- **External DIS UDP ingress is opt-in**. `sensorIngest.externalAccess.
+  enabled=false` by default — services are ClusterIP, no NodePort. If an
+  external simulator needs to push UDP into the cluster, flip it on (and
+  widen `--service-node-port-range` if your defaults are 30000-32767 only).
+
+- **Customer overlay (sim-a feed) not yet ported** — first-cut OSS only.
   Pattern is identical (a second connect deployment + amqp producer);
   follow-up to layer in.

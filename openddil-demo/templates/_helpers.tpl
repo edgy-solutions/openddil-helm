@@ -47,19 +47,30 @@ Usage: include "openddil.pullPolicy" (dict "policy" .Values.frontend.image.pullP
 
 {{/*
 Bundle-image initContainer. Copies subtrees out of the runtime-bundle
-image into a shared emptyDir mounted at /shared in both this init and
-the main container that depends on it.
+image into a shared emptyDir, with explicit src→dst path mapping so
+hardcoded paths in connect yaml (/proto, /ontology) can be honored via
+subPath mounts in the main container.
 
 Usage:
   initContainers:
-    {{- include "openddil.bundleInit" (dict "paths" "contracts/proto contracts/ontology" "root" .) | nindent 8 }}
+    {{- include "openddil.bundleInit" (dict "paths" (list
+        (dict "src" "contracts/gen/python" "dst" "proto")
+        (dict "src" "contracts/ontology"   "dst" "ontology")
+      ) "root" .) | nindent 8 }}
   volumes:
     - name: bundle-shared
       emptyDir: {}
+  volumeMounts:               # in the main container
+    - name: bundle-shared
+      mountPath: /proto
+      subPath: proto
+    - name: bundle-shared
+      mountPath: /ontology
+      subPath: ontology
 
-`paths` is a space-separated list of paths under /bundle/ to copy into
-/shared (preserving the path prefix — `contracts/proto` becomes
-/shared/contracts/proto/).
+Each entry: src is the path under /bundle/ in the bundle image; dst is
+the top-level name under /shared/ in the emptyDir. Main container then
+subPath-mounts /shared/<dst> at the target absolute path.
 */}}
 {{- define "openddil.bundleInit" -}}
 - name: bundle-loader
@@ -70,11 +81,15 @@ Usage:
     - -c
     - |
       set -e
-      for p in {{ .paths }}; do
-        d="/shared/$(dirname "$p")"
-        mkdir -p "$d"
-        cp -r "/bundle/$p" "$d/"
-      done
+      {{- range .paths }}
+      # {{ .src }} -> /shared/{{ .dst }}
+      mkdir -p "$(dirname /shared/{{ .dst }})"
+      if [ -f "/bundle/{{ .src }}" ]; then
+        cp "/bundle/{{ .src }}" "/shared/{{ .dst }}"
+      else
+        cp -r "/bundle/{{ .src }}" "/shared/{{ .dst }}"
+      fi
+      {{- end }}
   volumeMounts:
     - name: bundle-shared
       mountPath: /shared

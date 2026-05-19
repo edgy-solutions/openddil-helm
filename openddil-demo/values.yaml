@@ -42,10 +42,11 @@ bundle:
 # embedded in service names, hostnames advertised to Kafka, and FAUST_APP_ID.
 # Region binding controls which faust-regional aggregator the edge feeds.
 edges:
+  # udpPort: container listen port. Same value (62040-62042) used as NodePort
+  # if sensorIngest.externalAccess.enabled=true. Hold for in-cluster-only
+  # clusters that ban NodePort (default: false, ClusterIP only).
   - id: edge-01
     region: region-east
-    # UDP port for DIS PDU ingest. Each edge gets a distinct port so an
-    # external simulator can route to the right cluster.
     udpPort: 62040
   - id: edge-02
     region: region-east
@@ -171,6 +172,15 @@ sensorIngest:
     requests: { cpu: 50m,  memory: 128Mi }
     limits:   { cpu: 250m, memory: 256Mi }
   httpPort: 8080
+  # If your DIS PDU producer (VR-Forces, test harness, etc.) lives OUTSIDE
+  # the cluster, set externalAccess.enabled=true to expose the UDP port via
+  # NodePort. The cluster's --service-node-port-range must include each
+  # edge's udpPort (default range is 30000-32767; defaults here are
+  # 62040-62042). For 443-only clusters where NodePort is banned, leave
+  # this off and run the producer as a pod in the same namespace, or use
+  # `kubectl exec` to inject test PDUs from inside.
+  externalAccess:
+    enabled: false
 
 redpandaConnect:
   image:
@@ -258,12 +268,23 @@ frontend:
   port: 80
 
 # --- Ingress ----------------------------------------------------------------
-# Frontend only. Other services are ClusterIP internal. Set host to your
-# actual hostname; tls leaves blank to skip cert-manager wiring.
+# Two routes on one host:
+#   /            -> frontend (nginx-served static SPA)
+#   /electric/   -> electric-sync:5133 (Electric SQL shape API)
+#
+# The /electric/ route is only useful AFTER the frontend image is rebuilt
+# with VITE_ELECTRIC_URL=/electric/v1/shape (or an absolute URL pointing
+# here). The PUBLISHED frontend image bakes localhost:5133, which won't
+# reach anything in-cluster. See README "Known smells / follow-ups."
 ingress:
   enabled: true
-  className: ""           # e.g. "nginx", leave blank to use cluster default
+  className: ""           # e.g. "nginx" / "traefik", leave blank for cluster default
   host: openddil.local
+  annotations: {}
+  # Common annotations for cert-manager + body-size lift for shape responses:
+  # annotations:
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "10m"
   tls: []
   # tls:
   #   - hosts: [openddil.example.com]

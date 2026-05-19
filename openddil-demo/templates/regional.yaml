@@ -1,0 +1,81 @@
+{{- /*
+   regional.yaml — one faust-regional Deployment per .Values.regions entry.
+   The REGIONAL_EDGES env is generated from the edges-by-region grouping
+   in values.yaml — each region gets a comma-separated list of its edges
+   as id=broker pairs, matching the docker-compose env format.
+*/}}
+{{- $root := . -}}
+{{- $hqBroker := printf "%s-redpanda-hq%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.redpandaHq.kafkaPort) }}
+{{- range .Values.regions }}
+{{- $region := . }}
+{{- $edgesInRegion := list }}
+{{- range $root.Values.edges }}
+{{- if eq .region $region.id }}
+{{- $edgesInRegion = append $edgesInRegion (printf "%s=%s-redpanda-%s%s:%d" .id $root.Release.Name .id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort)) }}
+{{- end }}
+{{- end }}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-faust-regional-{{ $region.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
+            (dict "src" "contracts/gen/python/google"   "dst" "app-google")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: faust-regional
+          image: {{ include "openddil.image" (dict "name" $root.Values.faustRegional.image.name "tag" $root.Values.faustRegional.image.tag "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.faustRegional.image.pullPolicy "root" $root) }}
+          workingDir: /tmp
+          env:
+            - name: PYTHONPATH
+              value: "/app"
+            - name: OPENDDIL_REGION_ID
+              value: {{ $region.id | quote }}
+            - name: REGIONAL_EDGES
+              # Comma-separated edge=broker pairs for THIS region only.
+              value: {{ join "," $edgesInRegion | quote }}
+            - name: REGIONAL_HQ_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: REGIONAL_FAN_IN_TOPIC
+              value: {{ printf "%s-fan-in" $region.id | quote }}
+            - name: REGIONAL_HEARTBEAT_INTERVAL_S
+              value: "30"
+            - name: REGIONAL_TOP_FACTORS_N
+              value: "10"
+            - name: LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app/openddil
+              subPath: app-openddil
+            - name: bundle-shared
+              mountPath: /app/google
+              subPath: app-google
+          resources:
+            {{- toYaml $root.Values.faustRegional.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+{{- end }}

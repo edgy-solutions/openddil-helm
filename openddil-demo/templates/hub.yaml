@@ -1,0 +1,624 @@
+{{- /*
+   hub.yaml — HQ-tier services that depend on infrastructure (postgres-hq,
+   redpanda-hq, toxiproxy) being up:
+     * electric-sync (ElectricSQL HTTP gateway over postgres-hq replication)
+     * restate-server (StatefulSet with PVC for /restate-data)
+     * restate-hub (consumer bridge — mounts restate_hub.py from bundle)
+     * cm-service + cm-service-bootstrap (post-install Job)
+     * logistics-fusion-service + logistics-fusion-bootstrap (post-install Job)
+     * projector-hq (HQ-cluster topic projection to postgres-hq)
+     * frontend (nginx-served static + /proxies/ proxy to toxiproxy)
+*/}}
+{{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
+{{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
+    .Values.postgresHq.auth.username
+    .Values.postgresHq.auth.password
+    .Release.Name
+    (include "openddil.svcDomain" .)
+    (int .Values.postgresHq.port)
+    .Values.postgresHq.auth.database }}
+{{- $pgDsnElectric := printf "postgresql://%s:%s@%s-postgres-hq%s:%d/%s"
+    .Values.postgresHq.auth.username
+    .Values.postgresHq.auth.password
+    .Release.Name
+    (include "openddil.svcDomain" .)
+    (int .Values.postgresHq.port)
+    .Values.postgresHq.auth.database }}
+{{- $cmEdgeClusters := list }}
+{{- range .Values.edges }}
+{{- $cmEdgeClusters = append $cmEdgeClusters (printf "%s=%s-redpanda-%s:%d" .id $.Release.Name .id (int $.Values.redpandaEdge.internalPort)) }}
+{{- end }}
+
+# ===========================================================================
+# electric-sync — ElectricSQL HTTP gateway
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-electric-sync
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: electric
+          image: "{{ .Values.electric.image.repository }}:{{ .Values.electric.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.electric.image.pullPolicy "root" .) }}
+          env:
+            - name: DATABASE_URL
+              value: {{ $pgDsnElectric | quote }}
+            - name: LOGICAL_PUBLISHER_HOST
+              value: {{ printf "%s-electric-sync%s" .Release.Name (include "openddil.svcDomain" .) | quote }}
+            - name: AUTH_JWT_ALG
+              value: "HS256"
+            - name: AUTH_JWT_KEY
+              value: "secret"
+            - name: ELECTRIC_INSECURE
+              value: "true"
+            # ElectricSQL bind port — explicit so it matches the Service.
+            - name: ELECTRIC_PORT
+              value: {{ .Values.electric.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.electric.port }}
+          resources:
+            {{- toYaml .Values.electric.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-electric-sync
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.electric.port }}
+      targetPort: http
+---
+# ===========================================================================
+# restate-server — StatefulSet with PVC for /restate-data
+# ===========================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-restate-server
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "restate-server" "root" .) | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-restate-server
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "restate-server" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "restate-server" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/restate-config.toml" "dst" "restate-config.toml")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: restate
+          image: "{{ .Values.restate.image.repository }}:{{ .Values.restate.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.restate.image.pullPolicy "root" .) }}
+          args: ["-c", "/config/restate-config.toml"]
+          ports:
+            - name: ingress
+              containerPort: {{ .Values.restate.ingressPort }}
+            - name: admin
+              containerPort: {{ .Values.restate.adminPort }}
+          volumeMounts:
+            - name: config
+              mountPath: /config/restate-config.toml
+              subPath: restate-config.toml
+            - name: data
+              mountPath: /restate-data
+          resources:
+            {{- toYaml .Values.restate.resources | nindent 12 }}
+      volumes:
+        - name: config
+          emptyDir: {}        # Populated by initContainer; mounted via subPath above
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.restateSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-restate-server
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "restate-server" "root" .) | nindent 4 }}
+  ports:
+    - name: ingress
+      port: {{ .Values.restate.ingressPort }}
+      targetPort: ingress
+    - name: admin
+      port: {{ .Values.restate.adminPort }}
+      targetPort: admin
+---
+# ===========================================================================
+# restate-hub — consumer bridge. NOTE: docker-compose mounts restate_hub.py
+# over /app/restate_hub.py because the published hub-restate-projector image
+# bakes hub_restate_projector.py, not restate_hub.py. We do the same.
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-restate-hub
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "restate-hub" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "restate-hub" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "restate-hub" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "agents/hub/restate_hub.py" "dst" "restate_hub.py")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: restate-hub
+          image: {{ include "openddil.image" (dict "name" .Values.restateHub.image.name "tag" .Values.restateHub.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.restateHub.image.pullPolicy "root" .) }}
+          command: ["/opt/venv/bin/python", "/app/restate_hub.py"]
+          env:
+            - name: DB_PATH
+              value: "/tmp/edge_state.db"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app/restate_hub.py
+              subPath: restate_hub.py
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# cm-service — Configuration Management on Restate
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-cm-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/baselines"  "dst" "baselines")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: cm-service
+          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
+          env:
+            - name: CM_BASELINES_DIR
+              value: "/baselines"
+            - name: CM_KAFKA_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: CM_HTTP_PORT
+              value: {{ .Values.cmService.port | quote }}
+            - name: CM_STALENESS_WINDOW_S
+              value: "900"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+          ports:
+            - name: http
+              containerPort: {{ .Values.cmService.port }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /baselines
+              subPath: baselines
+          resources:
+            {{- toYaml .Values.cmService.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-cm-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.cmService.port }}
+      targetPort: http
+---
+# cm-service-bootstrap — Job: registers CM service with Restate + creates
+# subscriptions per edge cluster. Helm hook, fires after CM service is up.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-cm-service-bootstrap
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "cm-service-bootstrap" "root" .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/bootstrap" "dst" "openddil_bootstrap")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
+          command: ["python", "/app/bootstrap/register_subscriptions.py"]
+          env:
+            - name: RESTATE_ADMIN_URL
+              value: {{ printf "http://%s-restate-server%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.restate.adminPort) | quote }}
+            - name: CM_SERVICE_ENDPOINT
+              value: {{ printf "http://%s-cm-service%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.cmService.port) | quote }}
+            - name: CM_EDGE_CLUSTERS
+              value: {{ join "," $cmEdgeClusters | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/app"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app/openddil_bootstrap
+              subPath: openddil_bootstrap
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# logistics-fusion-service
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-logistics-fusion-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/ontology"   "dst" "ontology")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: logistics-fusion
+          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.logisticsFusion.image.pullPolicy "root" .) }}
+          env:
+            - name: FUSION_KAFKA_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: FUSION_HTTP_PORT
+              value: {{ .Values.logisticsFusion.port | quote }}
+            - name: EMIT_INTERVAL_SECONDS
+              value: "30"
+            - name: STALE_INPUT_SECONDS
+              value: "300"
+            - name: ONTOLOGY_DIR
+              value: "/ontology"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+          ports:
+            - name: http
+              containerPort: {{ .Values.logisticsFusion.port }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+          resources:
+            {{- toYaml .Values.logisticsFusion.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-logistics-fusion-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.logisticsFusion.port }}
+      targetPort: http
+---
+# logistics-fusion-bootstrap — Job, hooks at weight 21 (after CM bootstrap)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-logistics-fusion-bootstrap
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "21"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-bootstrap" "root" .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/bootstrap" "dst" "openddil_bootstrap")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.logisticsFusion.image.pullPolicy "root" .) }}
+          command: ["python", "/app/bootstrap/register_subscriptions.py"]
+          env:
+            - name: RESTATE_ADMIN_URL
+              value: {{ printf "http://%s-restate-server%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.restate.adminPort) | quote }}
+            - name: FUSION_SERVICE_ENDPOINT
+              value: {{ printf "http://%s-logistics-fusion-service%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.logisticsFusion.port) | quote }}
+            - name: FUSION_EDGE_CLUSTERS
+              value: {{ join "," $cmEdgeClusters | quote }}
+            - name: FUSION_HQ_CLUSTER
+              value: {{ $hqBroker | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/app"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app/openddil_bootstrap
+              subPath: openddil_bootstrap
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# projector-hq — HQ-cluster topic projection to postgres-hq
+# ===========================================================================
+# Same image as per-edge projector; different broker (hq), different
+# edge/region labels (unspecified), buffer monitor off.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-projector-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: projector
+          image: {{ include "openddil.image" (dict "name" .Values.projector.image.name "tag" .Values.projector.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.projector.image.pullPolicy "root" .) }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.projector.port | quote }}
+            - name: RATE_LIMIT_PER_SEC
+              value: "10"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+            - name: OPENDDIL_EDGE_ID
+              value: "edge-unspecified"
+            - name: OPENDDIL_REGION_ID
+              value: "region-unspecified"
+            - name: BUFFER_MONITOR_ENABLED
+              value: "false"
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.projector.port }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+          resources:
+            {{- toYaml .Values.projector.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+# ===========================================================================
+# frontend
+# ===========================================================================
+# The frontend nginx hardcodes `toxiproxy` as the proxy upstream hostname.
+# In k8s we satisfy that by adding a SECOND Service named exactly `toxiproxy`
+# (no Release.Name prefix) that selects the same toxiproxy pod. See below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-frontend
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "openddil.image" (dict "name" .Values.frontend.image.name "tag" .Values.frontend.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.frontend.image.pullPolicy "root" .) }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.frontend.port }}
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-frontend
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.frontend.port }}
+      targetPort: http
+---
+# Alias service so frontend nginx's hardcoded `toxiproxy:8475` resolves.
+# This is intentionally unprefixed (not {{ .Release.Name }}-toxiproxy) —
+# it's a fixed hostname the frontend image expects. One chart install per
+# namespace, so the unqualified name is safe.
+apiVersion: v1
+kind: Service
+metadata:
+  name: toxiproxy
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    openddil.io/alias: "true"
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.toxiproxy.apiPort }}
+      targetPort: api
+    - name: proxy
+      port: {{ .Values.toxiproxy.proxyPort }}
+      targetPort: proxy
