@@ -1,0 +1,223 @@
+{{- /*
+   connectivity.yaml — `helm test` smoke pods. Run after install with:
+     helm test <release> -n <namespace>
+
+   Each pod is a Helm test hook (`helm.sh/hook: test`). They run in
+   parallel; each focuses on ONE service's reachability + minimal
+   health signal. Failures point at the right component without
+   needing to read pod logs across the full stack.
+
+   These are smoke tests — they verify "pod-to-pod networking works
+   AND the target answered a health check," not "the pipeline produces
+   correct data end-to-end." For pipeline correctness, see the
+   tests/hero_scenario_v3/ suite in openddil-demo.
+*/}}
+
+# ---------------------------------------------------------------------------
+# test-redpanda-hq — verifies the HQ broker is reachable and healthy
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-redpanda-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "test-redpanda-hq" "root" .) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: rpk
+      image: "{{ .Values.redpandaHq.image.repository }}:{{ .Values.redpandaHq.image.tag }}"
+      imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaHq.image.pullPolicy "root" .) }}
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          B="{{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }}"
+          echo "rpk cluster health against $B"
+          rpk -X brokers=$B cluster health --exit-when-healthy
+          echo "rpk topic list against $B"
+          rpk -X brokers=$B topic list | head -20
+---
+# ---------------------------------------------------------------------------
+# test-redpanda-edges — verifies every edge broker is reachable
+# ---------------------------------------------------------------------------
+{{- range .Values.edges }}
+{{- $edge := . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $.Release.Name }}-test-redpanda-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $ | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "test-redpanda-%s" $edge.id) "root" $) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with $.Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: rpk
+      image: "{{ $.Values.redpandaEdge.image.repository }}:{{ $.Values.redpandaEdge.image.tag }}"
+      imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $.Values.redpandaEdge.image.pullPolicy "root" $) }}
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          B="{{ $.Release.Name }}-redpanda-{{ $edge.id }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }}"
+          echo "rpk cluster health against $B"
+          rpk -X brokers=$B cluster health --exit-when-healthy
+          # Verify topic-init Job created the expected topics on this edge.
+          for t in raw-sensor-stream ingress-dis-raw asset-cm-state; do
+            rpk -X brokers=$B topic describe $t > /dev/null \
+              || { echo "MISSING TOPIC $t on $B" >&2; exit 1; }
+          done
+          echo "topics confirmed on $B"
+---
+{{- end }}
+# ---------------------------------------------------------------------------
+# test-postgres-hq — verifies postgres + schema-init Job created tables
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-postgres-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "test-postgres-hq" "root" .) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: psql
+      image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+      imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+      env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-postgres-hq
+              key: POSTGRES_PASSWORD
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          H="{{ .Release.Name }}-postgres-hq{{ include "openddil.svcDomain" . }}"
+          U="{{ .Values.postgresHq.auth.username }}"
+          D="{{ .Values.postgresHq.auth.database }}"
+          echo "pg_isready against $H"
+          pg_isready -h $H -U $U -d $D
+          # Verify schema-init Job actually applied migrations — at least
+          # one openddil-owned table must exist. asset_cm_state is created
+          # by the Phase 4a migration (oldest one in the dir).
+          echo "checking asset_cm_state table exists"
+          psql -h $H -U $U -d $D -tAc \
+            "SELECT 1 FROM information_schema.tables WHERE table_name='asset_cm_state'" \
+            | grep -q 1 \
+            || { echo "asset_cm_state table missing — schema-init Job likely failed" >&2; exit 1; }
+          echo "asset_cm_state table present"
+          # Verify Electric publication exists.
+          echo "checking electric publication"
+          psql -h $H -U $U -d $D -tAc \
+            "SELECT 1 FROM pg_publication WHERE pubname='electric_publication_default'" \
+            | grep -q 1 \
+            || { echo "electric_publication_default missing — electric-publish step likely failed" >&2; exit 1; }
+          echo "electric publication present"
+---
+# ---------------------------------------------------------------------------
+# test-electric-sync — verifies ElectricSQL HTTP gateway answers /v1/health
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-electric-sync
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "test-electric-sync" "root" .) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: curl
+      image: curlimages/curl:8.9.1
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          U="http://{{ .Release.Name }}-electric-sync{{ include "openddil.svcDomain" . }}:{{ .Values.electric.port }}/v1/health"
+          echo "GET $U"
+          # -fsS: fail on >=400, silent progress, show errors
+          curl -fsS --max-time 30 $U
+          echo
+          echo "electric-sync /v1/health OK"
+---
+# ---------------------------------------------------------------------------
+# test-frontend — verifies the nginx serves the SPA + /electric/ proxy works
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-frontend
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "test-frontend" "root" .) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: curl
+      image: curlimages/curl:8.9.1
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          F="http://{{ .Release.Name }}-frontend{{ include "openddil.svcDomain" . }}:{{ .Values.frontend.port }}"
+          echo "GET $F/"
+          curl -fsS --max-time 10 $F/ | head -1 | grep -qi "<!doctype html" \
+            || { echo "frontend / did not return HTML" >&2; exit 1; }
+          echo "frontend SPA OK"
+          # The /electric/ proxy must reach electric-sync via the unprefixed
+          # alias Service (electric-sync). 404 on /electric/ itself is fine
+          # — that path doesn't exist; we just need the proxy to reach
+          # upstream and get a response that isn't a 502. /electric/v1/health
+          # routes through the rewrite and reaches /v1/health upstream.
+          echo "GET $F/electric/v1/health (through nginx proxy_pass)"
+          curl -fsS --max-time 30 $F/electric/v1/health
+          echo
+          echo "frontend /electric/ proxy OK"
