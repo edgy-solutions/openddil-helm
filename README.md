@@ -31,11 +31,27 @@ openddil-helm/
 - Pull access to `ghcr.io/edgy-solutions/openddil/*` (public, or via
   imagePullSecret if pulling from a mirror)
 
+## Image-build flow (where do the images come from?)
+
+Every per-service image (`frontend`, `cm-service`, `logistics-fusion-
+service`, `projector`, `sensor-ingest`, `faust-edge`, `faust-regional`,
+`hub-restate-projector`) is built and published to ghcr.io by a GitHub
+Actions workflow living in **its own service repo** — typically
+`.github/workflows/docker-build.yml`, triggered on push to `master`.
+The helm chart pulls those images by tag (`global.imageTag`, default
+`latest`). You don't build them locally — push the service repo to
+GitHub and GHA does it.
+
+The ONE exception is `runtime-bundle` — see below. It's a multi-repo
+image with no GHA workflow yet.
+
 ## One-time: build and publish the runtime bundle image
 
 The bundle image bakes content from four sibling OSS repos that
 docker-compose bind-mounts. It needs to be built once per content change
-and published to a registry the cluster can pull from.
+and published to a registry the cluster can pull from. There's no GHA
+workflow for it yet (it'd need a multi-repo checkout), so for now it's
+a local build.
 
 Layout the build context expects (siblings under one parent):
 ```
@@ -94,24 +110,6 @@ ghcr.io` for write access to the org.
 
 ## Known smells / follow-ups
 
-- **Frontend electric URL is build-baked**. The published
-  `ghcr.io/edgy-solutions/openddil/frontend:latest` image bakes
-  `VITE_ELECTRIC_URL=http://localhost:5133/v1/shape` (Vite is a build-time
-  framework — no runtime env override). In-cluster the browser can't reach
-  `localhost:5133`, so the role views' live shapes will not load.
-
-  Fix requires a frontend image rebuild with EITHER:
-  1. `VITE_ELECTRIC_URL=/electric/v1/shape` (relative) + add a
-     `location /electric/ { proxy_pass http://electric-sync:5133; }`
-     block to `openddil-demo/frontend/nginx.conf`. Same-origin path, no
-     CORS issues, ingress already routes `/electric/` to `electric-sync`.
-  2. `VITE_ELECTRIC_URL=https://<your-ingress-host>/electric/v1/shape`
-     (absolute) — also relies on the same ingress route.
-
-  Until that rebuild + republish happens, the chart installs cleanly and
-  every backend container runs, but the role views won't show live data
-  in the browser.
-
 - **`hub-restate-projector` image divergence**: the published image bakes
   `hub_restate_projector.py`, but docker-compose runs `restate_hub.py`
   via bind mount. Helm preserves the docker-compose runtime behavior by
@@ -127,3 +125,11 @@ ghcr.io` for write access to the org.
 - **Customer overlay (sim-a feed) not yet ported** — first-cut OSS only.
   Pattern is identical (a second connect deployment + amqp producer);
   follow-up to layer in.
+
+- **No GHA workflow for the runtime-bundle image yet**. Building it
+  requires checking out four sibling repos (openddil-contracts,
+  openddil-stack, openddil-tactical-agents, openddil-demo) side-by-side
+  in the build context, which is more than a single `actions/checkout`
+  step. Doable (multiple `actions/checkout@v4` with `repository:` and
+  `path:`), just not yet written. Until then, the bundle image is a
+  local build via `scripts/build-bundle.sh`.
