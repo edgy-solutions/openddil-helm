@@ -1,0 +1,499 @@
+{{- /*
+   infrastructure.yaml — stateful primitives the rest of the chart depends on:
+     * One redpanda-edge StatefulSet + Service per entry in .Values.edges
+     * One redpanda-hq StatefulSet + Service (advertises via toxiproxy)
+     * Postgres-HQ StatefulSet + Service
+     * Toxiproxy Deployment + Service + ConfigMap (DDIL sever mechanism)
+     * topic-init Job (post-install hook) — creates the 17 Kafka topics on
+       all four clusters
+*/}}
+
+# =============================================================================
+# Toxiproxy — DDIL sever mechanism
+# =============================================================================
+# Mediates produce traffic from edge-hq-bridge to redpanda-hq. Disabling the
+# hq-link proxy via toxiproxy's HTTP API severs the link for real (TCP socket
+# is closed, in-flight produces fail, consumer-group lag at the bridge climbs).
+# The frontend's WAN-link toggle hits /proxies/hq-link.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-toxiproxy-config
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  # Templated: upstream points at the k8s redpanda-hq service.
+  toxiproxy.json: |
+    [
+      {
+        "name": "hq-link",
+        "listen": "0.0.0.0:{{ .Values.toxiproxy.apiPort }}",
+        "upstream": "{{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }}",
+        "enabled": true
+      }
+    ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-toxiproxy
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: toxiproxy
+          image: "{{ .Values.toxiproxy.image.repository }}:{{ .Values.toxiproxy.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.toxiproxy.image.pullPolicy "root" .) }}
+          args:
+            - "-host=0.0.0.0"
+            - "-config=/etc/toxiproxy.json"
+          ports:
+            - name: api
+              containerPort: {{ .Values.toxiproxy.apiPort }}
+            - name: proxy
+              containerPort: {{ .Values.toxiproxy.proxyPort }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/toxiproxy.json
+              subPath: toxiproxy.json
+          resources:
+            {{- toYaml .Values.toxiproxy.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-toxiproxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-toxiproxy
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.toxiproxy.apiPort }}
+      targetPort: api
+    - name: proxy
+      port: {{ .Values.toxiproxy.proxyPort }}
+      targetPort: proxy
+---
+# =============================================================================
+# Redpanda — one single-broker StatefulSet per edge cluster
+# =============================================================================
+# Each edge is its own Kafka cluster (ADR-0023 Phase 6a), not partitions of a
+# shared one. Single broker is fine for the demo; scale via NumReplicas on
+# the StatefulSet would require multi-broker redpanda config.
+{{- range .Values.edges }}
+{{- $edge := . }}
+{{- $name := printf "%s-redpanda-%s" $.Release.Name $edge.id }}
+{{- $component := printf "redpanda-%s" $edge.id }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openddil.labels" $ | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" $component "root" $) | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" $component "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $ | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" $component "root" $) | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redpanda
+          image: "{{ $.Values.redpandaEdge.image.repository }}:{{ $.Values.redpandaEdge.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $.Values.redpandaEdge.image.pullPolicy "root" $) }}
+          command:
+            - redpanda
+            - start
+            - --smp
+            - "1"
+            - --reserve-memory
+            - "0M"
+            - --overprovisioned
+            - --node-id
+            - "0"
+            - --kafka-addr
+            - PLAINTEXT://0.0.0.0:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://0.0.0.0:{{ $.Values.redpandaEdge.outsidePort }}
+            - --advertise-kafka-addr
+            # In-cluster clients hit the Service DNS; OUTSIDE listener kept for
+            # kubectl port-forward debugging (advertise localhost so the
+            # forwarded client can resolve).
+            - PLAINTEXT://{{ $name }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://localhost:{{ $.Values.redpandaEdge.outsidePort }}
+          ports:
+            - name: kafka
+              containerPort: {{ $.Values.redpandaEdge.internalPort }}
+            - name: outside
+              containerPort: {{ $.Values.redpandaEdge.outsidePort }}
+            - name: admin
+              containerPort: {{ $.Values.redpandaEdge.adminPort }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+          readinessProbe:
+            exec:
+              command:
+                - rpk
+                - cluster
+                - health
+                - --exit-when-healthy
+                - -X
+                - brokers=localhost:{{ $.Values.redpandaEdge.internalPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml $.Values.redpandaEdge.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $.Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $.Values.persistence.redpandaSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openddil.labels" $ | nindent 4 }}
+spec:
+  # ClusterIP for in-cluster Kafka access. Headless variant not needed —
+  # single replica per cluster, no stable per-pod hostnames required.
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" $component "root" $) | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ $.Values.redpandaEdge.internalPort }}
+      targetPort: kafka
+    - name: admin
+      port: {{ $.Values.redpandaEdge.adminPort }}
+      targetPort: admin
+---
+{{- end }}
+# =============================================================================
+# Redpanda-HQ — advertises via toxiproxy
+# =============================================================================
+# PLAINTEXT listener ADVERTISES toxiproxy's address (not the broker's own)
+# so the edge-hq-bridge's Kafka client is actually mediated by toxiproxy.
+# Without this, the bridge bootstraps through toxiproxy then jumps directly
+# to the broker, and DDIL sever never severs anything.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-redpanda-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-redpanda-hq
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redpanda
+          image: "{{ .Values.redpandaHq.image.repository }}:{{ .Values.redpandaHq.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaHq.image.pullPolicy "root" .) }}
+          command:
+            - redpanda
+            - start
+            - --smp
+            - "1"
+            - --reserve-memory
+            - "0M"
+            - --overprovisioned
+            - --node-id
+            - "0"
+            - --kafka-addr
+            - PLAINTEXT://0.0.0.0:{{ .Values.redpandaHq.kafkaPort }},OUTSIDE://0.0.0.0:{{ .Values.redpandaHq.outsidePort }}
+            - --advertise-kafka-addr
+            # PLAINTEXT advertises TOXIPROXY (load-bearing — see docker-compose
+            # comment + ADR for rationale). OUTSIDE for kubectl port-forward.
+            - PLAINTEXT://{{ .Release.Name }}-toxiproxy{{ include "openddil.svcDomain" . }}:{{ .Values.toxiproxy.apiPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}
+          ports:
+            - name: kafka
+              containerPort: {{ .Values.redpandaHq.kafkaPort }}
+            - name: outside
+              containerPort: {{ .Values.redpandaHq.outsidePort }}
+            - name: admin
+              containerPort: {{ .Values.redpandaHq.adminPort }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+          readinessProbe:
+            exec:
+              command:
+                - rpk
+                - cluster
+                - health
+                - --exit-when-healthy
+                - -X
+                - brokers=localhost:{{ .Values.redpandaHq.kafkaPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.redpandaHq.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.redpandaSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redpanda-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ .Values.redpandaHq.kafkaPort }}
+      targetPort: kafka
+    - name: admin
+      port: {{ .Values.redpandaHq.adminPort }}
+      targetPort: admin
+---
+# =============================================================================
+# Postgres-HQ — single-replica StatefulSet, ElectricSQL needs wal_level=logical
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-postgres-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  POSTGRES_USER:     {{ .Values.postgresHq.auth.username | quote }}
+  POSTGRES_PASSWORD: {{ .Values.postgresHq.auth.password | quote }}
+  POSTGRES_DB:       {{ .Values.postgresHq.auth.database | quote }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-postgres-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "postgres-hq" "root" .) | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-postgres-hq
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "postgres-hq" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "postgres-hq" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+          # wal_level=logical required for ElectricSQL publication.
+          args: ["postgres", "-c", "wal_level=logical"]
+          envFrom:
+            - secretRef:
+                name: {{ .Release.Name }}-postgres-hq
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.postgresHq.port }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgresHq.auth.username | quote }}
+                - -d
+                - {{ .Values.postgresHq.auth.database | quote }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgresHq.auth.username | quote }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.postgresHq.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.postgresSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "postgres-hq" "root" .) | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.postgresHq.port }}
+      targetPort: postgres
+---
+# =============================================================================
+# Topic-init Job — creates all Kafka topics on every cluster
+# =============================================================================
+# Runs as a post-install/post-upgrade Helm hook so it fires AFTER the
+# StatefulSets are scheduled but creates topics idempotently (rpk topic
+# create returns nonzero if topic exists — the || true swallows it).
+{{- $topicInitBrokers := list }}
+{{- range .Values.edges }}
+{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-%s:%d" $.Release.Name .id (int $.Values.redpandaEdge.internalPort)) }}
+{{- end }}
+{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-hq:%d" .Release.Name (int .Values.redpandaHq.kafkaPort)) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-topic-init
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "topic-init" "root" .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rpk
+          image: "{{ .Values.redpandaEdge.image.repository }}:{{ .Values.redpandaEdge.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaEdge.image.pullPolicy "root" .) }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Wait for each broker before issuing topic-create. Helm hook
+              # ordering kicks the job after install but StatefulSet pods may
+              # still be warming. Each rpk subshell will retry until the broker
+              # is reachable.
+              for B in {{ range $topicInitBrokers }}{{ . }} {{ end }}; do
+                echo "Waiting for $B..."
+                until rpk cluster health -X brokers=$B --exit-when-healthy 2>/dev/null; do
+                  sleep 3
+                done
+                echo "INFO: Initializing topics on $B"
+                for spec in \
+                  "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000" \
+                  "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
+                  "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
+                  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+                  "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                  "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                  "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000" \
+                  "ingress-dis-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+                  "ingress-proprietary-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+                  "ingress-sim-a-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+                  "asset-telemetry-windows|-p 8 -r 1 -c retention.ms=86400000 -c cleanup.policy=delete" \
+                  "asset-logistics-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                  "derived-sustainment|-p 1 -r 1 -c retention.ms=86400000" \
+                  "region-fleet-summary|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                  "region-top-factors|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                  "region-wear-trends|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+                ; do
+                  topic="${spec%%|*}"
+                  args="${spec##*|}"
+                  rpk -X brokers=$B topic create $topic $args || true
+                done
+                echo "INFO: Topics initialized on $B"
+              done

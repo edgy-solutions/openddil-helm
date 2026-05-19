@@ -1,0 +1,270 @@
+# =============================================================================
+# OpenDDIL Demo — Helm values
+# =============================================================================
+# Mirrors the docker-compose topology: 3 edge clusters (each with its own
+# redpanda broker, DIS sensor-ingest, redpanda-connect, faust-edge,
+# projector, edge-hq-bridge), 2 regional faust aggregators, and an HQ
+# tier (postgres-hq, electric-sync, restate-server, restate-hub,
+# projector-hq, cm-service, logistics-fusion, frontend, toxiproxy).
+#
+# To shrink to a smaller footprint, drop entries from `edges:` and
+# `regions:` below — the templates loop over these lists.
+# =============================================================================
+
+# --- Global -----------------------------------------------------------------
+global:
+  imageRegistry: ghcr.io
+  imagePrefix: edgy-solutions/openddil
+  imagePullPolicy: IfNotPresent
+  # Suffix for internal k8s service resolution (e.g., .default.svc.cluster.local).
+  # Leave empty for in-namespace resolution.
+  clusterDomain: ""
+  imagePullSecrets: []
+  # Bake-time tag for ALL openddil-owned images (frontend, cm-service,
+  # logistics-fusion, faust-edge, faust-regional, sensor-ingest, projector,
+  # hub-restate-projector, runtime-bundle). Overridable per-service below.
+  imageTag: "latest"
+
+# --- Runtime bundle image ---------------------------------------------------
+# Built from ../bundle/Dockerfile. Bakes openddil-contracts/, openddil-stack/,
+# openddil-tactical-agents/hub/restate_hub.py, and openddil-demo/ configs
+# into a single image. Init containers in every consumer pod copy the
+# subtree they need out of /bundle/* into a shared emptyDir volume.
+bundle:
+  image:
+    name: runtime-bundle
+    tag: ""               # Empty -> falls back to global.imageTag
+    pullPolicy: ""        # Empty -> falls back to global.imagePullPolicy
+
+# --- Topology ---------------------------------------------------------------
+# Each edge gets its own redpanda broker StatefulSet + sensor-ingest +
+# redpanda-connect + faust-edge + projector + edge-hq-bridge. The id is
+# embedded in service names, hostnames advertised to Kafka, and FAUST_APP_ID.
+# Region binding controls which faust-regional aggregator the edge feeds.
+edges:
+  - id: edge-01
+    region: region-east
+    # UDP port for DIS PDU ingest. Each edge gets a distinct port so an
+    # external simulator can route to the right cluster.
+    udpPort: 62040
+  - id: edge-02
+    region: region-east
+    udpPort: 62041
+  - id: edge-03
+    region: region-west
+    udpPort: 62042
+
+regions:
+  - id: region-east
+  - id: region-west
+
+# --- Persistence ------------------------------------------------------------
+# Default storageClass empty -> uses the cluster's default. Override per
+# component below if a faster class is wanted for Postgres or slower for
+# Redpanda etc.
+persistence:
+  storageClass: ""
+  redpandaSize: 10Gi
+  postgresSize: 20Gi
+  restateSize: 5Gi
+
+# --- Redpanda (per-edge) ----------------------------------------------------
+redpandaEdge:
+  image:
+    repository: docker.redpanda.com/redpandadata/redpanda
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  # Kafka listener on 9092, OUTSIDE listener (host-debug) on 9093.
+  internalPort: 9092
+  outsidePort: 9093
+  adminPort: 9644
+
+# --- Redpanda HQ (single broker, advertises via toxiproxy) ------------------
+# The OUTSIDE/PLAINTEXT split here is load-bearing: edge-hq-bridge connects
+# via toxiproxy:8474 (the only way DDIL sever is real), so PLAINTEXT must
+# advertise toxiproxy. The OUTSIDE listener is for debug / kubectl-port-forward.
+redpandaHq:
+  image:
+    repository: docker.redpanda.com/redpandadata/redpanda
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  kafkaPort: 19092
+  outsidePort: 19093
+  adminPort: 19644
+
+# --- Postgres HQ ------------------------------------------------------------
+postgresHq:
+  image:
+    repository: postgres
+    tag: "15"
+    pullPolicy: IfNotPresent
+  auth:
+    username: postgres
+    password: password
+    database: openddil
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 1Gi }
+  port: 5432
+
+# --- Toxiproxy --------------------------------------------------------------
+# DDIL sever mechanism. Mediates produce traffic from edge-hq-bridge to
+# redpanda-hq. Disabling the proxy severs the link; re-enabling it
+# restores buffered traffic.
+toxiproxy:
+  image:
+    repository: ghcr.io/shopify/toxiproxy
+    tag: "2.9.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 200m, memory: 256Mi }
+  apiPort: 8474
+  proxyPort: 8475
+
+# --- Electric SQL -----------------------------------------------------------
+electric:
+  image:
+    repository: electricsql/electric
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  port: 5133
+
+# --- Restate (server + hub projector) ---------------------------------------
+restate:
+  image:
+    repository: docker.io/restatedev/restate
+    tag: "1.1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+  ingressPort: 8080
+  adminPort: 9070
+
+restateHub:
+  image:
+    # Note: published image's Dockerfile copies hub_restate_projector.py;
+    # docker-compose runs restate_hub.py via bind-mount. We restore the
+    # compose behavior by mounting restate_hub.py from the bundle image
+    # over /app/restate_hub.py. See openddil-tactical-agents/hub/.
+    name: hub-restate-projector
+    tag: ""
+    pullPolicy: ""
+
+# --- Per-edge services ------------------------------------------------------
+sensorIngest:
+  image:
+    name: sensor-ingest
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 50m,  memory: 128Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+  httpPort: 8080
+
+redpandaConnect:
+  image:
+    repository: docker.redpanda.com/redpandadata/connect
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  httpPort: 4196
+
+faustEdge:
+  image:
+    name: faust-edge
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  # Demo-visibility overrides (see docker-compose.override.yml for rationale).
+  prognosticsEnv:
+    TRACK_LIFE_TOTAL_KM:     "10"
+    ENGINE_LIFE_TOTAL_HOURS: "1"
+    TERRAIN_TOTAL_DEG_KM:    "50"
+    BARREL_LIFE_TOTAL_ROUNDS: "100"
+
+projector:
+  image:
+    name: projector
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  port: 8084
+
+edgeHqBridge:
+  image:
+    repository: docker.redpanda.com/redpandadata/connect
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# --- Per-region service -----------------------------------------------------
+faustRegional:
+  image:
+    name: faust-regional
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# --- HQ services ------------------------------------------------------------
+cmService:
+  image:
+    name: cm-service
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  port: 9080
+
+logisticsFusion:
+  image:
+    name: logistics-fusion-service
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  port: 9081
+
+frontend:
+  image:
+    name: frontend
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 200m, memory: 256Mi }
+  port: 80
+
+# --- Ingress ----------------------------------------------------------------
+# Frontend only. Other services are ClusterIP internal. Set host to your
+# actual hostname; tls leaves blank to skip cert-manager wiring.
+ingress:
+  enabled: true
+  className: ""           # e.g. "nginx", leave blank to use cluster default
+  host: openddil.local
+  tls: []
+  # tls:
+  #   - hosts: [openddil.example.com]
+  #     secretName: openddil-tls

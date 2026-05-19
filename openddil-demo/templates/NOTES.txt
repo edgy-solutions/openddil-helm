@@ -1,0 +1,39 @@
+
+OpenDDIL Demo — released as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Topology:
+  Edges:    {{ range .Values.edges }}{{ .id }}({{ .region }}) {{ end }}
+  Regions:  {{ range .Values.regions }}{{ .id }} {{ end }}
+
+Quick sanity (pods reaching Running):
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Verify a sensor-ingest is producing to its edge cluster:
+  kubectl -n {{ .Release.Namespace }} exec -it sts/{{ .Release.Name }}-redpanda-edge-01 -- \
+    rpk topic consume raw-sensor-stream -n 1 --offset end -X brokers=localhost:9092
+
+{{- if .Values.ingress.enabled }}
+
+Frontend:
+  http://{{ .Values.ingress.host }}/
+
+  (Add an entry to /etc/hosts pointing {{ .Values.ingress.host }} at your
+  ingress controller's external IP if you haven't set DNS yet.)
+
+{{- else }}
+
+Frontend (port-forward):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-frontend 3017:80
+  open http://localhost:3017
+
+{{- end }}
+
+DDIL sever (toxiproxy):
+  The frontend's WAN-link toggle hits /proxies/hq-link which is proxied
+  through the frontend nginx to the toxiproxy daemon. Disabling the proxy
+  severs the edge-hq-bridge → redpanda-hq link for real (not simulated).
+
+Tear down:
+  helm -n {{ .Release.Namespace }} uninstall {{ .Release.Name }}
+  # PVCs for postgres / redpanda persist by default — delete by hand if needed:
+  kubectl -n {{ .Release.Namespace }} delete pvc -l app.kubernetes.io/instance={{ .Release.Name }}

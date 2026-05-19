@@ -1,0 +1,17 @@
+apiVersion: v2
+name: openddil-demo
+description: >-
+  OpenDDIL Tactical Telemetry Edge demo — full multi-edge / multi-region /
+  HQ pipeline for tactical asset configuration management and anomaly
+  detection. Ports the docker-compose stack to k8s. See
+  ../README.md for sibling-repo prerequisites and the bundle image build.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - openddil
+  - tactical
+  - telemetry
+  - configuration-management
+  - ddil
+home: https://github.com/edgy-solutions/openddil-demo

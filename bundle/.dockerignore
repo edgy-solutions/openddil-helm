@@ -1,0 +1,52 @@
+# Build context = parent directory containing all 4 OSS repos. Aggressively
+# exclude content we never bake into the bundle to keep the context tiny
+# and the image small.
+
+# Other openddil repos not bundled.
+openddil-cm-service/
+openddil-customer-bundle-example/
+openddil-edge-dotnet/
+openddil-edge-python/
+openddil-helm/
+openddil-hq/
+openddil-logistics-fusion-service/
+openddil-projector/
+openddil-sensor-ingest/
+
+# Inside the four bundled repos, drop content the bundle never needs.
+openddil-contracts/.git/
+openddil-contracts/docs/
+openddil-contracts/decisions/
+openddil-contracts/tests/
+openddil-contracts/node_modules/
+
+openddil-stack/.git/
+openddil-stack/docs/
+openddil-stack/migrations/
+
+openddil-tactical-agents/.git/
+openddil-tactical-agents/edge/
+openddil-tactical-agents/regional/
+openddil-tactical-agents/hub/projector/
+openddil-tactical-agents/hub/hub_restate_projector.py
+openddil-tactical-agents/hub/config.py
+openddil-tactical-agents/hub/config.yaml
+openddil-tactical-agents/tests/
+openddil-tactical-agents/Dockerfile
+openddil-tactical-agents/pyproject.toml
+
+openddil-demo/.git/
+openddil-demo/docs/
+openddil-demo/frontend/
+openddil-demo/tests/
+openddil-demo/simulator/
+openddil-demo/sensor-ingest/
+openddil-demo/connect/
+openddil-demo/docker-compose.yml
+openddil-demo/docker-compose.override.yml
+openddil-demo/docker-compose.dev.yml
+openddil-demo/README.md
+openddil-demo/AGENTS.md
+openddil-demo/llms.txt
+openddil-demo/ontology/
+openddil-demo/benthos-ingest.yaml
