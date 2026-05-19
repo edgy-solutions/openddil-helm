@@ -35,6 +35,26 @@ bundle:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
     pullPolicy: ""        # Empty -> falls back to global.imagePullPolicy
+  # Resources for the bundle-loader initContainer that every consumer pod
+  # runs. It only does `cp -r` of config subtrees out of the bundle image
+  # into an emptyDir, so it is cheap and short-lived. Explicit so it does
+  # NOT inherit a too-small cluster-default LimitRange (a cp starved of
+  # memory still completes, but being explicit removes the variable).
+  initResources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+# --- Hook Jobs (topic-init, postgres-schema-init, *-bootstrap) --------------
+# The four Helm-hook Jobs were previously shipped with NO resources block,
+# so under a constraining ResourceQuota they would be admission-rejected,
+# and under a small cluster-default LimitRange they risk OOMKill mid-run
+# (a postgres-schema-init OOMKilled mid-`atlas migrate apply` leaves the
+# DB half-migrated). Shared block sized generously enough for rpk, atlas,
+# psql, and the Python bootstrap scripts.
+jobs:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
 
 # --- Topology ---------------------------------------------------------------
 # Each edge gets its own redpanda broker StatefulSet + sensor-ingest +
@@ -184,6 +204,11 @@ restateHub:
     name: hub-restate-projector
     tag: ""
     pullPolicy: ""
+  # Long-running Python consumer — explicit resources so it does not
+  # inherit a too-small cluster-default LimitRange and get OOMKilled.
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
 
 # --- Per-edge services ------------------------------------------------------
 sensorIngest:

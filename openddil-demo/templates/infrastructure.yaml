@@ -458,6 +458,8 @@ spec:
         - name: rpk
           image: "{{ include "openddil.thirdPartyImage" .Values.redpandaEdge.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaEdge.image.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           command:
             - sh
             - -c

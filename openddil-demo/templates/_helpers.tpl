@@ -113,6 +113,8 @@ subPath-mounts /shared/<dst> at the target absolute path.
         cp -r "/bundle/{{ .src }}" "/shared/{{ .dst }}"
       fi
       {{- end }}
+  resources:
+    {{- toYaml .root.Values.bundle.initResources | nindent 4 }}
   volumeMounts:
     - name: bundle-shared
       mountPath: /shared

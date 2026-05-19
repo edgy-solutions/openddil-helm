@@ -55,6 +55,8 @@ spec:
         - name: wait-postgres
           image: "{{ include "openddil.thirdPartyImage" .Values.postgresHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           command:
             - sh
             - -c
@@ -72,6 +74,8 @@ spec:
         - name: atlas-apply
           image: "{{ include "openddil.thirdPartyImage" .Values.utilities.atlas }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.atlas.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           args:
             - migrate
             - apply
@@ -89,6 +93,8 @@ spec:
         - name: electric-publish
           image: "{{ include "openddil.thirdPartyImage" .Values.postgresHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           env:
             - name: PGPASSWORD
               valueFrom:
@@ -118,6 +124,8 @@ spec:
         - name: complete
           image: "{{ include "openddil.thirdPartyImage" .Values.utilities.alpine }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.alpine.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           command: ["true"]
       volumes:
         - name: bundle-shared

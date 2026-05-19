@@ -231,6 +231,8 @@ spec:
           env:
             - name: DB_PATH
               value: "/tmp/edge_state.db"
+          resources:
+            {{- toYaml .Values.restateHub.resources | nindent 12 }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /app/restate_hub.py
@@ -361,6 +363,8 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/app"
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /app/openddil_bootstrap
@@ -494,6 +498,8 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/app"
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /app/openddil_bootstrap
