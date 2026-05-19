@@ -1,0 +1,122 @@
+# =============================================================================
+# OpenDDIL — Artifactory (or any private-registry) values override
+# =============================================================================
+# Use with `helm install -f values-artifactory.yaml` to redirect every
+# image pull from upstream (ghcr.io / Docker Hub / docker.redpanda.com)
+# to your mirror registry. Pairs with scripts/mirror-to-artifactory.ps1
+# which pulls + retags + pushes images to that mirror.
+#
+# Usage:
+#   1. Mirror the images:
+#      scripts/mirror-to-artifactory.ps1 -RepoBase artifactory.mycorp.com/docker-openddil
+#
+#   2. Substitute <ARTIFACTORY> below with the same -RepoBase value. On
+#      PowerShell:
+#        (Get-Content values-artifactory.yaml) -replace '<ARTIFACTORY>', `
+#          'artifactory.mycorp.com/docker-openddil' | `
+#          Set-Content values-mycorp.yaml
+#
+#   3. Create the docker-registry pull secret in the openddil namespace:
+#        kubectl create namespace openddil
+#        kubectl create secret docker-registry artifactory-pull-secret `
+#          --namespace openddil `
+#          --docker-server=artifactory.mycorp.com `
+#          --docker-username=<USER> `
+#          --docker-password=<TOKEN-or-PASSWORD>
+#
+#   4. Install:
+#        helm install openddil oci://artifactory.mycorp.com/docker-openddil/edgy-solutions/openddil/charts/openddil-demo `
+#          --version 0.1.1 `
+#          --namespace openddil `
+#          -f values-mycorp.yaml `
+#          --set ingress.host=openddil.mycluster.local
+#
+# Naming convention: <ARTIFACTORY> is the FULL "<host>/<base-path>" string
+# (e.g. artifactory.mycorp.com/docker-openddil). The destinations below
+# preserve every image's path-after-registry — the script does the same.
+
+# --- Global -----------------------------------------------------------------
+global:
+  # OpenDDIL-owned images live at <ARTIFACTORY>/<imagePrefix>/<name>:<tag>
+  # — composition done by the openddil.image helper in _helpers.tpl.
+  imageRegistry: <ARTIFACTORY>
+  imagePrefix: edgy-solutions/openddil
+  imagePullPolicy: IfNotPresent
+  clusterDomain: ""
+
+  # The pull secret name must match what you created in step 3 above
+  # (kubectl create secret docker-registry ...).
+  imagePullSecrets:
+    - name: artifactory-pull-secret
+
+  imageTag: "latest"
+
+# --- Runtime-bundle image ---------------------------------------------------
+# The bundle uses the global.imageRegistry + imagePrefix composition, so
+# overriding those two above is enough for the bundle. No per-section
+# override needed here.
+
+# --- Third-party images (each gets its repository overridden) ---------------
+# These aren't included in the global.imageRegistry composition (their
+# `repository` fields are full paths in values.yaml). Each needs the
+# full new path.
+
+redpandaEdge:
+  image:
+    repository: <ARTIFACTORY>/redpandadata/redpanda
+
+redpandaHq:
+  image:
+    repository: <ARTIFACTORY>/redpandadata/redpanda
+
+redpandaConnect:
+  image:
+    repository: <ARTIFACTORY>/redpandadata/connect
+
+edgeHqBridge:
+  image:
+    repository: <ARTIFACTORY>/redpandadata/connect
+
+postgresHq:
+  image:
+    repository: <ARTIFACTORY>/library/postgres
+
+toxiproxy:
+  image:
+    repository: <ARTIFACTORY>/shopify/toxiproxy
+
+electric:
+  image:
+    repository: <ARTIFACTORY>/electricsql/electric
+
+restate:
+  image:
+    repository: <ARTIFACTORY>/restatedev/restate
+
+# --- Template-hardcoded images (NOT overridable via values today) -----------
+# Three images are hardcoded in chart templates and DO NOT have repository
+# overrides in values.yaml:
+#
+#   - arigaio/atlas:latest          (postgres-schema-init Job, atlas-apply
+#                                    step) — CRITICAL: blocks install
+#   - alpine:3.20                   (postgres-schema-init Job, main "no-op"
+#                                    container) — CRITICAL: blocks install
+#   - curlimages/curl:8.9.1         (helm-test connectivity pods) — only
+#                                    needed for `helm test`
+#
+# If your cluster forbids upstream pulls entirely, you have two options:
+#
+#   (a) Pull-through cache: configure your registry mirror in
+#       containerd/Docker daemon to redirect docker.io and ghcr.io
+#       pulls through your Artifactory. Cluster-admin-side change;
+#       no chart edit needed.
+#
+#   (b) Chart-template patch: parameterize these three images in
+#       templates/postgres-schema-init.yaml and templates/tests/
+#       connectivity.yaml so they accept values.yaml overrides. Not yet
+#       done in this chart — flagged as a follow-up. The script still
+#       mirrors them; just no override surface here yet.
+#
+# Until (a) or (b), the script's mirror of these images won't be USED
+# unless the cluster can resolve "arigaio/atlas:latest" through some
+# mirror configuration.
