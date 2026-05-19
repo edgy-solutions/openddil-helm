@@ -100,13 +100,20 @@ helm install openddil oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo
 
 ## Publishing the chart as an OCI artifact
 
+**Automated (GHA-driven, the normal path)**: every push to `master` that
+touches `openddil-demo/**` (or the workflow file itself) triggers
+`.github/workflows/publish-chart.yml`. It lints, packages, and pushes
+the chart at the version in `Chart.yaml` to
+`oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo`. Verifies
+by re-pulling. No manual step — just bump `version:` in `Chart.yaml`
+and push.
+
+**Manual (local dev iteration)**:
 ```bash
 ./openddil-helm/scripts/publish-chart.sh
 ```
-
-Pushes `oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo` at
-the version in `Chart.yaml`. Requires `gh auth login` or `docker login
-ghcr.io` for write access to the org.
+Same destination + behavior, but local-build-and-push. Requires
+`gh auth login` or `docker login ghcr.io` for write access.
 
 ## Known smells / follow-ups
 

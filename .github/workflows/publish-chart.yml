@@ -1,0 +1,94 @@
+name: Package and publish openddil-demo chart
+
+# Publishes the openddil-demo helm chart as an OCI artifact to ghcr.io,
+# the same registry that hosts every per-service container image. Once
+# this lands, consumers install with:
+#
+#   helm install openddil \
+#     oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo \
+#     --version <Chart.yaml-version>
+#
+# No `helm repo add`, no index.yaml, no GitHub Pages. Helm 3.8+ supports
+# OCI natively; the workflow uses azure/setup-helm@v4 to pin the helm
+# version so registry behavior is predictable.
+#
+# Triggers:
+#   * push to master with paths affecting openddil-demo/** (the chart)
+#     or this workflow file itself.
+#   * manual workflow_dispatch (for re-publish without a source change,
+#     e.g. after a registry hiccup).
+#
+# Versioning: the published OCI tag comes from openddil-demo/Chart.yaml's
+# `version:` field. Bump that line when you want a new artifact tag.
+# Same-version pushes OVERWRITE the existing tag at ghcr.io — by design,
+# but means version bumps are how you keep history. There is no `:latest`
+# tag for helm OCI charts; consumers must pin to a specific version.
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - "openddil-demo/**"
+      - ".github/workflows/publish-chart.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2   # Pinned; bump deliberately, not on `latest`.
+
+      - name: Lint chart
+        run: helm lint openddil-demo
+
+      - name: Read chart version from Chart.yaml
+        id: chart_version
+        run: |
+          V="$(awk '/^version:/ {print $2; exit}' openddil-demo/Chart.yaml)"
+          if [ -z "$V" ]; then
+            echo "ERROR: could not read version from openddil-demo/Chart.yaml" >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Publishing openddil-demo chart version $V"
+
+      - name: Login to ghcr.io
+        # helm push for OCI uses the docker/helm-cli credential store. The
+        # `helm registry login` step writes the GITHUB_TOKEN as the
+        # registry password under the org name; subsequent `helm push` to
+        # ghcr.io/<owner>/... uses it automatically.
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username ${{ github.repository_owner }} \
+            --password-stdin
+
+      - name: Package chart
+        run: helm package openddil-demo -d /tmp
+
+      - name: Push chart to ghcr.io as OCI artifact
+        run: |
+          helm push \
+            "/tmp/openddil-demo-${{ steps.chart_version.outputs.version }}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/openddil/charts"
+
+      - name: Verify published artifact
+        # Belt-and-suspenders: confirm the push actually succeeded by
+        # re-pulling the manifest. If `helm push` returned 0 but the
+        # registry didn't accept the artifact (rare), this fails the run.
+        run: |
+          helm pull \
+            "oci://ghcr.io/${{ github.repository_owner }}/openddil/charts/openddil-demo" \
+            --version "${{ steps.chart_version.outputs.version }}" \
+            --destination /tmp/verify
+          ls -la /tmp/verify/openddil-demo-${{ steps.chart_version.outputs.version }}.tgz
+          echo "Published and verified: oci://ghcr.io/${{ github.repository_owner }}/openddil/charts/openddil-demo:${{ steps.chart_version.outputs.version }}"
