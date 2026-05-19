@@ -92,6 +92,26 @@ spec:
       port: {{ .Values.electric.port }}
       targetPort: http
 ---
+# Alias Service so the frontend nginx's hardcoded `electric-sync:5133`
+# upstream resolves (used by the /electric/ proxy_pass block added when
+# VITE_ELECTRIC_URL was made build-time-overridable). Same pattern as
+# the `toxiproxy` alias below — unprefixed name matching docker-compose's
+# container hostname so nginx.conf is portable between the two envs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: electric-sync
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    openddil.io/alias: "true"
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.electric.port }}
+      targetPort: http
+---
 # ===========================================================================
 # restate-server — StatefulSet with PVC for /restate-data
 # ===========================================================================
