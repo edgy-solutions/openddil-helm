@@ -145,7 +145,7 @@ spec:
           ) "root" $root) | nindent 8 }}
       containers:
         - name: connect
-          image: "{{ $root.Values.redpandaConnect.image.repository }}:{{ $root.Values.redpandaConnect.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.redpandaConnect.image.pullPolicy "root" $root) }}
           args: ["--chilled", "run", "-r", "/mappings/*.yaml", "/connect.yaml"]
           env:
@@ -272,7 +272,7 @@ spec:
           ) "root" $root) | nindent 8 }}
       containers:
         - name: bridge
-          image: "{{ $root.Values.edgeHqBridge.image.repository }}:{{ $root.Values.edgeHqBridge.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" $root.Values.edgeHqBridge.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.edgeHqBridge.image.pullPolicy "root" $root) }}
           args: ["--chilled", "run", "/connect.yaml"]
           env:

@@ -53,7 +53,7 @@ spec:
         # no shell, so we can't loop inside the atlas container — block
         # here first.
         - name: wait-postgres
-          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.postgresHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
           command:
             - sh
@@ -70,7 +70,7 @@ spec:
         # only the subcommand arguments (matches the docker-compose
         # atlas-init service exactly).
         - name: atlas-apply
-          image: "{{ .Values.utilities.atlas.repository }}:{{ .Values.utilities.atlas.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.utilities.atlas }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.atlas.pullPolicy "root" .) }}
           args:
             - migrate
@@ -87,7 +87,7 @@ spec:
         # because Atlas owns DDL; this owns publications + replication-role
         # grants. Uses the postgres-hq image so psql is available.
         - name: electric-publish
-          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.postgresHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
           env:
             - name: PGPASSWORD
@@ -116,7 +116,7 @@ spec:
       # and the Job is marked Complete.
       containers:
         - name: complete
-          image: "{{ .Values.utilities.alpine.repository }}:{{ .Values.utilities.alpine.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.utilities.alpine }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.alpine.pullPolicy "root" .) }}
           command: ["true"]
       volumes:

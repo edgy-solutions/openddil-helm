@@ -46,6 +46,29 @@ Usage: include "openddil.pullPolicy" (dict "policy" .Values.frontend.image.pullP
 {{- end }}
 
 {{/*
+Compose a full image reference for THIRD-PARTY images (where the chart
+references a fixed repository, not an openddil-owned composition).
+
+  - If .digest is non-empty, returns "<repository>@<digest>" (digest-pinned;
+    fully reproducible across registry mirrors because content-addressable
+    digests are preserved by `docker push`).
+  - Else returns "<repository>:<tag>" (semver/tag-pinned).
+
+Usage:
+  image: "{{ include "openddil.thirdPartyImage" .Values.redpandaEdge.image }}"
+
+Pass the .image block directly (NOT wrapped in a dict) — the helper reads
+.repository, .tag, and .digest off the passed value.
+*/}}
+{{- define "openddil.thirdPartyImage" -}}
+{{- if .digest -}}
+{{ .repository }}@{{ .digest }}
+{{- else -}}
+{{ .repository }}:{{ .tag }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Bundle-image initContainer. Copies subtrees out of the runtime-bundle
 image into a shared emptyDir, with explicit src→dst path mapping so
 hardcoded paths in connect yaml (/proto, /ontology) can be honored via

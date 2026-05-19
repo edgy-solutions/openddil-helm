@@ -57,7 +57,7 @@ spec:
       {{- end }}
       containers:
         - name: toxiproxy
-          image: "{{ .Values.toxiproxy.image.repository }}:{{ .Values.toxiproxy.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.toxiproxy.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.toxiproxy.image.pullPolicy "root" .) }}
           args:
             - "-host=0.0.0.0"
@@ -130,7 +130,7 @@ spec:
       {{- end }}
       containers:
         - name: redpanda
-          image: "{{ $.Values.redpandaEdge.image.repository }}:{{ $.Values.redpandaEdge.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" $.Values.redpandaEdge.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $.Values.redpandaEdge.image.pullPolicy "root" $) }}
           command:
             - redpanda
@@ -243,7 +243,7 @@ spec:
       {{- end }}
       containers:
         - name: redpanda
-          image: "{{ .Values.redpandaHq.image.repository }}:{{ .Values.redpandaHq.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.redpandaHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaHq.image.pullPolicy "root" .) }}
           command:
             - redpanda
@@ -360,7 +360,7 @@ spec:
       {{- end }}
       containers:
         - name: postgres
-          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.postgresHq.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
           # wal_level=logical required for ElectricSQL publication.
           args: ["postgres", "-c", "wal_level=logical"]
@@ -456,7 +456,7 @@ spec:
       {{- end }}
       containers:
         - name: rpk
-          image: "{{ .Values.redpandaEdge.image.repository }}:{{ .Values.redpandaEdge.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.redpandaEdge.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaEdge.image.pullPolicy "root" .) }}
           command:
             - sh
