@@ -46,6 +46,8 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$RepoBase,
 
+    [string]$Platform = 'linux/amd64',
+
     [switch]$DryRun
 )
 
@@ -122,6 +124,27 @@ function Invoke-Docker {
     }
 }
 
+# -----------------------------------------------------------------------
+# Target platform for pulls.
+#
+# docker/build-push-action@v5 (used by every openddil-* GHA workflow) adds
+# a provenance attestation manifest entry alongside the real platform
+# image. The attestation has platform `unknown/unknown`. When Docker
+# Desktop with containerd image store pulls a multi-entry manifest list,
+# it can carry that attestation into the local store; subsequent
+# `docker push` to an Artifactory that validates platform metadata then
+# rejects with:
+#   image with reference X was found but does not provide any platform
+# Forcing --platform on pull selects ONLY the matching child manifest;
+# the attestation never enters the local store.
+#
+# Override if your cluster runs arm64 (Graviton, Apple Silicon hosts):
+#   .\mirror-to-artifactory.ps1 -RepoBase ... -Platform linux/arm64
+# (Note: every current openddil-* GHA workflow builds amd64 only, so
+# arm64 pulls will fail at upstream until those workflows add
+# `platforms: linux/amd64,linux/arm64` to docker/build-push-action.)
+# -----------------------------------------------------------------------
+
 Write-Host "Mirroring $($Images.Count) images to $RepoBase" -ForegroundColor Cyan
 Write-Host ""
 
@@ -134,7 +157,7 @@ foreach ($img in $Images) {
     Write-Host "    -> $dst"
 
     try {
-        Invoke-Docker @('pull', $src)
+        Invoke-Docker @('pull', '--platform', $Platform, $src)
         Invoke-Docker @('tag',  $src, $dst)
         Invoke-Docker @('push', $dst)
     } catch {
