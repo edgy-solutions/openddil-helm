@@ -5,24 +5,30 @@
   single Artifactory (or any other) registry under one base path.
 
 .DESCRIPTION
-  Uses 'crane copy' (github.com/google/go-containerregistry) for
-  registry-to-registry image copy. crane is REQUIRED -- see the prereq
-  check below.
+  Two copy engines, selectable with -Method:
 
-  WHY crane, not docker pull/tag/push:
+    buildx  (DEFAULT) -- uses 'docker buildx imagetools', which ships with
+            Docker Desktop. No extra tool to install or get approved.
+    crane             -- uses 'crane' (github.com/google/go-containerregistry).
+            Slightly simpler internally, but requires installing crane.
+
+  WHY this is not just 'docker pull / tag / push':
   Every openddil-* GHA workflow uses docker/build-push-action, which adds
   a provenance attestation as an extra manifest entry with platform
   unknown/unknown. Docker Desktop with the containerd image store keeps
   that full OCI index locally even after 'docker pull --platform', and a
-  subsequent 'docker push' sends the index -- which Artifactory rejects:
+  subsequent 'docker push' sends the index, which Artifactory rejects:
     image with reference X was found but does not provide any platform
-  crane streams blobs registry-to-registry without ever touching the
-  local Docker store, and --platform makes it copy EXACTLY ONE
-  architecture's manifest. No attestation passenger, no containerd
-  weirdness.
 
-  Auth: crane reads Docker's credential store (~/.docker/config.json),
-  so the standard logins still set up credentials:
+  Both engines here avoid that:
+    buildx -- inspects the source index, resolves the single
+              <Platform> child manifest by digest, and copies ONLY that
+              child. The attestation entry is never referenced.
+    crane  -- streams blobs registry-to-registry and honours --platform
+              to copy exactly one architecture.
+
+  Auth: both engines reuse Docker's credential store
+  (~/.docker/config.json), so the standard logins set up credentials:
     docker login ghcr.io
     docker login artifactory.mycorp.com
 
@@ -41,16 +47,22 @@
     cbm-containers-dev-and.artifactory-and.rmd.ray.com
   Trailing slashes get trimmed.
 
+.PARAMETER Method
+  Copy engine: 'buildx' (default, no install) or 'crane'.
+
 .PARAMETER Platform
   Architecture to copy (default linux/amd64). arm64 builds are not yet
   published by the openddil-* GHA workflows; until those add multi-arch,
   linux/arm64 will fail at the upstream resolve step.
 
 .PARAMETER DryRun
-  Print the crane commands without executing.
+  Print the commands without executing.
 
 .EXAMPLE
   .\mirror-to-artifactory.ps1 -RepoBase cbm-containers-dev-and.artifactory-and.rmd.ray.com
+
+.EXAMPLE
+  .\mirror-to-artifactory.ps1 -RepoBase artifactory.mycorp.com/docker-openddil -Method crane
 
 .EXAMPLE
   .\mirror-to-artifactory.ps1 -RepoBase artifactory.mycorp.com/docker-openddil -DryRun
@@ -59,6 +71,9 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$RepoBase,
+
+    [ValidateSet('buildx','crane')]
+    [string]$Method = 'buildx',
 
     [string]$Platform = 'linux/amd64',
 
@@ -69,22 +84,22 @@ $ErrorActionPreference = 'Stop'
 $RepoBase = $RepoBase.TrimEnd('/')
 
 # -----------------------------------------------------------------------
-# Prereq: crane must be on PATH.
+# Prereq check for the selected engine.
 # -----------------------------------------------------------------------
-$craneCmd = Get-Command crane -ErrorAction SilentlyContinue
-if (-not $craneCmd) {
-    Write-Host "ERROR: 'crane' not found on PATH." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "crane is a single Go binary (~15 MB). Install one of these ways:" -ForegroundColor Yellow
-    Write-Host "  scoop install crane" -ForegroundColor White
-    Write-Host "  go install github.com/google/go-containerregistry/cmd/crane@latest" -ForegroundColor White
-    Write-Host "  # or download crane from the GitHub releases page:" -ForegroundColor White
-    Write-Host "  #   github.com/google/go-containerregistry/releases" -ForegroundColor White
-    Write-Host "  #   (extract crane.exe to a directory on PATH)" -ForegroundColor White
-    Write-Host ""
-    Write-Host "crane reuses your existing 'docker login' credentials." -ForegroundColor Yellow
-    Write-Host "No separate auth step is needed once it is installed." -ForegroundColor Yellow
-    exit 1
+if ($Method -eq 'crane') {
+    if (-not (Get-Command crane -ErrorAction SilentlyContinue)) {
+        Write-Host "ERROR: -Method crane selected but 'crane' is not on PATH." -ForegroundColor Red
+        Write-Host "Install crane, or use the default -Method buildx (no install)." -ForegroundColor Yellow
+        exit 1
+    }
+} else {
+    # buildx: confirm 'docker buildx' responds.
+    & docker buildx version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: 'docker buildx' is not available." -ForegroundColor Red
+        Write-Host "buildx ships with Docker Desktop; update Docker Desktop if missing." -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 # -----------------------------------------------------------------------
@@ -121,8 +136,76 @@ $Images = @(
     @{ src='curlimages/curl:8.9.1';                                           dst='curlimages/curl:8.9.1' }
 )
 
-Write-Host "Mirroring $($Images.Count) images to $RepoBase (platform: $Platform)" -ForegroundColor Cyan
-Write-Host "Using crane: $($craneCmd.Source)" -ForegroundColor Cyan
+# -----------------------------------------------------------------------
+# Strip the :tag suffix from an image reference, leaving the repository.
+# The tag is the part after the LAST colon that is not followed by a
+# slash. Registry ports (registry:5000/...) are not matched because the
+# port colon is followed by '/'. None of the inventory uses a digest.
+# -----------------------------------------------------------------------
+function Get-RepoOnly {
+    param([string]$Ref)
+    return ($Ref -replace ':[^:/]+$', '')
+}
+
+# -----------------------------------------------------------------------
+# buildx engine: inspect the source, resolve the <Platform> child by
+# digest, copy ONLY that child via 'imagetools create'. Drops the
+# provenance attestation (it is a different, unreferenced child).
+# -----------------------------------------------------------------------
+function Copy-WithBuildx {
+    param([string]$Src, [string]$Dst, [string]$Platform)
+
+    $plat  = $Platform -split '/'
+    $os    = $plat[0]
+    $arch  = $plat[1]
+
+    $rawLines = & docker buildx imagetools inspect $Src --raw 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "buildx inspect failed for $Src (image missing / not logged in?)"
+    }
+    $manifest = ($rawLines -join "`n") | ConvertFrom-Json
+
+    if ($manifest.manifests) {
+        # Multi-entry OCI index. Find the child matching the platform.
+        $child = $manifest.manifests | Where-Object {
+            $_.platform.os -eq $os -and $_.platform.architecture -eq $arch
+        } | Select-Object -First 1
+        if (-not $child) {
+            throw "no $Platform manifest in $Src (arm64 not published yet?)"
+        }
+        $srcByDigest = (Get-RepoOnly $Src) + '@' + $child.digest
+        if ($DryRun) {
+            Write-Host "[dry-run] docker buildx imagetools create --tag $Dst $srcByDigest" -ForegroundColor Yellow
+        } else {
+            & docker buildx imagetools create --tag $Dst $srcByDigest
+            if ($LASTEXITCODE -ne 0) { throw "buildx create failed for $Dst" }
+        }
+    } else {
+        # Plain single-arch manifest; copy as-is.
+        if ($DryRun) {
+            Write-Host "[dry-run] docker buildx imagetools create --tag $Dst $Src" -ForegroundColor Yellow
+        } else {
+            & docker buildx imagetools create --tag $Dst $Src
+            if ($LASTEXITCODE -ne 0) { throw "buildx create failed for $Dst" }
+        }
+    }
+}
+
+# -----------------------------------------------------------------------
+# crane engine: one-shot registry-to-registry copy with --platform.
+# -----------------------------------------------------------------------
+function Copy-WithCrane {
+    param([string]$Src, [string]$Dst, [string]$Platform)
+    if ($DryRun) {
+        Write-Host "[dry-run] crane copy --platform $Platform $Src $Dst" -ForegroundColor Yellow
+    } else {
+        & crane copy --platform $Platform $Src $Dst
+        if ($LASTEXITCODE -ne 0) { throw "crane copy failed for $Dst" }
+    }
+}
+
+Write-Host "Mirroring $($Images.Count) images to $RepoBase" -ForegroundColor Cyan
+Write-Host "Method: $Method   Platform: $Platform" -ForegroundColor Cyan
 Write-Host ""
 
 $failed = @()
@@ -133,20 +216,15 @@ foreach ($img in $Images) {
     Write-Host "==> $src" -ForegroundColor Green
     Write-Host "    -> $dst"
 
-    # crane copy --platform <p> SRC DST
-    #   --platform resolves the source index to ONE architecture and
-    #   copies only that manifest, dropping the provenance attestation
-    #   entry (platform unknown/unknown) that Artifactory rejects.
-    $craneArgs = @('copy', '--platform', $Platform, $src, $dst)
-
-    if ($DryRun) {
-        Write-Host "[dry-run] crane $($craneArgs -join ' ')" -ForegroundColor Yellow
-    } else {
-        & crane @craneArgs
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "    FAILED: crane copy exited $LASTEXITCODE" -ForegroundColor Red
-            $failed += $src
+    try {
+        if ($Method -eq 'crane') {
+            Copy-WithCrane  -Src $src -Dst $dst -Platform $Platform
+        } else {
+            Copy-WithBuildx -Src $src -Dst $dst -Platform $Platform
         }
+    } catch {
+        Write-Host "    FAILED: $_" -ForegroundColor Red
+        $failed += $src
     }
     Write-Host ""
 }
