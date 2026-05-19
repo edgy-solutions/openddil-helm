@@ -82,13 +82,14 @@ jobs:
             "oci://ghcr.io/${{ github.repository_owner }}/openddil/charts"
 
       - name: Verify published artifact
-        # Belt-and-suspenders: confirm the push actually succeeded by
-        # re-pulling the manifest. If `helm push` returned 0 but the
-        # registry didn't accept the artifact (rare), this fails the run.
+        # Belt-and-suspenders: confirm the push reached the registry by
+        # re-reading the chart metadata. `helm show chart` queries the
+        # OCI registry without any local file IO — avoids the temp-suffix
+        # rename race that `helm pull` exhibits on some runner FS layouts.
+        # If push returned 0 but the registry didn't actually accept the
+        # artifact (rare), this fails the run.
         run: |
-          helm pull \
+          helm show chart \
             "oci://ghcr.io/${{ github.repository_owner }}/openddil/charts/openddil-demo" \
-            --version "${{ steps.chart_version.outputs.version }}" \
-            --destination /tmp/verify
-          ls -la /tmp/verify/openddil-demo-${{ steps.chart_version.outputs.version }}.tgz
+            --version "${{ steps.chart_version.outputs.version }}"
           echo "Published and verified: oci://ghcr.io/${{ github.repository_owner }}/openddil/charts/openddil-demo:${{ steps.chart_version.outputs.version }}"
