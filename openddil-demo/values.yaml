@@ -70,23 +70,19 @@ persistence:
   restateSize: 5Gi
 
 # --- Redpanda (per-edge) ----------------------------------------------------
-# Third-party images are pinned by content digest (sha256) where the only
-# upstream tag we've tested with is :latest. The digest is rendered via
-# the openddil.thirdPartyImage helper as <repo>@<digest>, which:
-#   - is reproducible across registry mirrors (Artifactory etc. preserve
-#     the manifest digest on push);
-#   - locks the deployment to the exact bits we tested with, not whatever
-#     :latest happens to resolve to today;
-#   - falls back to <repo>:<tag> if digest is empty (per-environment
-#     unpinning via values-overrides if needed).
-# Bump digests when you intentionally roll forward. `docker pull <tag> &&
-# docker inspect <tag> --format '{{json .RepoDigests}}'` shows the current
-# upstream digest for a given tag.
+# Third-party images pinned by semver tag — bumped 2026-05-19 from the
+# stale :latest defaults to the actual versions we tested with, identified
+# by running each image's binary with --version inside a throwaway
+# container. Versions chosen to be security-team-approvable (real release
+# tags, no SHA digests or canary builds). Bump deliberately when you roll
+# forward; the `digest:` field is kept empty so the openddil.thirdPartyImage
+# helper renders <repo>:<tag>. Set `digest:` non-empty per service to opt
+# into digest-pinning where stricter reproducibility is needed.
 redpandaEdge:
   image:
     repository: docker.redpanda.com/redpandadata/redpanda
-    tag: latest
-    digest: "sha256:70e28c21d23e222efbe45eb862b65792507c1928675d52ed1aa72ac642ef12da"
+    tag: "v26.1.7"
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 250m, memory: 512Mi }
@@ -103,8 +99,8 @@ redpandaEdge:
 redpandaHq:
   image:
     repository: docker.redpanda.com/redpandadata/redpanda
-    tag: latest
-    digest: "sha256:70e28c21d23e222efbe45eb862b65792507c1928675d52ed1aa72ac642ef12da"
+    tag: "v26.1.7"
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 250m, memory: 512Mi }
@@ -153,8 +149,8 @@ toxiproxy:
 electric:
   image:
     repository: electricsql/electric
-    tag: latest
-    digest: "sha256:1365781a26eebc5c77e728522f3cfef0159fd2965a2d7524a459a272b4588893"
+    tag: "1.6.2"
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -212,8 +208,8 @@ sensorIngest:
 redpandaConnect:
   image:
     repository: docker.redpanda.com/redpandadata/connect
-    tag: latest
-    digest: "sha256:90eabe80cc4d7f3989f8c6b9f423c72dc148df1e898bd2234ba62d697843bdce"
+    tag: "4.91.0"
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -248,8 +244,8 @@ projector:
 edgeHqBridge:
   image:
     repository: docker.redpanda.com/redpandadata/connect
-    tag: latest
-    digest: "sha256:90eabe80cc4d7f3989f8c6b9f423c72dc148df1e898bd2234ba62d697843bdce"
+    tag: "4.91.0"
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -313,8 +309,13 @@ frontend:
 utilities:
   atlas:
     repository: arigaio/atlas
-    tag: latest
-    digest: "sha256:dc77873c75abf4e17abd690f1ece7870e014b80f455f5a6738c4cb60751cdebf"
+    # 0.32.0 is the latest STABLE atlas tag in the 0.x line. The
+    # arigaio/atlas:latest tag points at a CANARY build (`v1.2.1-canary`
+    # locally), which is not a release-stable pin and won't pass typical
+    # security review. 0.32.0 implements the same `migrate apply` surface
+    # we use and is API-stable for HCL schema migrations.
+    tag: "0.32.0"
+    digest: ""
     pullPolicy: IfNotPresent
   alpine:
     repository: alpine

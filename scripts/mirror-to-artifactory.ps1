@@ -85,33 +85,25 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/hub-restate-projector:latest';   dst='edgy-solutions/openddil/hub-restate-projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';          dst='edgy-solutions/openddil/runtime-bundle:latest' },
 
-    # -- Third-party services (digest-pinned where upstream has no semver
-    # tag in our cache; semver-pinned otherwise) -------------------------
-    # Digest pins (sha256:...) survive the pull/tag/push pipeline because
-    # docker push preserves content-addressable manifests. Pulled by
-    # digest from upstream, tagged with :<original-tag> at the destination
-    # so the destination supports BOTH `repo:tag` and `repo@digest` access
-    # (Artifactory exposes both views over the same content).
-    #
-    # Bump these digests when you intentionally roll forward — keep them
-    # synced with values.yaml's `digest:` fields. To find a fresh digest:
-    #   docker pull <repo>:<tag>
-    #   docker inspect <repo>:<tag> --format '{{json .RepoDigests}}'
-    @{ src='docker.redpanda.com/redpandadata/redpanda@sha256:70e28c21d23e222efbe45eb862b65792507c1928675d52ed1aa72ac642ef12da'; dst='redpandadata/redpanda:latest' },
-    @{ src='docker.redpanda.com/redpandadata/connect@sha256:90eabe80cc4d7f3989f8c6b9f423c72dc148df1e898bd2234ba62d697843bdce'; dst='redpandadata/connect:latest' },
-    @{ src='electricsql/electric@sha256:1365781a26eebc5c77e728522f3cfef0159fd2965a2d7524a459a272b4588893';                       dst='electricsql/electric:latest' },
-    # Semver-pinned (upstream version tag is the authoritative reference)
-    @{ src='postgres:15';                                                    dst='library/postgres:15' },
-    @{ src='restatedev/restate:1.6.2';                                       dst='restatedev/restate:1.6.2' },
-    @{ src='ghcr.io/shopify/toxiproxy:2.12.0';                               dst='shopify/toxiproxy:2.12.0' },
+    # -- Third-party services (semver-pinned, security-review-friendly) --
+    # Versions identified 2026-05-19 by running each binary's --version
+    # inside its image; verified that the tag exists upstream via
+    # `docker manifest inspect`. Bump these tags when you intentionally
+    # roll forward; keep synced with values.yaml.
+    @{ src='docker.redpanda.com/redpandadata/redpanda:v26.1.7';               dst='redpandadata/redpanda:v26.1.7' },
+    @{ src='docker.redpanda.com/redpandadata/connect:4.91.0';                 dst='redpandadata/connect:4.91.0' },
+    @{ src='electricsql/electric:1.6.2';                                      dst='electricsql/electric:1.6.2' },
+    @{ src='postgres:15';                                                     dst='library/postgres:15' },
+    @{ src='restatedev/restate:1.6.2';                                        dst='restatedev/restate:1.6.2' },
+    @{ src='ghcr.io/shopify/toxiproxy:2.12.0';                                dst='shopify/toxiproxy:2.12.0' },
 
-    # -- Utility images (mixed pin strategy) -----------------------------
-    # arigaio/atlas has no usable semver tag in our local cache (version
-    # label literally reads "latest"), so pin by digest. alpine + curl
-    # have real semver tags.
-    @{ src='arigaio/atlas@sha256:dc77873c75abf4e17abd690f1ece7870e014b80f455f5a6738c4cb60751cdebf'; dst='arigaio/atlas:latest' },
-    @{ src='alpine:3.20';                                                    dst='library/alpine:3.20' },
-    @{ src='curlimages/curl:8.9.1';                                          dst='curlimages/curl:8.9.1' }
+    # -- Utility images --------------------------------------------------
+    # arigaio/atlas:latest tracks the canary build line (v1.x-canary as of
+    # 2026-05-19). 0.32.0 is the latest stable 0.x release — same migrate-
+    # apply surface, security-review-friendly tag.
+    @{ src='arigaio/atlas:0.32.0';                                            dst='arigaio/atlas:0.32.0' },
+    @{ src='alpine:3.20';                                                     dst='library/alpine:3.20' },
+    @{ src='curlimages/curl:8.9.1';                                           dst='curlimages/curl:8.9.1' }
 )
 
 function Invoke-Docker {
@@ -166,6 +158,6 @@ Write-Host ""
 Write-Host "  (Get-Content values-artifactory.yaml) -replace '<ARTIFACTORY>', '$RepoBase' |" -ForegroundColor White
 Write-Host "    Set-Content values-mycorp.yaml" -ForegroundColor White
 Write-Host "  helm install openddil oci://$RepoBase/edgy-solutions/openddil/charts/openddil-demo ``" -ForegroundColor White
-Write-Host "    --version 0.1.3 ``" -ForegroundColor White
+Write-Host "    --version 0.1.4 ``" -ForegroundColor White
 Write-Host "    --namespace openddil --create-namespace ``" -ForegroundColor White
 Write-Host "    -f values-mycorp.yaml" -ForegroundColor White

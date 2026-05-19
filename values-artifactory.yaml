@@ -61,23 +61,12 @@ global:
 # `repository` fields are full paths in values.yaml). Each needs the
 # full new path.
 #
-# Digest pins (chart 0.1.3+): values.yaml pins several third-party images
-# by content digest (redpanda, redpanda-connect, electric, atlas). The
-# repository overrides below inherit those digests automatically — when
-# the chart composes the image reference, it goes
-# `<ARTIFACTORY>/<path>@sha256:<digest>`. This works because docker push
-# preserves manifest digests content-addressably, so the Artifactory copy
-# carries the same digest as the upstream.
-#
-# IF for some reason your Artifactory rewrites manifests on push (rare
-# but happens with some Artifactory configs that re-sign or strip
-# layers), the digest pin will fail at install time. In that case add
-# `digest: ""` to the affected service block here to fall back to tag-
-# only pulls:
-#   redpandaEdge:
-#     image:
-#       repository: <ARTIFACTORY>/redpandadata/redpanda
-#       digest: ""    # uncomment if Artifactory rewrote the manifest
+# Tag pins (chart 0.1.4+): every third-party image is pinned by semver
+# tag in values.yaml (redpanda v26.1.7, redpanda-connect 4.91.0, electric
+# 1.6.2, atlas 0.32.0, etc). The repository overrides below inherit those
+# tags. Optionally opt into digest pinning per service by setting
+# `digest:` to a sha256 string here — the openddil.thirdPartyImage helper
+# will then compose <repo>@<digest> instead of <repo>:<tag>.
 
 redpandaEdge:
   image:
