@@ -100,13 +100,17 @@ $Images = @(
 )
 
 function Invoke-Docker {
-    param([string[]]$Args)
+    # NOTE: param name is $DockerArgs, NOT $Args. $Args is a PowerShell
+    # automatic variable (the function's positional args); declaring a
+    # param with that name in PS 5.1 causes the value to be lost on the
+    # call boundary (verified: dry-run rendered empty `docker` invocations).
+    param([string[]]$DockerArgs)
     if ($DryRun) {
-        Write-Host "[dry-run] docker $($Args -join ' ')" -ForegroundColor Yellow
+        Write-Host "[dry-run] docker $($DockerArgs -join ' ')" -ForegroundColor Yellow
     } else {
-        & docker @Args
+        & docker @DockerArgs
         if ($LASTEXITCODE -ne 0) {
-            throw "docker $($Args[0]) failed (exit $LASTEXITCODE)"
+            throw "docker $($DockerArgs[0]) failed (exit $LASTEXITCODE)"
         }
     }
 }
@@ -142,11 +146,11 @@ if ($failed.Count -gt 0) {
 Write-Host "All $($Images.Count) images mirrored to $RepoBase" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next step: install the chart with values-artifactory.yaml,"
-Write-Host "substituting <ARTIFACTORY> in that file with $RepoBase:"
+Write-Host "substituting <ARTIFACTORY> in that file with ${RepoBase}:"
 Write-Host ""
 Write-Host "  (Get-Content values-artifactory.yaml) -replace '<ARTIFACTORY>', '$RepoBase' |" -ForegroundColor White
 Write-Host "    Set-Content values-mycorp.yaml" -ForegroundColor White
 Write-Host "  helm install openddil oci://$RepoBase/edgy-solutions/openddil/charts/openddil-demo ``" -ForegroundColor White
-Write-Host "    --version 0.1.1 ``" -ForegroundColor White
+Write-Host "    --version 0.1.2 ``" -ForegroundColor White
 Write-Host "    --namespace openddil --create-namespace ``" -ForegroundColor White
 Write-Host "    -f values-mycorp.yaml" -ForegroundColor White
