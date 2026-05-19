@@ -1,0 +1,123 @@
+{{- /*
+   postgres-schema-init.yaml — applies the canonical Atlas schema to
+   postgres-hq, then creates the ElectricSQL publication. Without this
+   Job, postgres-hq comes up with zero tables and every downstream
+   projection write fails.
+
+   Mirrors docker-compose's atlas-init + electric-publish-init pair
+   (openddil-demo/docker-compose.yml ~lines 300-360). Single Job with
+   sequential initContainers — the ordering bundle-load → wait-pg →
+   atlas-apply → electric-publish is intrinsic to the initContainer
+   sequence, no helm-hook-weight gymnastics for inter-step ordering.
+
+   Hook weight 10 places this AFTER topic-init (weight 5) and BEFORE
+   cm-service-bootstrap (weight 20) / logistics-fusion-bootstrap (21),
+   so cluster comes up: topics → schema → service registrations.
+*/}}
+{{- $pgHost := printf "%s-postgres-hq%s" .Release.Name (include "openddil.svcDomain" .) }}
+{{- $pgUser := .Values.postgresHq.auth.username }}
+{{- $pgPass := .Values.postgresHq.auth.password }}
+{{- $pgDb   := .Values.postgresHq.auth.database }}
+{{- $pgPort := .Values.postgresHq.port }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-postgres-schema-init
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "postgres-schema-init" "root" .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # (1) Pull schema migrations + electric publication script from the
+        # bundle image into the shared emptyDir.
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "stack/schema"   "dst" "schema")
+            (dict "src" "stack/electric" "dst" "electric")
+          ) "root" .) | nindent 8 }}
+        # (2) Wait for postgres-hq to accept connections. atlas-apply has
+        # no shell, so we can't loop inside the atlas container — block
+        # here first.
+        - name: wait-postgres
+          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for postgres-hq at {{ $pgHost }}:{{ $pgPort }}..."
+              until pg_isready -h {{ $pgHost }} -p {{ $pgPort }} -U {{ $pgUser }} -d {{ $pgDb }}; do
+                sleep 2
+              done
+              echo "postgres-hq accepting connections"
+        # (3) Apply Atlas migrations. The arigaio/atlas image's entrypoint
+        # IS the `atlas` binary — no shell available — so `args:` carries
+        # only the subcommand arguments (matches the docker-compose
+        # atlas-init service exactly).
+        - name: atlas-apply
+          image: arigaio/atlas:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - migrate
+            - apply
+            - --dir
+            - file:///schema/migrations
+            - --url
+            - postgres://{{ $pgUser }}:{{ $pgPass }}@{{ $pgHost }}:{{ $pgPort }}/{{ $pgDb }}?sslmode=disable
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /schema
+              subPath: schema
+        # (4) Create the ElectricSQL publication. Separate from atlas-apply
+        # because Atlas owns DDL; this owns publications + replication-role
+        # grants. Uses the postgres-hq image so psql is available.
+        - name: electric-publish
+          image: "{{ .Values.postgresHq.image.repository }}:{{ .Values.postgresHq.image.tag }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.postgresHq.image.pullPolicy "root" .) }}
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgres-hq
+                  key: POSTGRES_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Applying ElectricSQL publication..."
+              psql -v ON_ERROR_STOP=1 \
+                -h {{ $pgHost }} -p {{ $pgPort }} \
+                -U {{ $pgUser }} -d {{ $pgDb }} \
+                -f /electric/electrify.sql
+              echo "Publication ready"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /electric
+              subPath: electric
+      # Main container is a no-op. All real work is in the initContainers,
+      # which run sequentially. When all initContainers succeed, the pod
+      # reaches Ready, the main container runs to completion immediately,
+      # and the Job is marked Complete.
+      containers:
+        - name: complete
+          image: alpine:3.20
+          command: ["true"]
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
