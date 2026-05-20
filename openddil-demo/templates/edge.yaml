@@ -201,7 +201,6 @@ spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
-            (dict "src" "contracts/gen/python/google"   "dst" "app-google")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: faust-edge
@@ -224,15 +223,13 @@ spec:
               value: {{ $v | quote }}
             {{- end }}
           volumeMounts:
-            # openddil/ and google/ proto packages are subPath-mounted into
-            # /app where the faust-edge image expects them (matches the
-            # docker-compose mount pattern at openddil-tactical-agents/edge/).
+            # The generated openddil/ proto package is subPath-mounted into
+            # /app (PYTHONPATH=/app). google.protobuf is NOT bundled — it
+            # ships in the image's `protobuf` pip package; gen/python/google
+            # is an empty dir and bundling it crashed the bundle-loader.
             - name: bundle-shared
               mountPath: /app/openddil
               subPath: app-openddil
-            - name: bundle-shared
-              mountPath: /app/google
-              subPath: app-google
           resources:
             {{- toYaml $root.Values.faustEdge.resources | nindent 12 }}
       volumes:

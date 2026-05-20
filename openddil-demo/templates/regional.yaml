@@ -40,7 +40,6 @@ spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
-            (dict "src" "contracts/gen/python/google"   "dst" "app-google")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: faust-regional
@@ -66,12 +65,11 @@ spec:
             - name: LOG_LEVEL
               value: "INFO"
           volumeMounts:
+            # google.protobuf ships in the image's `protobuf` pip package;
+            # gen/python/google is empty and not bundled — see faust-edge.
             - name: bundle-shared
               mountPath: /app/openddil
               subPath: app-openddil
-            - name: bundle-shared
-              mountPath: /app/google
-              subPath: app-google
           resources:
             {{- toYaml $root.Values.faustRegional.resources | nindent 12 }}
       volumes:
