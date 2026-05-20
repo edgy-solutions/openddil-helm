@@ -169,7 +169,7 @@ spec:
       spec:
         accessModes: [ReadWriteOnce]
         volumeMode: Filesystem
-        {{- with .Values.persistence.storageClass }}
+        {{- with (.Values.persistence.restateStorageClass | default .Values.persistence.storageClass) }}
         storageClassName: {{ . }}
         {{- end }}
         resources:

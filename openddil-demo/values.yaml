@@ -80,24 +80,28 @@ regions:
   - id: region-west
 
 # --- Persistence ------------------------------------------------------------
-# storageClass applies to EVERY PersistentVolumeClaim the chart creates
-# (redpanda-edge x N, redpanda-hq, postgres-hq, restate-server). Empty ->
-# the cluster's default StorageClass. All PVCs are ReadWriteOnce with
-# volumeMode: Filesystem.
+# storageClass is the default StorageClass for EVERY PersistentVolumeClaim
+# the chart creates (redpanda-edge x N, redpanda-hq, postgres-hq,
+# restate-server). The three per-component overrides take precedence when
+# non-empty; an empty override falls back to storageClass; an empty
+# storageClass falls back to the cluster's default StorageClass. All PVCs
+# are ReadWriteOnce with volumeMode: Filesystem.
 #
-# vSphere CNS/CSI clusters — set storageClass to the vSphere class name:
-#   persistence:
-#     storageClass: vsphere
-# or at install time:  --set persistence.storageClass=vsphere
-# Each rendered claim then carries (example, postgres-hq at 20Gi):
-#   spec:
-#     accessModes: [ReadWriteOnce]
-#     volumeMode: Filesystem
-#     storageClassName: vsphere
-#     resources: { requests: { storage: 20Gi } }
-# The *Size values below are the requested capacities per component.
+# Examples:
+#   # vSphere class for every PVC:
+#   persistence: { storageClass: vsphere }
+#   # vSphere for redpanda only, cluster-default for postgres + restate:
+#   persistence: { redpandaStorageClass: vsphere }
+#   # or at install time:  --set persistence.redpandaStorageClass=vsphere
+#
+# redpandaStorageClass covers BOTH redpanda-edge and redpanda-hq. Each
+# rendered claim carries accessModes [ReadWriteOnce], volumeMode
+# Filesystem, the resolved storageClassName, and the *Size below.
 persistence:
-  storageClass: ""        # e.g. "vsphere" — empty uses the cluster default
+  storageClass: ""           # default for all PVCs; empty -> cluster default
+  redpandaStorageClass: ""   # override for redpanda-edge + redpanda-hq
+  postgresStorageClass: ""   # override for postgres-hq
+  restateStorageClass: ""    # override for restate-server
   redpandaSize: 10Gi
   postgresSize: 20Gi
   restateSize: 5Gi
