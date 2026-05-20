@@ -153,7 +153,7 @@ spec:
             - name: admin
               containerPort: {{ .Values.restate.adminPort }}
           volumeMounts:
-            - name: config
+            - name: bundle-shared
               mountPath: /config/restate-config.toml
               subPath: restate-config.toml
             - name: data
@@ -161,8 +161,10 @@ spec:
           resources:
             {{- toYaml .Values.restate.resources | nindent 12 }}
       volumes:
-        - name: config
-          emptyDir: {}        # Populated by initContainer; mounted via subPath above
+        # Name must be `bundle-shared` — the openddil.bundleInit helper
+        # hardcodes that name on the bundle-loader initContainer's mount.
+        - name: bundle-shared
+          emptyDir: {}        # populated by the bundle-loader initContainer
   volumeClaimTemplates:
     - metadata:
         name: data
