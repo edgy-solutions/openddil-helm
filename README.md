@@ -140,3 +140,17 @@ Same destination + behavior, but local-build-and-push. Requires
   step. Doable (multiple `actions/checkout@v4` with `repository:` and
   `path:`), just not yet written. Until then, the bundle image is a
   local build via `scripts/build-bundle.sh`.
+
+- **helm-test postgres pod checks the wrong publication name**.
+  `templates/tests/connectivity.yaml`'s `test-postgres-hq` pod asserts
+  the Electric publication exists by querying
+  `pg_publication WHERE pubname='electric_publication_default'`. The
+  actual publication created by `openddil-stack/electric/electrify.sql`
+  is named `electric_publication` (no `_default` suffix — confirmed
+  against the running stack 2026-05-20). The check therefore
+  false-fails: `helm test` reports the postgres pod failed even when
+  the publication is correctly in place. ONE-LINE FIX — change the
+  pubname literal in connectivity.yaml. Deliberately tracked rather
+  than fixed inline to avoid bumping the chart version mid-deploy-
+  cycle; fold into the next natural chart change. Affects `helm test`
+  only — install and the data path are unaffected.
