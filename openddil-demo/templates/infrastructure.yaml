@@ -128,6 +128,13 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # The redpanda image runs as uid/gid 101. CSI volumes (vSphere etc.)
+      # mount root-owned, so without fsGroup the broker cannot write
+      # /var/lib/redpanda/data and exits 1 at storage init (CrashLoopBackOff).
+      # fsGroup makes kubelet chown the data PVC to gid 101. postgres and
+      # restate run as root and self-handle their volumes — no fsGroup needed.
+      securityContext:
+        fsGroup: 101
       containers:
         - name: redpanda
           image: "{{ include "openddil.thirdPartyImage" $.Values.redpandaEdge.image }}"
@@ -248,6 +255,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # fsGroup 101 — redpanda runs non-root; see the redpanda-edge
+      # StatefulSet above for the full rationale.
+      securityContext:
+        fsGroup: 101
       containers:
         - name: redpanda
           image: "{{ include "openddil.thirdPartyImage" .Values.redpandaHq.image }}"
