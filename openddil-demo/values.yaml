@@ -80,11 +80,24 @@ regions:
   - id: region-west
 
 # --- Persistence ------------------------------------------------------------
-# Default storageClass empty -> uses the cluster's default. Override per
-# component below if a faster class is wanted for Postgres or slower for
-# Redpanda etc.
+# storageClass applies to EVERY PersistentVolumeClaim the chart creates
+# (redpanda-edge x N, redpanda-hq, postgres-hq, restate-server). Empty ->
+# the cluster's default StorageClass. All PVCs are ReadWriteOnce with
+# volumeMode: Filesystem.
+#
+# vSphere CNS/CSI clusters — set storageClass to the vSphere class name:
+#   persistence:
+#     storageClass: vsphere
+# or at install time:  --set persistence.storageClass=vsphere
+# Each rendered claim then carries (example, postgres-hq at 20Gi):
+#   spec:
+#     accessModes: [ReadWriteOnce]
+#     volumeMode: Filesystem
+#     storageClassName: vsphere
+#     resources: { requests: { storage: 20Gi } }
+# The *Size values below are the requested capacities per component.
 persistence:
-  storageClass: ""
+  storageClass: ""        # e.g. "vsphere" — empty uses the cluster default
   redpandaSize: 10Gi
   postgresSize: 20Gi
   restateSize: 5Gi

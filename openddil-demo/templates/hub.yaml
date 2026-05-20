@@ -168,6 +168,7 @@ spec:
         name: data
       spec:
         accessModes: [ReadWriteOnce]
+        volumeMode: Filesystem
         {{- with .Values.persistence.storageClass }}
         storageClassName: {{ . }}
         {{- end }}
