@@ -134,11 +134,15 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        # Connect yaml hardcodes /proto (proto import path) and /ontology
-        # (sim-dis-mapping.yaml ontology file). Init container delivers
-        # those subtrees, plus the base connect.yaml and dynamic mappings.
+        # Connect yaml hardcodes /proto and /ontology. /proto must hold the
+        # .proto SOURCE files — the connect `protobuf` processor parses them
+        # at runtime to resolve message types like
+        # openddil.telemetry.v1.EntityTelemetryEvent. It is NOT the generated
+        # gen/python bindings (those are for the Python services). /ontology
+        # is the sim-dis-mapping.yaml ontology file. Init container also
+        # delivers the base connect.yaml and the dynamic mappings.
         {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/proto"      "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
             (dict "src" "demo/openddil-base-connect.yaml" "dst" "connect.yaml")
             (dict "src" "demo/dynamic-mappings" "dst" "mappings")
