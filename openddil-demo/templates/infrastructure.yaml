@@ -346,6 +346,47 @@ spec:
       targetPort: admin
 ---
 # =============================================================================
+# Redpanda broker alias Services — bare names for docker-compose-baked configs
+# =============================================================================
+# restate-config.toml (baked into the runtime-bundle) and other configs of
+# docker-compose origin hardcode BARE broker hostnames — redpanda-edge-01:9092,
+# redpanda-hq:19092. In k8s the real Services are release-prefixed
+# (<release>-redpanda-*), so the bare names do not resolve and restate's Kafka
+# ingress dies with "Name or service not known". These alias Services point the
+# bare names at the same broker pods. (The customer-overlay proprietary overlay ships
+# its own redpanda-edge-01 alias for the same reason — once these are in the
+# chart, that overlay copy is redundant.)
+{{- range .Values.edges }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda-{{ .id }}
+  labels:
+    {{- include "openddil.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-%s" .id) "root" $) | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ $.Values.redpandaEdge.internalPort }}
+      targetPort: kafka
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda-hq
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ .Values.redpandaHq.kafkaPort }}
+      targetPort: kafka
+---
+# =============================================================================
 # Postgres-HQ — single-replica StatefulSet, ElectricSQL needs wal_level=logical
 # =============================================================================
 apiVersion: v1
