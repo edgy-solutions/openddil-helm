@@ -6,7 +6,7 @@ description: >-
   detection. Ports the docker-compose stack to k8s. See
   ../README.md for sibling-repo prerequisites and the bundle image build.
 type: application
-version: 0.1.11
+version: 0.1.12
 appVersion: "0.1.5"
 keywords:
   - openddil

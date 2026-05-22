@@ -491,13 +491,24 @@ spec:
             - -c
             - |
               set -e
-              # Wait for each broker before issuing topic-create. Helm hook
-              # ordering kicks the job after install but StatefulSet pods may
-              # still be warming. Each rpk subshell will retry until the broker
-              # is reachable.
+              # Wait for each broker's Kafka API, then create topics. The Helm
+              # hook fires right after the StatefulSets are created, so broker
+              # pods may still be warming. Probe with `rpk topic list` — a
+              # plain Kafka-API (9092) call, the same surface the topic-create
+              # calls below use. NOT `rpk cluster health`: that hits the Admin
+              # API (9644), and with no -X admin.hosts it falls back to
+              # localhost, never succeeds from this pod, and silently wedges
+              # the entire post-install hook chain. Bounded retry (~3min) so a
+              # genuinely-down broker fails the Job visibly, not forever.
               for B in {{ range $topicInitBrokers }}{{ . }} {{ end }}; do
-                echo "Waiting for $B..."
-                until rpk cluster health -X brokers=$B --exit-when-healthy 2>/dev/null; do
+                echo "Waiting for $B (Kafka API)..."
+                attempts=0
+                until rpk topic list -X brokers=$B >/dev/null 2>&1; do
+                  attempts=$((attempts + 1))
+                  if [ "$attempts" -ge 60 ]; then
+                    echo "ERROR: $B unreachable after ~3min — failing job." >&2
+                    exit 1
+                  fi
                   sleep 3
                 done
                 echo "INFO: Initializing topics on $B"

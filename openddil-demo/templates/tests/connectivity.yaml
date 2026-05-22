@@ -42,8 +42,8 @@ spec:
         - |
           set -e
           B="{{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }}"
-          echo "rpk cluster health against $B"
-          rpk -X brokers=$B cluster health --exit-when-healthy
+          echo "rpk cluster info against $B"
+          rpk -X brokers=$B cluster info
           echo "rpk topic list against $B"
           rpk -X brokers=$B topic list | head -20
 ---
@@ -78,8 +78,8 @@ spec:
         - |
           set -e
           B="{{ $.Release.Name }}-redpanda-{{ $edge.id }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }}"
-          echo "rpk cluster health against $B"
-          rpk -X brokers=$B cluster health --exit-when-healthy
+          echo "rpk cluster info against $B"
+          rpk -X brokers=$B cluster info
           # Verify topic-init Job created the expected topics on this edge.
           for t in raw-sensor-stream ingress-dis-raw asset-cm-state; do
             rpk -X brokers=$B topic describe $t > /dev/null \
