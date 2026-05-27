@@ -1,19 +1,16 @@
 {{- if .Values.ingress.enabled }}
 {{- /*
-   ingress.yaml — frontend ingress + optional electric-sync proxy path.
+   ingress.yaml — single catch-all rule pointing at the frontend.
 
-   The frontend Reads ElectricSQL shapes from the browser directly. The
-   PUBLISHED frontend image hardcodes VITE_ELECTRIC_URL=http://localhost:5133/v1/shape
-   (Vite bakes env at build time). For this ingress to be useful to the
-   frontend on a 443-only cluster you need EITHER:
-     (a) rebuild the frontend image with VITE_ELECTRIC_URL=/electric/v1/shape
-         AND add a `location /electric/ { proxy_pass http://electric-sync:5133; }`
-         to frontend/nginx.conf, then publish a new image tag, OR
-     (b) rebuild with VITE_ELECTRIC_URL=https://<host>/electric/v1/shape
-         and rely on this ingress's /electric/ path.
-   Until that frontend-image work is done, the role views requesting live
-   shapes will fail in-cluster. The chart still installs cleanly; the data
-   path just isn't reachable from the browser.
+   /electric/v1/shape requests fall through to the frontend Service, where
+   nginx's `location /electric/` block (frontend/nginx.conf) strips the
+   prefix and proxies in-cluster to electric-sync. Same-origin, no CORS,
+   no separate ingress rule for electric-sync.
+
+   Earlier revisions had a second `/electric` rule pointing straight at
+   electric-sync. That bypassed nginx, so the rewrite never ran and
+   electric-sync received the unstripped `/electric/v1/shape` path and
+   returned 404. Removed.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -37,16 +34,6 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          # Electric SQL shape API (browser-direct). Place BEFORE / so the
-          # /electric/ prefix matches first.
-          - path: /electric
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-electric-sync
-                port:
-                  number: {{ .Values.electric.port }}
-          # Frontend (catch-all).
           - path: /
             pathType: Prefix
             backend:
