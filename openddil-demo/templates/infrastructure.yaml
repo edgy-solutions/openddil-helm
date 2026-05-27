@@ -59,8 +59,21 @@ spec:
         - name: toxiproxy
           image: "{{ include "openddil.thirdPartyImage" .Values.toxiproxy.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.toxiproxy.image.pullPolicy "root" .) }}
+          # Naming gotcha: the values keys here are bass-ackwards from their
+          # actual roles, but consistently so across the chart:
+          #   * .Values.toxiproxy.apiPort (default 8474) — where the hq-link
+          #     toxic LISTENS for Kafka traffic from edge-hq bridges (the
+          #     toxiproxy.json `listen` field below). Service port name "api".
+          #   * .Values.toxiproxy.proxyPort (default 8475) — the toxiproxy
+          #     admin REST API (where /proxies/* lives). Service port name
+          #     "proxy". `-port` defaults to 8474 in toxiproxy-server, which
+          #     collides with the hq-link toxic on apiPort; the proxy wins
+          #     and the admin API fails to bind. Pinning -port to proxyPort
+          #     puts admin on 8475 — what nginx's /proxies/ and the
+          #     projector's edge_buffer monitor both expect.
           args:
             - "-host=0.0.0.0"
+            - "-port={{ .Values.toxiproxy.proxyPort }}"
             - "-config=/etc/toxiproxy.json"
           ports:
             - name: api
