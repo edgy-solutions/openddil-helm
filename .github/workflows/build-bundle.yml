@@ -10,11 +10,23 @@ name: Build and publish runtime-bundle image
 #   * manual workflow_dispatch (e.g. rebuild after openddil-contracts
 #     adds a new proto without anything in openddil-helm changing)
 #
-# Cross-repo "rebuild when any source changes" wiring is intentionally
-# left out — would require `repository_dispatch` triggers fired from
-# each source repo's own workflow, which adds a coordination layer we
-# don't need yet. Manual dispatch + push-to-helm covers the common
-# cases (Dockerfile edit, dependency bump, schema change).
+# Cross-repo triggers — three paths to a rebuild:
+#
+#   1. push to master of THIS repo (bundle/** or this workflow file)
+#   2. repository_dispatch from a sibling source repo's own workflow
+#      (currently wired: openddil-contracts via its
+#      notify-bundle-rebuild.yml. Same pattern can be copy-pasted into
+#      openddil-stack / openddil-tactical-agents / openddil-demo when
+#      churn there warrants it.) The dispatching workflow needs a PAT
+#      with contents:write on this repo, stored as a secret in the
+#      source repo (BUNDLE_REBUILD_PAT).
+#   3. schedule — daily, regardless of activity, as a safety net for
+#      any source repo NOT yet wired to dispatch. Catches drift even
+#      when nobody manually triggers and no dispatch fires. Bundle
+#      build takes ~3-5 minutes; daily cost is negligible.
+#   4. workflow_dispatch — manual button in the Actions UI for ad-hoc
+#      rebuilds (e.g. retrying a flaky build, or specifying an extra
+#      tag).
 
 on:
   push:
@@ -22,6 +34,13 @@ on:
     paths:
       - "bundle/**"
       - ".github/workflows/build-bundle.yml"
+  repository_dispatch:
+    types: [source-repo-changed]
+  schedule:
+    # 06:00 UTC daily. Picks up any source-repo change that wasn't
+    # dispatch-triggered (e.g. unwired source repos, or a dispatch that
+    # failed silently). Cron uses GitHub Actions UTC.
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       tag:
