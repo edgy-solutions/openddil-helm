@@ -201,26 +201,28 @@ function Resolve-DesiredDigest {
 }
 
 # -----------------------------------------------------------------------
-# What digest does the destination TAG currently point at? Returns
-# $null if the destination doesn't exist (never mirrored) or auth
-# fails. Treated by caller the same as "different digest" -- mirror.
-# Same crane/buildx dispatch as above.
+# Destination digest = same resolution path as source. We removed a
+# separate Get-DestinationTagDigest helper that used `--format
+# '{{.Manifest.Digest}}'` because of two stacked bugs:
+#
+#   1. Some buildx versions silently ignore --format here. The helper
+#      ended up returning the entire default text-format output (the
+#      `Name:` / `MediaType:` / `Digest:` lines all concatenated).
+#      Comparison against the source's clean sha256 never matched, so
+#      every image was treated as "needs mirroring" and re-pushed.
+#
+#   2. Even with --format working, the returned value was the multi-
+#      arch INDEX digest, not the platform-specific child digest. The
+#      source side resolves to the platform child (correct); the
+#      destination side resolved to the index (wrong). Two different
+#      layers of the same manifest tree -- never equal -- and every
+#      mirror "missed" the cache.
+#
+# Fix: just reuse Resolve-DesiredDigest for the destination too. It
+# already resolves multi-arch indexes to the same platform-specific
+# child digest the source side uses, so the comparison is apples-to-
+# apples by construction.
 # -----------------------------------------------------------------------
-function Get-DestinationTagDigest {
-    param([string]$Dst)
-
-    if ($Method -eq 'crane') {
-        $out = & crane digest $Dst 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
-        return $null
-    }
-
-    $out = & docker buildx imagetools inspect $Dst --format '{{.Manifest.Digest}}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $out) {
-        return $out.Trim()
-    }
-    return $null
-}
 
 # -----------------------------------------------------------------------
 # buildx engine: inspect the source, resolve the <Platform> child by
@@ -286,14 +288,15 @@ foreach ($img in $Images) {
     Write-Host "    -> $dst"
 
     try {
-        # Hash-aware skip: compare source's desired digest to destination's
-        # current tag digest. Match -> no bytes transferred, just log.
-        # Mismatch (or destination absent) -> mirror.
+        # Hash-aware skip: resolve source AND destination to the
+        # platform-specific child digest (Resolve-DesiredDigest handles
+        # both single-arch and multi-arch indexes). Compare.
         $srcDigest = Resolve-DesiredDigest -Ref $src -Platform $Platform
         if (-not $srcDigest) {
             throw "could not resolve source digest for $src (image missing / not logged in?)"
         }
-        $dstDigest = Get-DestinationTagDigest -Dst $dst
+        # Destination may not exist yet (never mirrored) -> null -> NEW.
+        $dstDigest = Resolve-DesiredDigest -Ref $dst -Platform $Platform
 
         if ($dstDigest -eq $srcDigest) {
             Write-Host "    UNCHANGED: destination already at $srcDigest" -ForegroundColor DarkGray
