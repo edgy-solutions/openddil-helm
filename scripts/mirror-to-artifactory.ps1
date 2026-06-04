@@ -1,8 +1,14 @@
-<#
+﻿<#
 .SYNOPSIS
   Mirror every container image the openddil-demo chart references from its
   upstream registry (ghcr.io / Docker Hub / docker.redpanda.com) into a
   single Artifactory (or any other) registry under one base path.
+
+  Hash-aware: each image is checked against the destination first. If the
+  destination tag already points at the source's desired digest, the
+  image is logged as UNCHANGED and no bytes are transferred. Saves
+  bandwidth and gives a clear "what changed since last run" report at
+  the end (UPDATE / NEW / UNCHANGED counts).
 
 .DESCRIPTION
   Two copy engines, selectable with -Method:
@@ -148,46 +154,106 @@ function Get-RepoOnly {
 }
 
 # -----------------------------------------------------------------------
-# buildx engine: inspect the source, resolve the <Platform> child by
-# digest, copy ONLY that child via 'imagetools create'. Drops the
-# provenance attestation (it is a different, unreferenced child).
+# Resolve a reference to the digest we WANT the destination to point at.
+# For multi-arch sources, this is the platform-specific child digest (the
+# same value Copy-WithBuildx would use as the source-by-digest ref).
+# For single-arch sources, it's the manifest's own digest.
+#
+# Dispatches by $Method (script-scope param) so crane users don't need
+# buildx installed too. Returns $null on failure -- caller treats null
+# as "can't verify, just mirror."
 # -----------------------------------------------------------------------
-function Copy-WithBuildx {
-    param([string]$Src, [string]$Dst, [string]$Platform)
+function Resolve-DesiredDigest {
+    param([string]$Ref, [string]$Platform)
 
+    if ($Method -eq 'crane') {
+        # crane digest --platform resolves multi-arch indexes to the
+        # child digest in one call. For single-arch it returns the
+        # manifest's own digest.
+        $out = & crane digest --platform $Platform $Ref 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
+        return $null
+    }
+
+    # buildx path
     $plat  = $Platform -split '/'
     $os    = $plat[0]
     $arch  = $plat[1]
 
-    $rawLines = & docker buildx imagetools inspect $Src --raw 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "buildx inspect failed for $Src (image missing / not logged in?)"
-    }
+    $rawLines = & docker buildx imagetools inspect $Ref --raw 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
     $manifest = ($rawLines -join "`n") | ConvertFrom-Json
 
     if ($manifest.manifests) {
-        # Multi-entry OCI index. Find the child matching the platform.
         $child = $manifest.manifests | Where-Object {
             $_.platform.os -eq $os -and $_.platform.architecture -eq $arch
         } | Select-Object -First 1
-        if (-not $child) {
-            throw "no $Platform manifest in $Src (arm64 not published yet?)"
-        }
-        $srcByDigest = (Get-RepoOnly $Src) + '@' + $child.digest
+        if (-not $child) { return $null }
+        return $child.digest
+    }
+
+    # Single-arch: top-level manifest digest.
+    $top = & docker buildx imagetools inspect $Ref --format '{{.Manifest.Digest}}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $top) {
+        return $top.Trim()
+    }
+    return $null
+}
+
+# -----------------------------------------------------------------------
+# What digest does the destination TAG currently point at? Returns
+# $null if the destination doesn't exist (never mirrored) or auth
+# fails. Treated by caller the same as "different digest" -- mirror.
+# Same crane/buildx dispatch as above.
+# -----------------------------------------------------------------------
+function Get-DestinationTagDigest {
+    param([string]$Dst)
+
+    if ($Method -eq 'crane') {
+        $out = & crane digest $Dst 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
+        return $null
+    }
+
+    $out = & docker buildx imagetools inspect $Dst --format '{{.Manifest.Digest}}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $out) {
+        return $out.Trim()
+    }
+    return $null
+}
+
+# -----------------------------------------------------------------------
+# buildx engine: inspect the source, resolve the <Platform> child by
+# digest, copy ONLY that child via 'imagetools create'. Drops the
+# provenance attestation (it is a different, unreferenced child).
+# Accepts a pre-resolved $SrcDigest so the caller's hash-skip check
+# doesn't need to re-inspect.
+# -----------------------------------------------------------------------
+function Copy-WithBuildx {
+    param([string]$Src, [string]$Dst, [string]$Platform, [string]$SrcDigest)
+
+    if ($SrcDigest) {
+        # Caller already resolved the digest. Tag the destination with the
+        # exact source-by-digest reference (drops provenance attestation
+        # for multi-arch; harmless no-op for single-arch).
+        $srcByDigest = (Get-RepoOnly $Src) + '@' + $SrcDigest
         if ($DryRun) {
             Write-Host "[dry-run] docker buildx imagetools create --tag $Dst $srcByDigest" -ForegroundColor Yellow
         } else {
             & docker buildx imagetools create --tag $Dst $srcByDigest
             if ($LASTEXITCODE -ne 0) { throw "buildx create failed for $Dst" }
         }
+        return
+    }
+
+    # Fallback path -- should not be reached in normal flow because the
+    # main loop resolves the digest up-front, but keep for safety in
+    # case anyone calls Copy-WithBuildx directly.
+    if ($DryRun) {
+        Write-Host "[dry-run] docker buildx imagetools create --tag $Dst $Src" -ForegroundColor Yellow
     } else {
-        # Plain single-arch manifest; copy as-is.
-        if ($DryRun) {
-            Write-Host "[dry-run] docker buildx imagetools create --tag $Dst $Src" -ForegroundColor Yellow
-        } else {
-            & docker buildx imagetools create --tag $Dst $Src
-            if ($LASTEXITCODE -ne 0) { throw "buildx create failed for $Dst" }
-        }
+        & docker buildx imagetools create --tag $Dst $Src
+        if ($LASTEXITCODE -ne 0) { throw "buildx create failed for $Dst" }
     }
 }
 
@@ -208,7 +274,10 @@ Write-Host "Mirroring $($Images.Count) images to $RepoBase" -ForegroundColor Cya
 Write-Host "Method: $Method   Platform: $Platform" -ForegroundColor Cyan
 Write-Host ""
 
-$failed = @()
+$failed     = @()
+$mirrored   = @()
+$unchanged  = @()
+
 foreach ($img in $Images) {
     $src = $img.src
     $dst = "$RepoBase/$($img.dst)"
@@ -217,15 +286,53 @@ foreach ($img in $Images) {
     Write-Host "    -> $dst"
 
     try {
+        # Hash-aware skip: compare source's desired digest to destination's
+        # current tag digest. Match -> no bytes transferred, just log.
+        # Mismatch (or destination absent) -> mirror.
+        $srcDigest = Resolve-DesiredDigest -Ref $src -Platform $Platform
+        if (-not $srcDigest) {
+            throw "could not resolve source digest for $src (image missing / not logged in?)"
+        }
+        $dstDigest = Get-DestinationTagDigest -Dst $dst
+
+        if ($dstDigest -eq $srcDigest) {
+            Write-Host "    UNCHANGED: destination already at $srcDigest" -ForegroundColor DarkGray
+            $unchanged += $src
+            Write-Host ""
+            continue
+        }
+
+        if ($dstDigest) {
+            Write-Host "    UPDATE  src=$srcDigest" -ForegroundColor Yellow
+            Write-Host "            dst=$dstDigest (will be replaced)" -ForegroundColor Yellow
+        } else {
+            Write-Host "    NEW     src=$srcDigest (destination tag absent)" -ForegroundColor Yellow
+        }
+
         if ($Method -eq 'crane') {
             Copy-WithCrane  -Src $src -Dst $dst -Platform $Platform
         } else {
-            Copy-WithBuildx -Src $src -Dst $dst -Platform $Platform
+            Copy-WithBuildx -Src $src -Dst $dst -Platform $Platform -SrcDigest $srcDigest
         }
+        $mirrored += $src
     } catch {
         Write-Host "    FAILED: $_" -ForegroundColor Red
         $failed += $src
     }
+    Write-Host ""
+}
+
+Write-Host ""
+Write-Host "Summary:" -ForegroundColor Cyan
+Write-Host ("  unchanged : {0,3}" -f $unchanged.Count) -ForegroundColor DarkGray
+Write-Host ("  mirrored  : {0,3}" -f $mirrored.Count)  -ForegroundColor Green
+$failColor = if ($failed.Count -gt 0) { 'Red' } else { 'DarkGray' }
+Write-Host ("  failed    : {0,3}" -f $failed.Count)    -ForegroundColor $failColor
+Write-Host ""
+
+if ($mirrored.Count -gt 0) {
+    Write-Host "Newly mirrored / updated images:" -ForegroundColor Green
+    $mirrored | ForEach-Object { Write-Host "  + $_" -ForegroundColor Green }
     Write-Host ""
 }
 
@@ -235,7 +342,11 @@ if ($failed.Count -gt 0) {
     exit 1
 }
 
-Write-Host "All $($Images.Count) images mirrored to $RepoBase" -ForegroundColor Cyan
+if ($mirrored.Count -eq 0) {
+    Write-Host "All images already up to date at $RepoBase -- no bytes transferred." -ForegroundColor Cyan
+} else {
+    Write-Host "Mirror complete: $($mirrored.Count) updated, $($unchanged.Count) skipped." -ForegroundColor Cyan
+}
 Write-Host ""
 Write-Host "Next step: substitute <ARTIFACTORY> in values-artifactory.yaml"
 Write-Host "with ${RepoBase}, then helm install. PowerShell substitution:"
