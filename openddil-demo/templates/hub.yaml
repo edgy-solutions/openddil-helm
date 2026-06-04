@@ -5,6 +5,10 @@
      * restate-server (StatefulSet with PVC for /restate-data)
      * restate-hub (consumer bridge — mounts restate_hub.py from bundle)
      * cm-service + cm-service-bootstrap (post-install Job)
+     * asset-registry-service (ADR-0028: canonical writer for
+       public.asset_registry; one pod, multi-broker Faust composition
+       consuming telemetry-latest-state from every edge, publishes
+       asset-registry-events on HQ broker for consumer cache pub/sub)
      * logistics-fusion-service + logistics-fusion-bootstrap (post-install Job)
      * projector-hq (HQ-cluster topic projection to postgres-hq)
      * frontend (nginx-served static + /proxies/ proxy to toxiproxy)
@@ -320,6 +324,126 @@ spec:
     - name: http
       port: {{ .Values.cmService.port }}
       targetPort: http
+---
+# ===========================================================================
+# asset-registry-service (ADR-0028) — canonical asset->edge->region writer
+# ===========================================================================
+# One pod composes per-edge Faust Apps in-process. Consumes
+# telemetry-latest-state from each edge broker, runs edge-assignment to
+# compute (edge_id, region_id), upserts asset_registry on HQ postgres,
+# publishes asset-registry-events on HQ broker for consumer cache
+# invalidation. Single writer for the asset_registry table by design --
+# any future static-assignment input lands via a separate admin write
+# path, not a second Faust pod.
+#
+# Bundle init brings in /proto (contracts/gen/python) and
+# /etc/openddil/edge-assignment/edge-assignment.yaml (the FOB list +
+# strategy chain, same file the projector reads).
+#
+# Depends on:
+#   - postgres-schema-init having applied the 20260604202813 migration
+#     (CHECK constraint on assignment_source enforces the four ADR-0028
+#     values; older migrations would let the service start but every
+#     upsert would fail).
+#   - The asset-registry-events topic existing (topic-init creates it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-asset-registry-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 4 }}
+spec:
+  replicas: 1   # Single writer by design (ADR-0028). DO NOT scale up.
+  strategy:
+    type: Recreate   # Faust state recovery prefers a stop-then-start cycle.
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: asset-registry-service
+          image: {{ include "openddil.image" (dict "name" .Values.assetRegistry.image.name "tag" .Values.assetRegistry.image.tag "root" .) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.assetRegistry.image.pullPolicy "root" .) }}
+          env:
+            - name: ASSET_REGISTRY_POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
+            - name: ASSET_REGISTRY_EDGES
+              # Comma-separated edge=broker pairs across ALL edges.
+              # Each pair becomes one Faust App in the composed worker.
+              {{- $edgePairs := list }}
+              {{- range $edge := .Values.edges }}
+              {{- $edgePairs = append $edgePairs (printf "%s=%s-redpanda-%s%s:%d" $edge.id $.Release.Name $edge.id (include "openddil.svcDomain" $) (int $.Values.redpandaEdge.internalPort)) }}
+              {{- end }}
+              value: {{ join "," $edgePairs | quote }}
+            - name: ASSET_REGISTRY_KAFKA_BROKERS
+              value: {{ printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) | quote }}
+            - name: ASSET_REGISTRY_INPUT_TOPIC
+              value: "telemetry-latest-state"
+            - name: ASSET_REGISTRY_OUTPUT_TOPIC
+              value: {{ .Values.assetRegistry.outputTopic | quote }}
+            # EDGE_ASSIGNMENT_CONFIG is intentionally NOT set in the OSS
+            # chart. The OSS chart has no embedded FOB list -- without an
+            # overlay, every asset assigns to "unspecified" via the
+            # service's built-in fallback (still useful: divergence
+            # tracking + asset_id->edge cache for downstream consumers).
+            # Customer overlays patch this in via the same post-install
+            # hook pattern they use to point the projectors at their
+            # FOB file:
+            #   kubectl patch deploy/<release>-asset-registry-service \
+            #     --type strategic -p '{"spec":{"template":{"spec":{
+            #       "containers":[{"name":"asset-registry-service",
+            #         "volumeMounts":[{"name":"edge-assignment",
+            #           "mountPath":"/etc/openddil/edge-assignment"}],
+            #         "env":[{"name":"EDGE_ASSIGNMENT_CONFIG",
+            #           "value":"/etc/openddil/edge-assignment/edge-assignment.yaml"}]
+            #       }],
+            #       "volumes":[{"name":"edge-assignment","configMap":
+            #         {"name":"<slug>-edge-assignment"}}]
+            #     }}}}'
+            - name: ASSET_REGISTRY_WEB_PORT
+              value: {{ .Values.assetRegistry.webPort | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - name: faust-web
+              containerPort: {{ .Values.assetRegistry.webPort }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+          resources:
+            {{- toYaml .Values.assetRegistry.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-asset-registry-service
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 4 }}
+  ports:
+    - name: faust-web
+      port: {{ .Values.assetRegistry.webPort }}
+      targetPort: faust-web
 ---
 # cm-service-bootstrap — Job: registers CM service with Restate + creates
 # subscriptions per edge cluster. Helm hook, fires after CM service is up.

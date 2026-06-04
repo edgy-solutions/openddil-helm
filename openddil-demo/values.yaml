@@ -327,6 +327,33 @@ logisticsFusion:
     limits:   { cpu: 500m, memory: 512Mi }
   port: 9081
 
+# asset-registry-service (ADR-0028) -- centralized writer for the
+# canonical asset->edge->region mapping. One pod, HQ-tier, composes
+# per-edge Faust Apps in-process. Reads telemetry-latest-state from
+# each edge's broker, runs edge-assignment.yaml, upserts asset_registry
+# in HQ postgres, publishes asset-registry-events to HQ broker for
+# consumer cache invalidation. See ADR-0028 for the priority + divergence
+# semantics. Service lives in openddil-stack/asset-registry-service/.
+assetRegistry:
+  image:
+    name: asset-registry-service
+    tag: ""
+    pullPolicy: ""
+  resources:
+    # Light footprint -- one upsert per telemetry event, no in-memory
+    # aggregation. Bumps may be needed for high-asset-count deployments
+    # (the in-pod cache scales linearly with asset count).
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  # Base port for Faust web/health. Per-edge Apps increment from this
+  # (port + 1 for edge-02, +2 for edge-03, ...). Service exposes the
+  # base.
+  webPort: 6070
+  # Topics the service writes. Pre-created by the topic-init Job so the
+  # service doesn't have to declare on-startup (matches the rest of the
+  # chart's "explicit topic provisioning" stance).
+  outputTopic: asset-registry-events
+
 frontend:
   image:
     name: frontend
