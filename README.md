@@ -34,8 +34,9 @@ openddil-helm/
 ## Image-build flow (where do the images come from?)
 
 Every per-service image (`frontend`, `cm-service`, `logistics-fusion-
-service`, `projector`, `sensor-ingest`, `faust-edge`, `faust-regional`,
-`hub-restate-projector`) is built and published to ghcr.io by a GitHub
+service`, `asset-registry-service`, `projector`, `sensor-ingest`,
+`faust-edge`, `faust-regional`, `hub-restate-projector`) is built and
+published to ghcr.io by a GitHub
 Actions workflow living in **its own service repo** — typically
 `.github/workflows/docker-build.yml`, triggered on push to `master`.
 The helm chart pulls those images by tag (`global.imageTag`, default

@@ -117,7 +117,7 @@ if ($Method -eq 'crane') {
 # Keep the src tags synced with openddil-demo/values.yaml.
 # -----------------------------------------------------------------------
 $Images = @(
-    # OpenDDIL-owned (9)
+    # OpenDDIL-owned (10)
     @{ src='ghcr.io/edgy-solutions/openddil/frontend:latest';                 dst='edgy-solutions/openddil/frontend:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/sensor-ingest:latest';            dst='edgy-solutions/openddil/sensor-ingest:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/faust-edge:latest';               dst='edgy-solutions/openddil/faust-edge:latest' },
@@ -125,6 +125,7 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/projector:latest';                dst='edgy-solutions/openddil/projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/cm-service:latest';               dst='edgy-solutions/openddil/cm-service:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/logistics-fusion-service:latest'; dst='edgy-solutions/openddil/logistics-fusion-service:latest' },
+    @{ src='ghcr.io/edgy-solutions/openddil/asset-registry-service:latest';   dst='edgy-solutions/openddil/asset-registry-service:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/hub-restate-projector:latest';    dst='edgy-solutions/openddil/hub-restate-projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';           dst='edgy-solutions/openddil/runtime-bundle:latest' },
 
