@@ -283,18 +283,17 @@ spec:
           image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
           env:
-            {{- if .Values.cmService.extraBaselinesConfigMap }}
-            # Customer overlay layered an additional baseline dir at
-            # /baselines-overlay. CM_BASELINES_DIRS replaces CM_BASELINES_DIR
-            # (they are not merged by the loader); both dirs are scanned and
-            # variants merged. A duplicate platform_variant across dirs is a
-            # hard error -- the operator must resolve the collision.
-            - name: CM_BASELINES_DIRS
-              value: "/baselines:/baselines-overlay"
-            {{- else }}
+            # cm-service multi-directory baseline support (CM_BASELINES_DIRS)
+            # is intentionally NOT wired here. Customer overlays that want to
+            # layer additional baselines follow the same overlay-patch pattern
+            # the frontend + projector overlays use: a post-install Job in
+            # the customer chart `kubectl patch`es this Deployment to add a
+            # /baselines-overlay volumeMount + CM_BASELINES_DIRS env. Keeps
+            # the OSS chart customer-agnostic. See
+            # openddil-customer-bundle-customer-overlay/chart/templates/
+            # hook-patch-cm-service.yaml for the canonical example.
             - name: CM_BASELINES_DIR
               value: "/baselines"
-            {{- end }}
             - name: CM_KAFKA_BROKERS
               value: {{ $hqBroker | quote }}
             - name: CM_HTTP_PORT
@@ -315,26 +314,11 @@ spec:
             - name: bundle-shared
               mountPath: /baselines
               subPath: baselines
-            {{- if .Values.cmService.extraBaselinesConfigMap }}
-            - name: baselines-overlay
-              mountPath: /baselines-overlay
-              readOnly: true
-            {{- end }}
           resources:
             {{- toYaml .Values.cmService.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
-        {{- if .Values.cmService.extraBaselinesConfigMap }}
-        # Customer overlay supplies a ConfigMap whose keys are the YAML
-        # files to add to the baseline registry. The overlay chart creates
-        # the ConfigMap; this chart only mounts it -- so the customer
-        # bundle and the OSS chart stay loosely coupled (no shared
-        # filename / key convention beyond "<variant>.yaml").
-        - name: baselines-overlay
-          configMap:
-            name: {{ .Values.cmService.extraBaselinesConfigMap | quote }}
-        {{- end }}
 ---
 apiVersion: v1
 kind: Service

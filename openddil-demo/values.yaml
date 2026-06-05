@@ -316,22 +316,15 @@ cmService:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
   port: 9080
-  # Customer-overlay knob: name of a ConfigMap whose data keys are
-  # additional baseline YAML files to layer on top of the OSS baselines
-  # (the runtime-bundle's contracts/baselines). Each key becomes a file
-  # under /baselines-overlay; the file's contents must parse as a
-  # ConfigurationBaseline (same YAML shape as openddil-contracts/baselines).
-  #
-  # When set, cm-service receives CM_BASELINES_DIRS=/baselines:/baselines-overlay
-  # and scans BOTH directories. A duplicate platform_variant across
-  # directories is a hard error (intentional -- silent precedence creates
-  # debug-hell discrepancies between asset_cm_state and what the operator
-  # expects).
-  #
-  # Customer charts (e.g. openddil-customer-bundle-customer-overlay's chart) own
-  # the ConfigMap. The OSS chart only mounts it, so the two stay loosely
-  # coupled.
-  extraBaselinesConfigMap: ""
+  # Customer overlays that want to layer additional baseline YAMLs on
+  # top of the OSS set (the runtime-bundle's contracts/baselines) do so
+  # via the standard overlay-patch pattern -- a post-install Job in the
+  # customer chart `kubectl patch`es this Deployment to add a
+  # /baselines-overlay volumeMount + CM_BASELINES_DIRS env. This chart
+  # stays customer-agnostic; no knob lives here. Same pattern the
+  # customer-overlay bundle uses for the frontend + projector overlays. See
+  # openddil-customer-bundle-customer-overlay/chart/templates/
+  # hook-patch-cm-service.yaml for the canonical example.
 
 logisticsFusion:
   image:
