@@ -167,6 +167,20 @@ function Get-RepoOnly {
 function Resolve-DesiredDigest {
     param([string]$Ref, [string]$Platform)
 
+    # Relax $ErrorActionPreference inside this function. The script-wide
+    # 'Stop' policy turns the stderr `2>$null` redirection below into a
+    # terminating error on PowerShell 5.1: when a native exe like
+    # `docker buildx imagetools inspect` writes to stderr (e.g. "image not
+    # found" on a never-mirrored destination), PS wraps each stderr line in
+    # a NativeCommandError ErrorRecord. With Stop, that ErrorRecord
+    # terminates BEFORE we get to the `if ($LASTEXITCODE -ne 0)` null-
+    # return below, the outer try/catch in the main loop then treats the
+    # image as FAILED instead of NEW, and a first-time mirror of a fresh
+    # destination tag never happens. Restoring 'Continue' locally lets the
+    # exit-code check do its job. See the PowerShell 5.1 note at the top
+    # of CLAUDE.md / the system prompt for the underlying behavior.
+    $ErrorActionPreference = 'Continue'
+
     if ($Method -eq 'crane') {
         # crane digest --platform resolves multi-arch indexes to the
         # child digest in one call. For single-arch it returns the
