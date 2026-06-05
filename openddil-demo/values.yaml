@@ -316,6 +316,22 @@ cmService:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
   port: 9080
+  # Customer-overlay knob: name of a ConfigMap whose data keys are
+  # additional baseline YAML files to layer on top of the OSS baselines
+  # (the runtime-bundle's contracts/baselines). Each key becomes a file
+  # under /baselines-overlay; the file's contents must parse as a
+  # ConfigurationBaseline (same YAML shape as openddil-contracts/baselines).
+  #
+  # When set, cm-service receives CM_BASELINES_DIRS=/baselines:/baselines-overlay
+  # and scans BOTH directories. A duplicate platform_variant across
+  # directories is a hard error (intentional -- silent precedence creates
+  # debug-hell discrepancies between asset_cm_state and what the operator
+  # expects).
+  #
+  # Customer charts (e.g. openddil-customer-bundle-customer-overlay's chart) own
+  # the ConfigMap. The OSS chart only mounts it, so the two stay loosely
+  # coupled.
+  extraBaselinesConfigMap: ""
 
 logisticsFusion:
   image:
