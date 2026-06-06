@@ -232,7 +232,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: restate-hub
-          image: {{ include "openddil.image" (dict "name" .Values.restateHub.image.name "tag" .Values.restateHub.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.restateHub.image.name "tag" .Values.restateHub.image.tag "digest" .Values.restateHub.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.restateHub.image.pullPolicy "root" .) }}
           command: ["/opt/venv/bin/python", "/app/restate_hub.py"]
           env:
@@ -280,7 +280,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: cm-service
-          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "digest" .Values.cmService.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
           env:
             # cm-service multi-directory baseline support (CM_BASELINES_DIRS)
@@ -385,7 +385,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: asset-registry-service
-          image: {{ include "openddil.image" (dict "name" .Values.assetRegistry.image.name "tag" .Values.assetRegistry.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.assetRegistry.image.name "tag" .Values.assetRegistry.image.tag "digest" .Values.assetRegistry.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.assetRegistry.image.pullPolicy "root" .) }}
           env:
             - name: ASSET_REGISTRY_POSTGRES_DSN
@@ -485,7 +485,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: bootstrap
-          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "digest" .Values.cmService.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
           command: ["python", "/app/bootstrap/register_subscriptions.py"]
           env:
@@ -541,7 +541,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: logistics-fusion
-          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "digest" .Values.logisticsFusion.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.logisticsFusion.image.pullPolicy "root" .) }}
           env:
             - name: FUSION_KAFKA_BROKERS
@@ -618,7 +618,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: bootstrap
-          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "digest" .Values.logisticsFusion.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.logisticsFusion.image.pullPolicy "root" .) }}
           command: ["python", "/app/bootstrap/register_subscriptions.py"]
           env:
@@ -677,7 +677,7 @@ spec:
           ) "root" .) | nindent 8 }}
       containers:
         - name: projector
-          image: {{ include "openddil.image" (dict "name" .Values.projector.image.name "tag" .Values.projector.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.projector.image.name "tag" .Values.projector.image.tag "digest" .Values.projector.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.projector.image.pullPolicy "root" .) }}
           env:
             - name: KAFKA_BROKERS
@@ -741,7 +741,7 @@ spec:
       {{- end }}
       containers:
         - name: frontend
-          image: {{ include "openddil.image" (dict "name" .Values.frontend.image.name "tag" .Values.frontend.image.tag "root" .) }}
+          image: {{ include "openddil.image" (dict "name" .Values.frontend.image.name "tag" .Values.frontend.image.tag "digest" .Values.frontend.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.frontend.image.pullPolicy "root" .) }}
           ports:
             - name: http

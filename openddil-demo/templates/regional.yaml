@@ -43,7 +43,7 @@ spec:
           ) "root" $root) | nindent 8 }}
       containers:
         - name: faust-regional
-          image: {{ include "openddil.image" (dict "name" $root.Values.faustRegional.image.name "tag" $root.Values.faustRegional.image.tag "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.faustRegional.image.name "tag" $root.Values.faustRegional.image.tag "digest" $root.Values.faustRegional.image.digest "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.faustRegional.image.pullPolicy "root" $root) }}
           workingDir: /tmp
           env:

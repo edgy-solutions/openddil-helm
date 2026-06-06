@@ -34,6 +34,11 @@ bundle:
   image:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
+    digest: ""            # Non-empty -> <registry>/<prefix>/<name>@<digest>
+                          # bypassing tag entirely. Mirror-time digest
+                          # pinning lives in a values-pinned.yaml file
+                          # emitted by scripts/mirror-to-artifactory.ps1.
+                          # See README "Digest pinning" section.
     pullPolicy: ""        # Empty -> falls back to global.imagePullPolicy
   # Resources for the bundle-loader initContainer that every consumer pod
   # runs. It only does `cp -r` of config subtrees out of the bundle image
@@ -249,6 +254,7 @@ restateHub:
     # over /app/restate_hub.py. See openddil-tactical-agents/hub/.
     name: hub-restate-projector
     tag: ""
+    digest: ""
     pullPolicy: ""
   # Long-running Python consumer — explicit resources so it does not
   # inherit a too-small cluster-default LimitRange and get OOMKilled.
@@ -261,6 +267,7 @@ sensorIngest:
   image:
     name: sensor-ingest
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 128Mi }
@@ -291,6 +298,7 @@ faustEdge:
   image:
     name: faust-edge
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -306,6 +314,7 @@ projector:
   image:
     name: projector
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -327,6 +336,7 @@ faustRegional:
   image:
     name: faust-regional
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -337,6 +347,7 @@ cmService:
   image:
     name: cm-service
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -356,6 +367,7 @@ logisticsFusion:
   image:
     name: logistics-fusion-service
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -373,6 +385,7 @@ assetRegistry:
   image:
     name: asset-registry-service
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     # Light footprint -- one upsert per telemetry event, no in-memory
@@ -393,6 +406,7 @@ frontend:
   image:
     name: frontend
     tag: ""
+    digest: ""
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 64Mi }

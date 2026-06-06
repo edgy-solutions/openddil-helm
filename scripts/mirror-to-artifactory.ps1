@@ -83,7 +83,17 @@ param(
 
     [string]$Platform = 'linux/amd64',
 
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    # Emit a Helm values-pinned.yaml at this path with the destination
+    # digest of every OpenDDIL-owned image. Default is values-pinned.yaml
+    # next to the script. Use with `helm install -f values-pinned.yaml`
+    # to eliminate the `:latest pulled at different times to different
+    # nodes produced different content` drift class that broke
+    # asset_cm_state replays after redeploys.
+    #
+    # Set to '' to skip emission (back-compat / dry-run scenarios).
+    [string]$PinnedValuesPath = "$PSScriptRoot\..\values-pinned.yaml"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -295,6 +305,13 @@ $failed     = @()
 $mirrored   = @()
 $unchanged  = @()
 
+# Captured digests for values-pinned.yaml emission. Key = source image
+# short name (last path segment, no tag). Value = sha256 string.
+# Populated for every image successfully resolved (mirrored OR unchanged)
+# so the file always reflects "what's actually at the destination right
+# now," not just "what was new this run."
+$DigestByShortName = @{}
+
 foreach ($img in $Images) {
     $src = $img.src
     $dst = "$RepoBase/$($img.dst)"
@@ -310,6 +327,16 @@ foreach ($img in $Images) {
         if (-not $srcDigest) {
             throw "could not resolve source digest for $src (image missing / not logged in?)"
         }
+
+        # Record source digest for values-pinned.yaml. Same content lands
+        # at the destination whether we copy or skip; the short-name key
+        # is the last path segment of the source ref, before the ':tag'.
+        # Example: 'ghcr.io/edgy-solutions/openddil/cm-service:latest'
+        #          -> 'cm-service'.
+        $repoOnly = Get-RepoOnly $src
+        $shortName = ($repoOnly -split '/')[-1]
+        $DigestByShortName[$shortName] = $srcDigest
+
         # Destination may not exist yet (never mirrored) -> null -> NEW.
         $dstDigest = Resolve-DesiredDigest -Ref $dst -Platform $Platform
 
@@ -364,6 +391,136 @@ if ($mirrored.Count -eq 0) {
     Write-Host "All images already up to date at $RepoBase -- no bytes transferred." -ForegroundColor Cyan
 } else {
     Write-Host "Mirror complete: $($mirrored.Count) updated, $($unchanged.Count) skipped." -ForegroundColor Cyan
+}
+
+# -----------------------------------------------------------------------
+# values-pinned.yaml — Helm overlay file with destination digests
+# -----------------------------------------------------------------------
+# Mapping table: source image short name (last path segment, no tag)
+# -> one or more dotted Helm values paths whose .digest field should
+# get the captured sha256. One source can fan out to multiple chart
+# values blocks (e.g. the `redpanda` image is referenced by BOTH
+# redpandaEdge and redpandaHq), which is what makes a per-image map
+# of paths rather than a 1:1 dict the right shape.
+#
+# When a source image short name has no entry here, the script logs a
+# warning at emit time and skips it -- safe default for new images
+# added to the inventory above. The operator either adds a mapping
+# here or accepts the digest pinning gap for that one image.
+$SrcShortNameToValuesPaths = @{
+    # OpenDDIL-owned (use openddil.image helper, accepts .digest)
+    'frontend'                 = @('frontend.image.digest')
+    'sensor-ingest'            = @('sensorIngest.image.digest')
+    'faust-edge'               = @('faustEdge.image.digest')
+    'faust-regional'           = @('faustRegional.image.digest')
+    'projector'                = @('projector.image.digest')
+    'cm-service'               = @('cmService.image.digest')
+    'logistics-fusion-service' = @('logisticsFusion.image.digest')
+    'asset-registry-service'   = @('assetRegistry.image.digest')
+    'hub-restate-projector'    = @('restateHub.image.digest')
+    'runtime-bundle'           = @('bundle.image.digest')
+    # Third-party (use openddil.thirdPartyImage helper, accepts .digest)
+    'redpanda'                 = @('redpandaEdge.image.digest', 'redpandaHq.image.digest')
+    'connect'                  = @('redpandaConnect.image.digest')
+    'electric'                 = @('electric.image.digest')
+    'postgres'                 = @('postgresHq.image.digest')
+    'restate'                  = @('restate.image.digest')
+    'toxiproxy'                = @('toxiproxy.image.digest')
+    # Utility images -- referenced from job templates, not values.yaml
+    # blocks today; left out for now. Add when they get values entries.
+}
+
+# Build a nested hashtable from the dotted paths. Top-level key is the
+# first segment (e.g. 'frontend'); we hand-write the YAML below because
+# PowerShell 5.1 ships no native ConvertTo-Yaml and we don't want to
+# require a module install just for one operational script.
+function Write-PinnedValuesYaml {
+    param(
+        [string]$Path,
+        [hashtable]$DigestByShortName,
+        [hashtable]$Mapping,
+        [string]$RepoBase,
+        [string]$Platform
+    )
+    # Group by the top-level Helm key (e.g. 'frontend', 'redpandaEdge')
+    # so each top-level block is emitted once, even when an image fans
+    # out to multiple paths sharing a parent.
+    $byTop = @{}
+    foreach ($shortName in $DigestByShortName.Keys) {
+        if (-not $Mapping.ContainsKey($shortName)) {
+            Write-Host "  (skipping $shortName -- no values-path mapping defined)" -ForegroundColor DarkYellow
+            continue
+        }
+        $digest = $DigestByShortName[$shortName]
+        foreach ($dotted in $Mapping[$shortName]) {
+            $segs = $dotted -split '\.'
+            if ($segs.Length -ne 3 -or $segs[1] -ne 'image' -or $segs[2] -ne 'digest') {
+                Write-Host "  (skipping $dotted -- expected <key>.image.digest shape)" -ForegroundColor DarkYellow
+                continue
+            }
+            $top = $segs[0]
+            if (-not $byTop.ContainsKey($top)) { $byTop[$top] = @{} }
+            $byTop[$top]['digest'] = $digest
+        }
+    }
+
+    # Stamp metadata at the top so the operator can tell when the file
+    # was generated and what registry it came from. Read date from the
+    # filesystem via Get-Item -- we don't import a stamp parameter so
+    # the script stays self-contained.
+    $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $lines = @(
+        "# =============================================================================",
+        "# values-pinned.yaml — digest-pinned image overlay (mirror-emitted)",
+        "# =============================================================================",
+        "# Auto-generated by mirror-to-artifactory.ps1 at $now",
+        "#",
+        "# Mirror source / destination: $RepoBase",
+        "# Platform pinned: $Platform",
+        "#",
+        "# Each <image>.image.digest below is the content sha256 of the image at",
+        "# the destination registry RIGHT NOW. The OSS chart uses these in",
+        "# preference to .image.tag when set -- net effect: every pod across",
+        "# every node pulls the same image content. Eliminates the '`:latest`",
+        "# pulled at different times to different nodes' content-drift class",
+        "# that produced the `runtime-bundle` hash-mismatch warnings in",
+        "# diag.sh's Section 15.",
+        "#",
+        "# Usage:",
+        "#   helm install openddil openddil-helm/openddil-demo -f values-pinned.yaml",
+        "#   helm upgrade openddil openddil-helm/openddil-demo -f values-pinned.yaml",
+        "#",
+        "# Regenerated on every mirror-to-artifactory.ps1 run. Safe to commit",
+        "# to a deploy-config repo so deploys are reproducible across operators.",
+        "# =============================================================================",
+        ""
+    )
+
+    foreach ($top in ($byTop.Keys | Sort-Object)) {
+        $lines += "${top}:"
+        $lines += "  image:"
+        $lines += "    digest: `"$($byTop[$top]['digest'])`""
+    }
+
+    # Ensure the parent directory exists.
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $lines | Set-Content -Path $Path -Encoding utf8
+}
+
+if ($PinnedValuesPath -and -not $DryRun -and $DigestByShortName.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Writing values-pinned.yaml: $PinnedValuesPath" -ForegroundColor Cyan
+    Write-PinnedValuesYaml `
+        -Path $PinnedValuesPath `
+        -DigestByShortName $DigestByShortName `
+        -Mapping $SrcShortNameToValuesPaths `
+        -RepoBase $RepoBase `
+        -Platform $Platform
+    Write-Host "  Wrote $($DigestByShortName.Count) digest record(s)." -ForegroundColor Green
+    Write-Host "  Use with: helm install/upgrade ... -f $PinnedValuesPath" -ForegroundColor White
 }
 Write-Host ""
 Write-Host "Next step: substitute <ARTIFACTORY> in values-artifactory.yaml"

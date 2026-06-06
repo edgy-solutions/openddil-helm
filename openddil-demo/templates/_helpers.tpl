@@ -28,13 +28,35 @@ Cluster domain suffix (or empty for in-namespace resolution).
 
 {{/*
 Compose a full image reference for openddil-owned images.
-Usage: include "openddil.image" (dict "name" "frontend" "tag" .Values.frontend.image.tag "root" .)
 
-`tag` may be empty — falls back to global.imageTag.
+Resolution order:
+  - If `.digest` is non-empty -> "<registry>/<prefix>/<name>@<digest>"
+    Digest pinning is fully reproducible across mirror registries:
+    `docker push` preserves the content digest, so the same sha256
+    pulled from ghcr.io or from a customer's Artifactory mirror
+    resolves to identical content. This is the path
+    `mirror-to-artifactory.ps1` emits values-pinned.yaml for, so a
+    helm install/upgrade ships a known-good content hash to every
+    node and the ":latest pulled at slightly different times got
+    different content on different nodes" drift class disappears.
+
+  - Else "<registry>/<prefix>/<name>:<tag>" with `tag` falling back
+    to `global.imageTag` when the per-image tag is empty.
+
+Usage:
+  include "openddil.image" (dict
+      "name" "frontend"
+      "tag" .Values.frontend.image.tag
+      "digest" .Values.frontend.image.digest
+      "root" .)
 */}}
 {{- define "openddil.image" -}}
+{{- if .digest -}}
+{{ .root.Values.global.imageRegistry }}/{{ .root.Values.global.imagePrefix }}/{{ .name }}@{{ .digest }}
+{{- else -}}
 {{- $tag := .tag | default .root.Values.global.imageTag -}}
 {{ .root.Values.global.imageRegistry }}/{{ .root.Values.global.imagePrefix }}/{{ .name }}:{{ $tag }}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -97,7 +119,7 @@ subPath-mounts /shared/<dst> at the target absolute path.
 */}}
 {{- define "openddil.bundleInit" -}}
 - name: bundle-loader
-  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "root" .root) }}
+  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "digest" .root.Values.bundle.image.digest "root" .root) }}
   imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .root.Values.bundle.image.pullPolicy "root" .root) }}
   command:
     - sh
