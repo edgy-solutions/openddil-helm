@@ -1,0 +1,164 @@
+{{- /*
+=============================================================================
+hook-restate-wipe.yaml — Restate ephemeral-on-redeploy hook
+=============================================================================
+Restate persists per-Virtual-Object journals on the StatefulSet's PVC. When
+cm-service or logistics-fusion CODE changes between deploys, old journals
+fail to replay against the new code with VMException(570) -- the service
+appears alive but emits nothing for every event hitting an old VO.
+
+The recovery used to be a manual five-step kubectl ritual (scale down,
+delete PVC, scale up, re-run bootstraps, rollout restart). This pre-
+install/pre-upgrade hook does the first three steps automatically so a
+plain `helm upgrade` Just Works. The post-install/post-upgrade bootstrap
+Jobs (cm-service-bootstrap, logistics-fusion-bootstrap) re-register
+services against the fresh Restate state on the way back up.
+
+Behavior is gated by `.Values.restate.ephemeralOnUpgrade`:
+  * true  (default for the demo chart) — wipe Restate state on every
+          install/upgrade. Trade-off: discards CM history + logistics
+          state from the previous deploy. Right for demos; iteration
+          velocity over state durability.
+  * false — leave Restate state alone. The pre-install/pre-upgrade
+          step becomes a no-op. Use this when CM history actually
+          matters across deploys (prod-like environments) and you
+          accept that handler-code changes require an explicit
+          `flush-assets.sh --deep` to clean state.
+
+Hook weight = -100 (very early) so the wipe runs BEFORE the StatefulSet
+re-applies its updated spec, BEFORE bundle-init re-pulls, BEFORE any
+post-install bootstrap Job that depends on Restate being clean.
+
+Hook PVC delete: the PVC is created by volumeClaimTemplates on the
+StatefulSet; its deterministic name is data-<release>-restate-server-0.
+Helm doesn't manage volumeClaimTemplate PVCs (they survive helm uninstall
+intentionally), so the operator otherwise has to delete them by hand
+during redeploys. This hook closes that gap for the
+ephemeralOnUpgrade=true case.
+*/ -}}
+{{- if .Values.restate.ephemeralOnUpgrade }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-restate-wipe
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-restate-wipe
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    verbs: ["get", "patch", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-restate-wipe
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-restate-wipe
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-restate-wipe
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-restate-wipe-{{ .Release.Revision | default 0 }}
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-99"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-restate-wipe
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: wipe
+          image: "{{ .Values.restate.wipe.image.repository }}:{{ .Values.restate.wipe.image.tag }}"
+          imagePullPolicy: {{ .Values.restate.wipe.image.pullPolicy | default "IfNotPresent" }}
+          command:
+            - sh
+            - -c
+            - |
+              # POSIX sh -- bitnami/kubectl's /bin/sh is dash. No pipefail.
+              set -eu
+              STS="{{ .Release.Name }}-restate-server"
+              PVC="data-${STS}-0"
+
+              # On fresh install neither the StatefulSet nor the PVC
+              # exist yet -- the hook is a no-op. On upgrade both
+              # exist and we wipe.
+              if ! kubectl -n {{ .Release.Namespace }} get sts "$STS" \
+                   >/dev/null 2>&1; then
+                echo "First install: $STS not present, nothing to wipe."
+                exit 0
+              fi
+
+              echo "Scaling $STS to 0 ..."
+              kubectl -n {{ .Release.Namespace }} scale sts "$STS" --replicas=0
+
+              # Wait for pods to actually terminate. Without this the
+              # PVC delete can race with the kubelet's still-mounting
+              # the volume and hang.
+              echo "Waiting for restate pods to terminate ..."
+              kubectl -n {{ .Release.Namespace }} wait --for=delete pod \
+                  -l app.kubernetes.io/component=restate-server \
+                  --timeout=180s 2>/dev/null || true
+
+              if kubectl -n {{ .Release.Namespace }} get pvc "$PVC" \
+                   >/dev/null 2>&1; then
+                echo "Deleting PVC $PVC ..."
+                kubectl -n {{ .Release.Namespace }} delete pvc "$PVC"
+              else
+                echo "PVC $PVC not present (already gone?), skipping."
+              fi
+
+              echo "Done. The StatefulSet apply that follows will recreate"
+              echo "the PVC empty; cm-service-bootstrap + logistics-fusion-"
+              echo "bootstrap (post-install hooks) re-register services."
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+{{- end }}

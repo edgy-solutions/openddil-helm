@@ -215,6 +215,32 @@ restate:
   ingressPort: 8080
   adminPort: 9070
 
+  # ephemeralOnUpgrade — when true, a Helm pre-install/pre-upgrade hook
+  # (hook-restate-wipe.yaml) scales restate-server to 0 and deletes its
+  # PVC before applying chart changes. The cm-service-bootstrap +
+  # logistics-fusion-bootstrap post-install hooks then re-register
+  # services against the fresh state on the way back up.
+  #
+  # Right for demo iteration where handler-code changes between deploys
+  # would otherwise cause VMException(570) ("code path mismatch between
+  # previous execution and this execution") on every event for assets
+  # whose Virtual Object journal was written by old code.
+  #
+  # Set false for environments where Restate state durability matters
+  # across redeploys (prod-like CM history preservation). In that case
+  # handler-code changes require an explicit out-of-band
+  # `flush-assets.sh --deep` to clean state when needed.
+  ephemeralOnUpgrade: true
+
+  # Image used by the restate-wipe hook Job. Same kubectl-runner the
+  # other overlay hooks use; bumping it independently of the chart's
+  # default kubectl version is rarely needed but possible here.
+  wipe:
+    image:
+      repository: docker.io/bitnami/kubectl
+      tag: "1.30"
+      pullPolicy: IfNotPresent
+
 restateHub:
   image:
     # Note: published image's Dockerfile copies hub_restate_projector.py;
