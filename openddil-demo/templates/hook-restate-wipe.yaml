@@ -112,7 +112,7 @@ spec:
       {{- end }}
       containers:
         - name: wipe
-          image: "{{ .Values.restate.wipe.image.repository }}:{{ .Values.restate.wipe.image.tag }}"
+          image: "{{ include "openddil.thirdPartyImage" .Values.restate.wipe.image }}"
           imagePullPolicy: {{ .Values.restate.wipe.image.pullPolicy | default "IfNotPresent" }}
           command:
             - sh
