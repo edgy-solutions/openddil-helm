@@ -150,13 +150,27 @@ $Images = @(
     # Utility images
     @{ src='arigaio/atlas:0.32.0';                                            dst='arigaio/atlas:0.32.0' },
     @{ src='alpine:3.20';                                                     dst='library/alpine:3.20' },
-    # bitnami/kubectl runs the helm post-install patch Jobs (customer-
-    # overlay frontend/projector/cm-service patches) and the OSS chart's
-    # pre-upgrade Restate-wipe hook (commit 4396f8c). Both default to
-    # docker.io/bitnami/kubectl:1.30; override the chart's image.repository
-    # to point at <RepoBase>/bitnami/kubectl after this mirror copies it
-    # into your registry. See README "kubectl image override" section.
-    @{ src='bitnami/kubectl:1.30';                                            dst='bitnami/kubectl:1.30' },
+    #
+    # bitnami/kubectl is INTENTIONALLY NOT in this mirror inventory.
+    # Bitnami's August-2025 catalog restructure deprecated most of the
+    # historical tags; docker.io/bitnami/kubectl:1.30 is not reliably
+    # pullable anymore. The OSS chart's restate.wipe.image and the
+    # customer-overlay chart's hooks.image both default to bitnami/kubectl,
+    # but every customer environment seems to already have ITS OWN
+    # internal kubectl image (whatever your platform team blessed --
+    # alpine/k8s, dtzar/helm-kubectl, an in-house build, ...). Override
+    # the chart's repository + tag at install time to point at that:
+    #
+    #   --set restate.wipe.image.repository=<your-registry>/path/to/kubectl
+    #   --set restate.wipe.image.tag=<your-version>
+    #
+    # Customer-overlay chart equivalent:
+    #   --set hooks.image.repository=<your-registry>/path/to/kubectl
+    #   --set hooks.image.tag=<your-version>
+    #
+    # If you DO have a reliable bitnami/kubectl source (say your platform
+    # mirrors from quay.io/bitnamicharts/kubectl or similar), add a line
+    # back here matching that source path and the chart override above.
     @{ src='curlimages/curl:8.9.1';                                           dst='curlimages/curl:8.9.1' }
 )
 
@@ -435,14 +449,11 @@ $SrcShortNameToValuesPaths = @{
     'toxiproxy'                = @('toxiproxy.image.digest')
     # Utility images -- referenced from job templates, not values.yaml
     # blocks today; left out for now. Add when they get values entries.
-
-    # bitnami/kubectl is consumed by the OSS chart's restate.wipe.image
-    # block AND the customer-overlay overlay chart's hooks.image block. Both
-    # use the openddil.thirdPartyImage / overlay.kubectlImage helpers
-    # which honor .digest. Pin both at once.
-    'kubectl'                  = @(
-                                    'restate.wipe.image.digest'
-                                  )
+    #
+    # Note: kubectl image is intentionally NOT in this mapping. See the
+    # $Images comment above the kubectl entry for the catalog-
+    # availability situation; until there's a reliable source in the
+    # inventory, there's no digest to write into values-pinned.yaml.
 }
 
 # Build a nested hashtable from the dotted paths. Top-level key is the

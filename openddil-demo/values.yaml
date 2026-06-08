@@ -242,15 +242,22 @@ restate:
   # default kubectl version is rarely needed but possible here.
   wipe:
     image:
-      # Default points at docker.io. When mirroring to a customer
-      # registry, override:
-      #   --set restate.wipe.image.repository=<mirror>/bitnami/kubectl
-      # mirror-to-artifactory.ps1 already includes bitnami/kubectl:1.30
-      # in its inventory so the image lands at <RepoBase>/bitnami/kubectl
-      # after a mirror run, and writes the digest into values-pinned.yaml
-      # alongside every other image's digest. The thirdPartyImage helper
-      # prefers digest > tag, so a values-pinned.yaml install renders
-      # `<mirror>/bitnami/kubectl@sha256:...` automatically.
+      # Default points at docker.io/bitnami/kubectl. Bitnami's Aug-2025
+      # catalog restructure has made most of the historical bitnami/
+      # kubectl tags hard to obtain reliably -- many customer
+      # environments have a different in-house kubectl-shipping image
+      # at this point (alpine/k8s, dtzar/helm-kubectl, or a platform-
+      # team-blessed build).
+      #
+      # OVERRIDE for air-gapped / mirror-only deploys:
+      #   --set restate.wipe.image.repository=<your-registry>/path/to/kubectl
+      #   --set restate.wipe.image.tag=<your-version>      # e.g. "1.25.5"
+      #
+      # The mirror script (scripts/mirror-to-artifactory.ps1) deliberately
+      # does NOT include bitnami/kubectl in its inventory because the
+      # docker.io source is unreliable. Add a line back to that script
+      # if your platform has a reliable source path, and add a
+      # values-pinned.yaml mapping entry alongside it.
       repository: docker.io/bitnami/kubectl
       tag: "1.30"
       digest: ""
