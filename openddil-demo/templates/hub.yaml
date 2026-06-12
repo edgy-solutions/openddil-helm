@@ -439,6 +439,18 @@ spec:
             #     }}}}'
             - name: ASSET_REGISTRY_WEB_PORT
               value: {{ .Values.assetRegistry.webPort | quote }}
+            - name: PYTHONPATH
+              # bundle-loader writes contracts/gen/python -> /shared/proto;
+              # this container mounts the same volume with subPath=proto at
+              # /proto, so the generated bindings live at
+              # /proto/openddil/telemetry/v1/telemetry_pb2.py. Python won't
+              # see them without /proto on sys.path -- _try_decode_event
+              # then silently returns None for every event, ADR-0028's
+              # asset-registry-events stays empty, source-app's region
+              # cache stays empty, and the whole regional aggregation
+              # chain stays dark. Mirrors what cm-service / logistics-
+              # fusion / regional / projector all already do.
+              value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
           ports:
