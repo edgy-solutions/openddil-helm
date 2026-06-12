@@ -169,6 +169,19 @@ spec:
         # hardcodes that name on the bundle-loader initContainer's mount.
         - name: bundle-shared
           emptyDir: {}        # populated by the bundle-loader initContainer
+        {{- if .Values.persistence.restateUseEmptyDir }}
+        # NFS-incompatible cluster mode (same rationale as redpanda above):
+        # restate's RocksDB requires POSIX file locks that NFS doesn't
+        # honor, so on cluster where only NFS PVCs are available we run
+        # restate on a node-local emptyDir. Trade-off: a pod restart loses
+        # ALL Virtual Object state -- which we have a separate story for
+        # (`restate.ephemeralOnUpgrade` + flush-assets.sh --deep), so the
+        # state-loss isn't a new failure mode. Toggle via
+        # .Values.persistence.restateUseEmptyDir.
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if not .Values.persistence.restateUseEmptyDir }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -181,6 +194,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.restateSize }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

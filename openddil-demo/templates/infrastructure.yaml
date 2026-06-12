@@ -205,6 +205,21 @@ spec:
             periodSeconds: 30
           resources:
             {{- toYaml $.Values.redpandaEdge.resources | nindent 12 }}
+      {{- if $.Values.persistence.redpandaUseEmptyDir }}
+      # NFS-incompatible cluster mode: redpanda refuses to start on NFS
+      # because rocksdb's fcntl-based locking returns ENOLCK over NFS
+      # mounts (CrashLoopBackOff at storage init). When the only available
+      # PVC storage class on this cluster is NFS-backed, switch the broker
+      # to a node-local emptyDir so it comes up cleanly. Trade-off:
+      # redpanda state lives on the node, NOT a PVC -- a pod restart loses
+      # ALL topic data, consumer offsets, and partition metadata. Acceptable
+      # for dev / demo clusters where state durability isn't the contract;
+      # NEVER set true in prod. Toggle via .Values.persistence.redpandaUseEmptyDir.
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if not $.Values.persistence.redpandaUseEmptyDir }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -217,6 +232,7 @@ spec:
         resources:
           requests:
             storage: {{ $.Values.persistence.redpandaSize }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -328,6 +344,14 @@ spec:
             periodSeconds: 30
           resources:
             {{- toYaml .Values.redpandaHq.resources | nindent 12 }}
+      {{- if .Values.persistence.redpandaUseEmptyDir }}
+      # See redpanda-edge StatefulSet above for the NFS-incompatible-cluster
+      # rationale + trade-offs.
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if not .Values.persistence.redpandaUseEmptyDir }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -340,6 +364,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.redpandaSize }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

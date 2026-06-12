@@ -111,6 +111,33 @@ persistence:
   postgresSize: 20Gi
   restateSize: 5Gi
 
+  # NFS-incompatible cluster escape hatch.
+  #
+  # redpanda and restate both require POSIX file-locking semantics that
+  # NFS doesn't honor. On clusters where the ONLY available PVC storage
+  # class is NFS-backed, the pods CrashLoopBackOff at storage init. The
+  # historical workaround was to manually edit each StatefulSet post-
+  # deploy to swap the PVC for a node-local emptyDir, then scale down/up
+  # to apply. That manual scale cycle gives the broker pod a NEW IP every
+  # deploy, and every long-lived Kafka client (faust-edge, faust-
+  # regional, asset-registry-service, the bridge) caches the OLD IP at
+  # connect time -- they sit on stale metadata until restarted, which
+  # made every redeploy break the data plane.
+  #
+  # Setting either of these to true switches the StatefulSet to use an
+  # emptyDir at chart render time -- no post-deploy editing, no scale
+  # cycle, no stale-IP drift. The brokers come up cleanly first time
+  # with stable hostnames via the headless Service.
+  #
+  # Trade-off: emptyDir is node-local and ephemeral. A pod restart
+  # loses ALL state -- topics, partitions, consumer offsets for
+  # redpanda; Virtual Object journals for restate. For dev / demo
+  # clusters where state durability isn't the contract, that's fine.
+  # NEVER set true in production -- you'll lose customer data on the
+  # first node maintenance event.
+  redpandaUseEmptyDir: false
+  restateUseEmptyDir: false
+
 # --- Redpanda (per-edge) ----------------------------------------------------
 # Third-party images pinned by semver tag — bumped 2026-05-19 from the
 # stale :latest defaults to the actual versions we tested with, identified
