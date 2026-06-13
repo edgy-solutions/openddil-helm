@@ -1,26 +1,27 @@
 {{- /*
 ==============================================================================
-openddil-mrad-sim — per-element radar telemetry simulator
+openddil-logistics-sim — per-element sub-component telemetry simulator
 ==============================================================================
-Discovers MRAD-class assets from telemetry-latest-state on each edge
-broker, generates synthetic per-element health/temp/load values from
-the config block in values.yaml (mounted here as a ConfigMap), and
-publishes one whole-asset snapshot per tick to mrad-element-telemetry
-on the HQ broker. The MaintainerApp's SensorArrayView consumes the
-projected output via the useMradElementTelemetry hook.
+Renamed from mrad-sim 2026-06-13 to reflect the wider framing: multi-
+profile, covers MRAD today, LTAMDS / Patriot / future as config additions.
 
-Gating: rendered only when .Values.mradSim.enabled. Disable to demo
-without the sim (the view falls back to seeded-RNG synthesis -- demo
-still looks alive, just without the cross-asset drift the sim provides).
+Discovers asset_profiles-matching assets from telemetry-latest-state on
+every edge broker, tracks per-asset OperationalState (power_state /
+health_state / actively_transmitting / actively_receiving), generates
+synthetic per-element health/temp/load values from per-profile
+synthesis knobs honoring the upstream operational state, publishes
+one whole-asset snapshot per tick to asset-element-telemetry on HQ.
 
-Single replica by design -- the sim is idempotent per (asset, tick),
-but two pods would double-publish each snapshot (and the consumer
-group is shared across edges, so they'd actually race on partition
-assignment). HPA NOT supported. Memory bound by the in-pod roster
-(one entry per discovered MRAD asset).
+Gating: rendered only when .Values.logisticsSim.enabled. Disable to
+demo without the sim (SensorArrayView falls back to seeded-RNG
+synthesis -- demo still looks alive, just without cross-asset drift
+that mirrors the customer-sim state).
+
+Single replica by design. HPA NOT supported (double-publish would
+just waste bytes; offsets idempotent per-tick).
 */ -}}
-{{- if .Values.mradSim.enabled }}
-{{- $cfg := .Values.mradSim }}
+{{- if .Values.logisticsSim.enabled }}
+{{- $cfg := .Values.logisticsSim }}
 {{- $svcDomain := include "openddil.svcDomain" . }}
 {{- $edgePairs := list }}
 {{- range $edge := .Values.edges }}
@@ -30,10 +31,10 @@ assignment). HPA NOT supported. Memory bound by the in-pod roster
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Release.Name }}-mrad-sim-config
+  name: {{ .Release.Name }}-logistics-sim-config
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
-    {{- include "openddil.selectorLabels" (dict "component" "mrad-sim" "root" .) | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "logistics-sim" "root" .) | nindent 4 }}
 data:
   config.yaml: |
     {{- toYaml $cfg.config | nindent 4 }}
@@ -41,26 +42,25 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-mrad-sim
+  name: {{ .Release.Name }}-logistics-sim
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
-    {{- include "openddil.selectorLabels" (dict "component" "mrad-sim" "root" .) | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "logistics-sim" "root" .) | nindent 4 }}
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "openddil.selectorLabels" (dict "component" "mrad-sim" "root" .) | nindent 6 }}
+      {{- include "openddil.selectorLabels" (dict "component" "logistics-sim" "root" .) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "openddil.labels" . | nindent 8 }}
-        {{- include "openddil.selectorLabels" (dict "component" "mrad-sim" "root" .) | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "logistics-sim" "root" .) | nindent 8 }}
       annotations:
         # Roll the pod when the config block changes -- the sim only reads
-        # config at startup. Hash-on-checksum is the standard helm idiom
-        # for this.
+        # config at startup. Hash-on-checksum is the standard helm idiom.
         checksum/config: {{ toYaml $cfg.config | sha256sum }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -69,37 +69,36 @@ spec:
       {{- end }}
       initContainers:
         # bundle-loader brings in the openddil.* python proto bindings so
-        # the discovery consumer can decode EntityTelemetryEvent proto-
-        # encoded telemetry-latest-state records. Same pattern as
+        # the discovery consumer can decode EntityTelemetryEvent (the
+        # proto-encoded path -- JSON path also works). Same pattern as
         # asset-registry-service.
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" .) | nindent 8 }}
       containers:
-        - name: mrad-sim
+        - name: logistics-sim
           image: {{ include "openddil.image" (dict "name" $cfg.image.name "tag" $cfg.image.tag "digest" $cfg.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $cfg.image.pullPolicy "root" .) }}
           env:
-            - name: MRAD_SIM_CONFIG_PATH
-              value: /etc/openddil/mrad-sim/config.yaml
-            - name: MRAD_SIM_EDGE_CLUSTERS
+            - name: LOGISTICS_SIM_CONFIG_PATH
+              value: /etc/openddil/logistics-sim/config.yaml
+            - name: LOGISTICS_SIM_EDGE_CLUSTERS
               value: {{ join "," $edgePairs | quote }}
-            - name: MRAD_SIM_HQ_BROKERS
+            - name: LOGISTICS_SIM_HQ_BROKERS
               value: {{ printf "%s-redpanda-hq%s:%d" .Release.Name $svcDomain (int .Values.redpandaHq.kafkaPort) | quote }}
-            - name: MRAD_SIM_INPUT_TOPIC
+            - name: LOGISTICS_SIM_INPUT_TOPIC
               value: "telemetry-latest-state"
             - name: PYTHONPATH
-              # The sim is small enough to not need /app/src layering,
-              # but mounting /proto keeps the proto-decode path open
-              # for telemetry-latest-state records (asset-registry-
-              # service had this exact gap -- empty PYTHONPATH silently
-              # broke proto decode; same trap waiting here).
+              # /proto is needed for the proto-decode path on telemetry-
+              # latest-state records. asset-registry-service had this exact
+              # gap; same trap waiting here. /app/src is the sim's package
+              # root.
               value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
           volumeMounts:
             - name: config
-              mountPath: /etc/openddil/mrad-sim
+              mountPath: /etc/openddil/logistics-sim
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
@@ -108,7 +107,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ .Release.Name }}-mrad-sim-config
+            name: {{ .Release.Name }}-logistics-sim-config
         - name: bundle-shared
           emptyDir: {}
 {{- end }}
