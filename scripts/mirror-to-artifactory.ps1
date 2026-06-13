@@ -136,6 +136,7 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/cm-service:latest';               dst='edgy-solutions/openddil/cm-service:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/logistics-fusion-service:latest'; dst='edgy-solutions/openddil/logistics-fusion-service:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/asset-registry-service:latest';   dst='edgy-solutions/openddil/asset-registry-service:latest' },
+    @{ src='ghcr.io/edgy-solutions/openddil/mrad-sim:latest';                  dst='edgy-solutions/openddil/mrad-sim:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/hub-restate-projector:latest';    dst='edgy-solutions/openddil/hub-restate-projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';           dst='edgy-solutions/openddil/runtime-bundle:latest' },
 
@@ -438,6 +439,7 @@ $SrcShortNameToValuesPaths = @{
     'cm-service'               = @('cmService.image.digest')
     'logistics-fusion-service' = @('logisticsFusion.image.digest')
     'asset-registry-service'   = @('assetRegistry.image.digest')
+    'mrad-sim'                 = @('mradSim.image.digest')
     'hub-restate-projector'    = @('restateHub.image.digest')
     'runtime-bundle'           = @('bundle.image.digest')
     # Third-party (use openddil.thirdPartyImage helper, accepts .digest)

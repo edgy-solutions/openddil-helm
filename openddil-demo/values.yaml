@@ -446,6 +446,63 @@ assetRegistry:
   # chart's "explicit topic provisioning" stance).
   outputTopic: asset-registry-events
 
+# openddil-mrad-sim -- per-element radar telemetry simulator for
+# MRAD-class assets. Discovers MRAD assets from telemetry-latest-state
+# on each edge, generates synthetic per-element health/temp/load values
+# from config, publishes whole-asset snapshots to mrad-element-telemetry
+# on HQ. The MaintainerApp SensorArrayView (MRAD_CONFIG path) consumes
+# the projected snapshot via the ElectricSQL hook. See
+# openddil-mrad-sim/README.md for shape + element id format.
+mradSim:
+  # Optional -- disable to run without the per-element sim (the
+  # SensorArrayView falls back to seeded-RNG synthesis when no live
+  # data exists, so the demo still looks alive without this).
+  enabled: true
+  image:
+    name: mrad-sim
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  resources:
+    # Light footprint -- one consumer per edge + one producer + one
+    # tick loop. Memory bound by the in-memory asset roster (one entry
+    # per MRAD asset, bytes-level). Scale up only if you push the tick
+    # interval well below 30s with high MRAD-asset counts.
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  # Topic the sim writes. Pre-created by topic-init.
+  outputTopic: mrad-element-telemetry
+  # Sim config -- mounted as a ConfigMap into /etc/openddil/mrad-sim/.
+  # Override these to retune which platform_variants count as MRAD,
+  # tick cadence, per-layer cardinality, or synthesis ranges without
+  # re-baking the image. Set `config: null` to use the image's baked
+  # default config at /app/config/default.yaml.
+  config:
+    tick_interval_s: 30
+    mrad_variants:
+      - MRAD_Sensor
+      - MRAD_Radar
+      - MRAD_Interceptor
+      - MRAD2_radar
+    output_topic: mrad-element-telemetry
+    layers:
+      - { name: "RADAR UNIT",     prefix: "TR" }
+      - { name: "BACKPLANE",      prefix: "BOARD",  cols: 2, rows: 3 }
+      - { name: "PROCESSOR BANK", prefix: "MODULE", cols: 2, rows: 2 }
+      - { name: "GAN MMIC CHIP",  prefix: "CHIP",   cols: 3, rows: 3 }
+    faces:
+      - { name: "PRIMARY APERTURE", cols: 8, rows: 12 }
+    synthesis:
+      health_nominal_min: 0.55
+      health_nominal_max: 0.85
+      degraded_fraction: 0.15
+      temp_min: 30
+      temp_max: 75
+      load_min: 5
+      load_max: 95
+      tick_drift_temp: 1.5
+      tick_drift_load: 5.0
+
 frontend:
   image:
     name: frontend
