@@ -53,8 +53,47 @@ global:
 
 # --- Runtime-bundle image ---------------------------------------------------
 # The bundle uses the global.imageRegistry + imagePrefix composition, so
-# overriding those two above is enough for the bundle. No per-section
-# override needed here.
+# overriding those two above is enough to redirect the registry.
+#
+# !! IMPORTANT — DIGEST PIN THE BUNDLE !!
+#
+# Leaving the bundle on global.imageTag ("latest") causes node-local image
+# caches to serve different :latest contents to different pods. Same image
+# tag, different unpacked /proto, /mappings, /ontology — diagnostic
+# Section 14/15 flags this as 'TAG INCONSISTENT' + 'DRIFT' across faust-
+# edge / faust-regional / projector pods. The root cause for asset_cm_state
+# replay misses and Bloblang-rejection storms after redeploys.
+#
+# Two ways to pin:
+#
+#   1) Layer the auto-generated values-pinned.yaml emitted by
+#      scripts/mirror-to-artifactory.ps1 onto your helm install:
+#
+#        helm install openddil openddil-helm/openddil \
+#          -f values-artifactory.yaml \
+#          -f values-pinned.yaml      # <-- pins bundle + all OSS images
+#
+#      The mirror script captures the destination digest of every image
+#      at copy time and writes it here. Always agrees with what's on the
+#      registry. Recommended.
+#
+#   2) Hand-pin only the bundle (when not using the mirror script):
+#
+#        bundle:
+#          image:
+#            digest: sha256:4431d4cce124406a57fcb3f80148afe735f9ea31842d557e0113d12cd4d71c34
+#
+#      Find your current digest with:
+#        helm template <release> openddil-helm/openddil -f values-artifactory.yaml \
+#          | grep -oE 'runtime-bundle@sha256:[a-f0-9]+' | head -1
+#
+#      Also paste the same value into the customer-bundle's deploy.env
+#      as BUNDLE_DIGEST=... so its proto-loader init container agrees.
+
+# Hand-pin example (uncomment + paste your digest if not using values-pinned.yaml):
+# bundle:
+#   image:
+#     digest: sha256:REPLACE_ME_WITH_DIGEST_FROM_helm_template
 
 # --- Third-party images (each gets its repository overridden) ---------------
 # These aren't included in the global.imageRegistry composition (their
