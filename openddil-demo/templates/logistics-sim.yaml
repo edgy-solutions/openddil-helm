@@ -68,12 +68,21 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        # bundle-loader brings in the openddil.* python proto bindings so
-        # the discovery consumer can decode EntityTelemetryEvent (the
-        # proto-encoded path -- JSON path also works). Same pattern as
-        # asset-registry-service.
+        # bundle-loader brings in:
+        #   - openddil.* python proto bindings (for decoding the
+        #     proto-encoded EntityTelemetryEvent on telemetry-latest-
+        #     state; same pattern as asset-registry-service)
+        #   - ontology/ (for platform_variant_aliases.yaml, which the
+        #     sim uses to canonicalize upstream proprietary variants
+        #     like "MRAD_Launcher" -> "MRAD_Interceptor" before
+        #     matching against the asset_profiles config. The wire on
+        #     telemetry-latest-state carries proprietary tokens
+        #     because faust-edge does NOT canonicalize -- only the
+        #     ingress Bloblang stage does, and that path produces
+        #     raw-sensor-stream, not telemetry-latest-state.)
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/ontology"   "dst" "ontology")
           ) "root" .) | nindent 8 }}
       containers:
         - name: logistics-sim
@@ -102,6 +111,15 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            # Mount ontology/ at /ontology so aliases.py finds
+            # platform_variant_aliases.yaml at the default path. The
+            # customer overlay's overlay file replaces the bundle's
+            # example version via standard volume layering (per
+            # README.md). On dev/docker-compose without the file,
+            # aliases.py falls back to canonical-only matching.
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
           resources:
             {{- toYaml $cfg.resources | nindent 12 }}
       volumes:
