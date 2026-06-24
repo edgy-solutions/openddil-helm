@@ -511,13 +511,25 @@ logisticsSim:
           - MRAD_Radar
           - MRAD_Interceptor
           - MRAD2_radar       # customer-overlay NLD demo:*_MRAD2_radar token
+        # IMPORTANT: cols×rows MUST match the frontend's MRAD_CONFIG.layers
+        # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
+        # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
+        # only resolve when both sides agree on the grid. Tree cardinality
+        # history:
+        #   23,712 (96 × 6×4×9) — 5MB serialized, WebGL DOA on integrated GPU
+        #    8,160 (96 × 4×4×4) — 1.6MB,         WebGL still died on switch
+        #    4,080 (48 × 4×4×4) — 0.8MB,         current — face shrunk to 6×8
+        # Face shrunk + frameloop=demand on the Canvas together (see
+        # SensorArrayView.tsx) bring per-frame GPU work low enough for
+        # Intel UHD-class hardware to hold the WebGL context across asset
+        # switches. Mirrors openddil-logistics-sim/config/default.yaml.
         layers:
           - { name: "RADAR UNIT",     prefix: "TR" }
-          - { name: "BACKPLANE",      prefix: "BOARD",  cols: 2, rows: 3 }
+          - { name: "BACKPLANE",      prefix: "BOARD",  cols: 2, rows: 2 }
           - { name: "PROCESSOR BANK", prefix: "MODULE", cols: 2, rows: 2 }
-          - { name: "GAN MMIC CHIP",  prefix: "CHIP",   cols: 3, rows: 3 }
+          - { name: "GAN MMIC CHIP",  prefix: "CHIP",   cols: 2, rows: 2 }
         faces:
-          - { name: "PRIMARY APERTURE", cols: 8, rows: 12 }
+          - { name: "PRIMARY APERTURE", cols: 6, rows: 8 }
         synthesis:
           health_nominal_min: 0.55
           health_nominal_max: 0.85
