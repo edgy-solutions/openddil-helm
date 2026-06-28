@@ -34,6 +34,12 @@ on:
     paths:
       - "bundle/**"
       - ".github/workflows/build-bundle.yml"
+    # Tag pushes (v1.0.0, ...) publish a versioned bundle image
+    # (:v1.0.0) alongside :latest so the helm chart + customer
+    # values-pinned.yaml can pin to a release. No `paths` filter on
+    # the tag trigger -- a release tag should always rebuild the
+    # bundle, regardless of which file the tagged commit touched.
+    tags: [ "v*" ]
   repository_dispatch:
     types: [source-repo-changed]
   schedule:
@@ -118,14 +124,22 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags: always :latest. Additionally :<input.tag> if the workflow
-      # was triggered via workflow_dispatch with a tag specified.
+      # Tags: always :latest. Additionally:
+      #   * On a v* git tag push: :<tag-name> (e.g. :v1.0.0). Consumers
+      #     pin to this in values-pinned.yaml for reproducible deploys.
+      #   * On workflow_dispatch with the `tag` input: :<input-value>.
+      #     Lets the operator publish an ad-hoc tag (e.g. retry rebuild
+      #     under a specific name).
       - name: Compute tags
         id: tags
         run: |
-          T="ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle:latest"
+          REG=ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle
+          T="$REG:latest"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            T="$T,$REG:${{ github.ref_name }}"
+          fi
           if [ -n "${{ github.event.inputs.tag }}" ]; then
-            T="$T,ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle:${{ github.event.inputs.tag }}"
+            T="$T,$REG:${{ github.event.inputs.tag }}"
           fi
           echo "tags=$T" >> "$GITHUB_OUTPUT"
 
