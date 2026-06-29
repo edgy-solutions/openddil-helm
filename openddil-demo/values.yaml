@@ -506,11 +506,22 @@ logisticsSim:
     # matches_platform_variants includes its variant.
     asset_profiles:
       - name: mrad
+        # MRAD profile models the SENSOR subsystem only. After the
+        # 2026-06-24 per-site sensor identity fix, a single radar site
+        # produces a `*_radar` chassis Unit asset AND a
+        # `*_radar_MRAD_Sensor` sensor subsystem asset (both carry
+        # variant=MRAD_Sensor after aliasing). Only the sensor has the
+        # multi-element array; match_asset_id_suffix gates the
+        # chassis (and other non-sensor MRAD_Sensor-variant assets)
+        # out of discovery. MRAD_Interceptor (launchers) intentionally
+        # absent -- launchers don't have arrays. See the comment block
+        # in openddil-logistics-sim/config/default.yaml for the full
+        # rationale.
         matches_platform_variants:
           - MRAD_Sensor
-          - MRAD_Radar
-          - MRAD_Interceptor
+          - MRAD_Radar        # aliases to MRAD_Sensor; kept for safety
           - MRAD2_radar       # customer-overlay NLD demo:*_MRAD2_radar token
+        match_asset_id_suffix: "_Sensor"
         # IMPORTANT: cols×rows MUST match the frontend's MRAD_CONFIG.layers
         # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
         # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
