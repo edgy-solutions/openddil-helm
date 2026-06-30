@@ -612,6 +612,7 @@ spec:
                   "region-wear-trends|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
                   "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
                   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
+                  "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
                 ; do
                   topic="${spec%%|*}"
                   args="${spec##*|}"
