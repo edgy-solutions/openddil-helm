@@ -602,7 +602,7 @@ spec:
                   "ingress-dis-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
                   "ingress-proprietary-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
                   "ingress-sim-a-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
-                  "ingress-strike-capability-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+                  "ingress-weapons-capability-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
                   "asset-capability-snapshot|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
                   "asset-telemetry-windows|-p 8 -r 1 -c retention.ms=86400000 -c cleanup.policy=delete" \
                   "asset-logistics-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
