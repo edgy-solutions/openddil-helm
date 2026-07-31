@@ -616,7 +616,29 @@ spec:
                 ; do
                   topic="${spec%%|*}"
                   args="${spec##*|}"
+                  # Create idempotently. BUT: if the topic was already auto-
+                  # created by redpanda (a producer/consumer connected before
+                  # this post-install hook completed), the create no-ops with
+                  # `|| true` and the intended -c configs are NEVER applied --
+                  # the topic silently keeps redpanda defaults (1MB
+                  # max.message.bytes, cleanup.policy=delete). That breaks
+                  # large-message topics like asset-element-telemetry (per-
+                  # asset element snapshots run several MB): the sim's produce
+                  # fails with MessageSizeTooLargeError and NO tiles ever land.
+                  # Observed on openddil-test 2026-07-31.
+                  #
+                  # So ALSO enforce the -c configs via alter-config, which
+                  # corrects a pre-existing/auto-created topic to the intended
+                  # spec. Idempotent: re-setting a config to its current value
+                  # is a no-op, so this is safe to run on every install/upgrade
+                  # and self-heals a topic that lost the create race. -p/-r are
+                  # stripped (partition/replica counts aren't config-altered
+                  # here); each `-c k=v` becomes `--set k=v`.
                   rpk -X brokers=$B topic create $topic $args || true
+                  setargs=$(printf ' %s' "$args" | sed -E 's/ -p [0-9]+//; s/ -r [0-9]+//; s/ -c / --set /g')
+                  if [ -n "$setargs" ]; then
+                    rpk -X brokers=$B topic alter-config $topic $setargs || true
+                  fi
                 done
                 echo "INFO: Topics initialized on $B"
               done
