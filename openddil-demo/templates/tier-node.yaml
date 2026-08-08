@@ -1,0 +1,840 @@
+{{- /*
+   tier-node.yaml — the TIER PRESENTATION NODE (ADR-0032 §d, Arc 1 Phase 3)
+
+   Renders the full presentation kit per configured tier:
+     postgres + schema-init + projector + restate + fusion + cm-service
+     + electric + frontend + topaz (passive)
+
+   NAMED TIER-AGNOSTICALLY ON PURPOSE. This is the generic recursive node's
+   presentation kit (ADR-0033), attachable to any BROKER-BEARING tier at any
+   depth. It is not an "edge" thing — in this deployment it happens to
+   instantiate at the leaf tiers because those are the tiers configured with
+   brokers and staffed with operators.
+
+   WHY THIS EXISTS (ADR-0032, the reachback finding): every projector wrote
+   to the ROOT store, so a tier had state (compacted topics) but no queryable
+   surface over it, and its UI was served from and read from the root. The
+   persona closest to the equipment had the stalest view of it, and lost it
+   entirely under severance. This node closes that.
+
+   ADDITIVE. Gated on .Values.tierNode.enabled (default false). Nothing here
+   modifies the existing root-tier stack.
+
+   ---- INTERIM BINDINGS (do not mistake for settled design) ----------------
+
+   * ANALYTICS BINDINGS ARE INTERIM (ADR-0034 §Constraints). fusion and
+     cm-service are wired here as hardcoded services. They are
+     durable-workflow-class units by construction (per-key state + a cadence
+     timer) and will be re-expressed as REGISTERED units bound by config —
+     migrating ONTO configurable workflows, not off Restate.
+
+   * THE UI IS INTERIM (ADR-0033 §Tier-parameterized presentation). The
+     framework artifact is one presentation parameterized by tier, showing
+     local truth + subtree rollup. What ships here is the current
+     three-view SPA because nothing else exists to ship. It is legitimate as
+     a demo shell; it is not the framework artifact. GD-04.
+
+   * TREE-SHAPED CONFIG ONLY, not tree-shaped mechanism (ADR-0033 constraint
+     5). Nothing here may assume strictly-tree data flow as an invariant.
+*/}}
+{{- if .Values.tierNode.enabled }}
+{{- $root := . -}}
+{{- $tn := .Values.tierNode -}}
+{{- range .Values.edges }}
+{{- $tier := . }}
+{{- if or (not $tn.tiers) (has $tier.id $tn.tiers) }}
+{{- $broker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
+{{- $pgHost := printf "%s-tier-pg-%s%s" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) }}
+{{- $dsn := printf "postgres://%s:%s@%s:%d/%s" $tn.postgres.auth.username $tn.postgres.auth.password $pgHost (int $tn.postgres.port) $tn.postgres.auth.database }}
+
+# ===========================================================================
+# tier-pg-{{ $tier.id }} — the tier-local read model
+# ===========================================================================
+# The substrate the whole node exists for. Derived, NOT durable: this store is
+# a projection, fully rebuildable from the tier's own compacted topics, so it
+# gets no backup regime (ADR-0032 §d). Stated here so nobody later designs one
+# for derived data.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-pg-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: {{ $tn.postgres.port }}
+      targetPort: 5432
+      name: postgres
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $root.Release.Name }}-tier-pg-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  serviceName: {{ $root.Release.Name }}-tier-pg-{{ $tier.id }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.postgres.image.repository "tag" $tn.postgres.image.tag "root" $root) }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ $tn.postgres.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ $tn.postgres.auth.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ $tn.postgres.auth.database | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $tn.postgres.auth.username | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml $tn.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- if $tn.postgres.useEmptyDir }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if not $tn.postgres.useEmptyDir }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if $tn.postgres.storageClass }}
+        storageClassName: {{ $tn.postgres.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $tn.postgres.storageSize }}
+  {{- end }}
+
+---
+# ===========================================================================
+# tier-schema-init-{{ $tier.id }} — IDENTICAL DDL to every other tier
+# ===========================================================================
+# ADR-0032 §b: every tier-local store is created with the FULL, IDENTICAL
+# schema — not a per-tier subset. Content is edge-scoped by construction (a
+# projector consuming only this tier's topics can only write this tier's
+# rows); rollup tables simply sit empty here. Identical DDL is what keeps the
+# read contract tier-INDEPENDENT, which is what lets ADR-0031's read seam be
+# written once instead of per-tier. Empty tables cost ~nothing; schema
+# variants cost permanently.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $root.Release.Name }}-tier-schema-init-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "stack/schema" "dst" "schema")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: atlas-apply
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.atlas.repository "tag" $root.Values.utilities.atlas.tag "root" $root) }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for tier store {{ $tier.id }} ..."
+              until nc -z {{ $root.Release.Name }}-tier-pg-{{ $tier.id }} {{ $tn.postgres.port }}; do sleep 2; done
+              atlas migrate apply \
+                --dir "file:///bundle/schema/migrations" \
+                --url "{{ $dsn }}?sslmode=disable"
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /bundle
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+
+---
+# ===========================================================================
+# tier-projector-config-{{ $tier.id }} — TIER-SCOPED TOPIC SET
+# ===========================================================================
+# The third parameterization axis, exercised for the first time.
+#
+# The Arc 1 gate decomposed "the projector is tier-parameterizable" into three
+# axes with three different evidentiary states: BROKER (already proven in
+# production — four instances, different brokers), DSN (proven by the gate,
+# the genuinely untested one), and TOPIC SET (mechanism exists via
+# PROJECTOR_CONFIG, never turned — all four deployed projectors share one
+# baked-in config listing 11 topics).
+#
+# This turns it. A tier subscribes to the topics its own broker actually
+# carries and omits root-only rollups — which ALSO dissolves the
+# UNKNOWN_TOPIC_OR_PART warning noise the gate observed: a tier that never
+# lists rollup topics never warns about them. The noise was a symptom of the
+# unturned knob, not a bug to suppress.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-tier-projector-config-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  projector_config.yaml: |
+    # Tier-scoped projector mapping for {{ $tier.id }}.
+    # Root-only rollup topics (region-fleet-summary, region-top-factors,
+    # region-wear-trends) are deliberately ABSENT: they are produced by the
+    # aggregator to the root broker and would never arrive here.
+    settings:
+      rate_limit_per_sec: 10
+    mappings:
+      - topic: telemetry-latest-state
+        handler: telemetry_latest
+        table: telemetry_latest_state
+        consumer_group: tier-projector-telemetry-latest-{{ $tier.id }}
+        decode_as: openddil.telemetry.v1.EntityTelemetryEvent
+        mode: upsert
+        asset_ttl_hours: 24
+      - topic: asset-cm-state
+        handler: cm_state
+        table: asset_cm_state
+        consumer_group: tier-projector-cm-state-{{ $tier.id }}
+        decode_as: json
+        mode: upsert
+      - topic: asset-logistics-status
+        handler: logistics_status
+        table: asset_logistics_status
+        consumer_group: tier-projector-logistics-status-{{ $tier.id }}
+        decode_as: openddil.logistics.v1.AssetLogisticsStatusUpdate
+        mode: upsert
+        asset_ttl_hours: 24
+      - topic: asset-capability-snapshot
+        handler: capability_state
+        table: asset_capability_state
+        consumer_group: tier-projector-capability-{{ $tier.id }}
+        decode_as: json
+        mode: upsert
+      - topic: asset-telemetry-windows
+        handler: telemetry_windows
+        table: asset_telemetry_windows
+        consumer_group: tier-projector-windows-{{ $tier.id }}
+        decode_as: json
+        mode: upsert
+      - topic: tactical-events
+        handler: tactical_events
+        table: tactical_events
+        consumer_group: tier-projector-tactical-events-{{ $tier.id }}
+        decode_as: cloudevents.json
+        mode: append
+      - topic: asset-element-telemetry
+        handler: asset_element_telemetry
+        table: asset_element_telemetry
+        consumer_group: tier-projector-element-telemetry-{{ $tier.id }}
+        decode_as: json
+        mode: upsert
+      - topic: asset-element-inventory
+        handler: asset_element_inventory
+        table: inventory_items
+        consumer_group: tier-projector-element-inventory-{{ $tier.id }}
+        decode_as: json
+        mode: upsert
+
+---
+# ===========================================================================
+# tier-restate-config-{{ $tier.id }} — this tier's broker ONLY
+# ===========================================================================
+# GATE FINDING (2026-08-08): Restate 1.6.x has NO POST /clusters admin
+# endpoint — it returns 404, and a subscription naming an unknown cluster
+# fails with "specified cluster in the source URI does not exist. Make sure
+# it is defined in the KafkaOptions". Kafka clusters are SERVER CONFIG.
+#
+# So a per-tier Restate needs a per-tier config file naming its own broker,
+# rendered by the chart rather than registered by a bootstrap API call. This
+# was discovered by running the gate before templating; templating first
+# would have discovered it as a broken deploy.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-tier-restate-config-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  restate.toml: |
+    # Tier-scoped: names ONLY this tier's broker, so a subscription here
+    # cannot accidentally resolve to a sibling tier's cluster.
+    [[ingress.kafka-clusters]]
+    name = "openddil-{{ $tier.id }}"
+    brokers = ["{{ $broker }}"]
+
+---
+# ===========================================================================
+# tier-restate-{{ $tier.id }} — durable-workflow substrate
+# ===========================================================================
+# Three legs justify this, not one (ADR-0032 §d):
+#   1. detection today       — fusion + cm-service must compute at the tier
+#                              that presents, or a severed tier shows
+#                              position without judgement;
+#   2. configurable analytics — ADR-0034's durable-workflow execution class;
+#   3. sovereignty process workflows — a maintainer mid-procedure must not
+#                              lose workflow state to a WAN drop. Locality
+#                              (PRINCIPLES) applied to process execution.
+#
+# One substrate per tier serves two services today and the whole
+# detection-plus-workflow plane tomorrow.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-restate-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8080
+      name: ingress
+    - port: 9070
+      name: admin
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-restate-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $root.Release.Name }}-tier-restate-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-restate-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  serviceName: {{ $root.Release.Name }}-tier-restate-{{ $tier.id }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-restate-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-restate-%s" $tier.id) "root" $root) | nindent 8 }}
+      annotations:
+        checksum/restate-config: {{ printf "%s-%s" $tier.id $broker | sha256sum }}
+    spec:
+      containers:
+        - name: restate
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.restate.image.repository "tag" $root.Values.restate.image.tag "root" $root) }}
+          # PROVISION-TIME ONLY — see values.yaml tierNode.restate. This flag
+          # affects the INITIAL partition count and cannot be changed after
+          # first boot, so it is a template parameter rather than a knob.
+          args:
+            - "--default-num-partitions"
+            - {{ $tn.restate.defaultNumPartitions | quote }}
+          env:
+            - name: RESTATE_CONFIG
+              value: /config/restate.toml
+          ports:
+            - containerPort: 8080
+            - containerPort: 9070
+          resources:
+            {{- toYaml $tn.restate.resources | nindent 12 }}
+          volumeMounts:
+            - name: restate-config
+              mountPath: /config
+            - name: data
+              mountPath: /restate-data
+      volumes:
+        - name: restate-config
+          configMap:
+            name: {{ $root.Release.Name }}-tier-restate-config-{{ $tier.id }}
+        {{- if $tn.restate.useEmptyDir }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if not $tn.restate.useEmptyDir }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $tn.restate.storageSize }}
+  {{- end }}
+
+---
+# ===========================================================================
+# tier-projector-{{ $tier.id }} — reads THIS tier, writes THIS tier
+# ===========================================================================
+# The reachback closed in one object: KAFKA_BROKERS and POSTGRES_DSN both
+# point at this tier. Previously the second pointed at the root, which is why
+# a tier had no queryable surface over its own data.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-projector-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: projector
+          image: {{ include "openddil.image" (dict "name" $root.Values.projector.image.name "tag" $root.Values.projector.image.tag "digest" $root.Values.projector.image.digest "root" $root) }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ $broker | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $dsn | quote }}
+            # PACKAGING NOTE (gate finding): the image's default config path
+            # is /app/src/config/projector_config.yaml. A tier-scoped config
+            # MUST be pointed at explicitly — running without this silently
+            # falls back to the baked-in 11-topic root config.
+            - name: PROJECTOR_CONFIG
+              value: /tier-config/projector_config.yaml
+            - name: OPENDDIL_EDGE_ID
+              value: {{ $tier.id | quote }}
+            - name: OPENDDIL_REGION_ID
+              value: {{ $tier.region | quote }}
+            - name: BUFFER_MONITOR_ENABLED
+              value: "false"
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml $root.Values.projector.resources | nindent 12 }}
+          volumeMounts:
+            - name: tier-projector-config
+              mountPath: /tier-config
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+      volumes:
+        - name: tier-projector-config
+          configMap:
+            name: {{ $root.Release.Name }}-tier-projector-config-{{ $tier.id }}
+        - name: bundle-shared
+          emptyDir: {}
+
+---
+# ===========================================================================
+# tier-electric-{{ $tier.id }} — streams the TIER store to the TIER UI
+# ===========================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-electric-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-electric-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      containers:
+        - name: electric
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.electric.image.repository "tag" $root.Values.electric.image.tag "root" $root) }}
+          env:
+            - name: DATABASE_URL
+              value: {{ printf "%s?sslmode=disable" $dsn | quote }}
+            - name: ELECTRIC_INSECURE
+              value: "true"
+          ports:
+            - containerPort: 3000
+          resources:
+            {{- toYaml $root.Values.electric.resources | nindent 12 }}
+
+---
+# ===========================================================================
+# tier-frontend-{{ $tier.id }} — SERVED LOCALLY (ADR-0032 §e)
+# ===========================================================================
+# A bundle fetched from the parent tier cannot LOAD during severance. An
+# already-open tab might survive on cache; a reload, a new tab, or a shift
+# change gets nothing. "Works only if you loaded it before the link dropped"
+# is luck with a good story, not severance tolerance.
+#
+# *** INTERIM (GD-04) *** — what ships is the current three-view SPA, because
+# nothing else exists to ship. The framework artifact is ONE presentation
+# parameterized by tier (local truth + subtree rollup); this is the demo
+# instantiation serving in its slot. See ADR-0033
+# §Tier-parameterized presentation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-frontend-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-frontend-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      containers:
+        - name: frontend
+          image: {{ include "openddil.image" (dict "name" $root.Values.frontend.image.name "tag" $root.Values.frontend.image.tag "digest" $root.Values.frontend.image.digest "root" $root) }}
+          env:
+            # Targets THIS tier's Electric. No parent-hosted asset on the
+            # critical path — the ADR-0032 §e corollary.
+            - name: ELECTRIC_URL
+              value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+          ports:
+            - containerPort: 80
+          resources:
+            {{- toYaml $root.Values.frontend.resources | nindent 12 }}
+
+---
+# ===========================================================================
+# tier-fusion-{{ $tier.id }} / tier-cm-{{ $tier.id }} — DETECTION AT THE TIER
+# ===========================================================================
+# The reason the (a) decision was taken. Before this, both services ran ONCE
+# at the root and reached DOWN into child brokers, so a severed tier computed
+# no severity and no CM state at all — the presentation plane's reachback
+# finding repeated one plane over. Now each computes at the tier that
+# presents, and publishes to that tier's own broker where the tier projector
+# can read it.
+#
+# Both are Restate Virtual Objects, which is why the tier needed the durable
+# substrate above. Both ran UNMODIFIED against a tier-scoped Restate in the
+# Arc 1 gate — zero application code changed.
+#
+# *** INTERIM BINDING (GD-07 / ADR-0034 §Constraints) *** — wired here as
+# hardcoded services. They are durable-workflow-class by construction and
+# will be re-expressed as REGISTERED units bound by config, migrating ONTO
+# configurable workflows rather than off Restate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-fusion-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: logistics-fusion
+          image: {{ include "openddil.image" (dict "name" $root.Values.logisticsFusion.image.name "tag" $root.Values.logisticsFusion.image.tag "digest" $root.Values.logisticsFusion.image.digest "root" $root) }}
+          env:
+            # Produces to THIS tier's broker. This single value is what makes
+            # severity reachable by a tier-local projector.
+            - name: FUSION_KAFKA_BROKERS
+              value: {{ $broker | quote }}
+            - name: FUSION_HTTP_PORT
+              value: "9081"
+            - name: ONTOLOGY_DIR
+              value: /ontology
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - containerPort: 9081
+          resources:
+            {{- toYaml $root.Values.logisticsFusion.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-fusion-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 9081
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-cm-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      initContainers:
+        # GATE FINDING: cm-service needs BOTH the proto mount (+PYTHONPATH)
+        # and a BASELINES mount. The baselines are load-bearing, not
+        # decoration — without them the service produces meaningless CM
+        # output. Its deployment surface diverged from fusion's even though
+        # the two are structural twins at the code layer.
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/baselines" "dst" "baselines")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: cm-service
+          image: {{ include "openddil.image" (dict "name" $root.Values.cmService.image.name "tag" $root.Values.cmService.image.tag "digest" $root.Values.cmService.image.digest "root" $root) }}
+          env:
+            - name: CM_KAFKA_BROKERS
+              value: {{ $broker | quote }}
+            - name: CM_HTTP_PORT
+              value: "9080"
+            - name: CM_BASELINES_DIR
+              value: /baselines
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - containerPort: 9080
+          resources:
+            {{- toYaml $root.Values.cmService.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /baselines
+              subPath: baselines
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-cm-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 9080
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 4 }}
+
+---
+# ===========================================================================
+# tier-restate-bootstrap-{{ $tier.id }} — register services + subscriptions
+# ===========================================================================
+# Restate does not discover services; they must be registered, and their Kafka
+# subscriptions created, against THIS tier's Restate. The sequence below is
+# exactly the one proven in the Arc 1 gate.
+#
+# The cluster name matches the tier-restate ConfigMap above. A subscription
+# whose source URI names a cluster absent from Restate's SERVER CONFIG fails
+# with "specified cluster in the source URI does not exist" — which is why the
+# cluster is rendered into restate.toml rather than POSTed here. There is no
+# POST /clusters endpoint on 1.6.x.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $root.Release.Name }}-tier-restate-bootstrap-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 20
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.curl.repository "tag" $root.Values.utilities.curl.tag "root" $root) }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              ADMIN="http://{{ $root.Release.Name }}-tier-restate-{{ $tier.id }}:9070"
+              echo "waiting for tier restate ({{ $tier.id }}) ..."
+              until curl -sf "$ADMIN/deployments" >/dev/null 2>&1; do sleep 3; done
+
+              echo "registering services ..."
+              curl -sf -X POST "$ADMIN/deployments" -H 'Content-Type: application/json' \
+                -d '{"uri":"http://{{ $root.Release.Name }}-tier-fusion-{{ $tier.id }}:9081","force":true}' >/dev/null
+              curl -sf -X POST "$ADMIN/deployments" -H 'Content-Type: application/json' \
+                -d '{"uri":"http://{{ $root.Release.Name }}-tier-cm-{{ $tier.id }}:9080","force":true}' >/dev/null
+
+              echo "registering tier-scoped subscriptions ..."
+              sub() {
+                curl -s -o /dev/null -w "%{http_code} $1 -> $2\n" \
+                  -X POST "$ADMIN/subscriptions" -H 'Content-Type: application/json' \
+                  -d "{\"source\":\"kafka://openddil-{{ $tier.id }}/$1\",\"sink\":\"service://$2\",\"options\":{\"auto.offset.reset\":\"earliest\",\"group.id\":\"$3\"}}"
+              }
+              sub raw-sensor-stream         AssetCM/observe                        cm-service-silver-{{ $tier.id }}
+              sub cm-events                 AssetCM/apply_cm_event                 cm-service-cm-events-{{ $tier.id }}
+              sub raw-sensor-stream         AssetLogistics/on_proprietary_update   fusion-service-silver-{{ $tier.id }}
+              sub asset-telemetry-windows   AssetLogistics/on_telemetry_window     fusion-service-windows-{{ $tier.id }}
+              sub derived-sustainment       AssetLogistics/on_derived_sustainment  fusion-service-derived-{{ $tier.id }}
+              sub asset-capability-snapshot AssetLogistics/on_capability_snapshot  fusion-service-capability-{{ $tier.id }}
+              sub asset-cm-state            AssetLogistics/on_cm_state_change      fusion-service-cm-state-{{ $tier.id }}
+              echo "tier {{ $tier.id }} bootstrap complete"
+
+{{- if $tn.topaz.enabled }}
+---
+# ===========================================================================
+# tier-topaz-{{ $tier.id }} — PASSIVE. Arc 2's landing zone.
+# ===========================================================================
+# Deployed, healthy, DECIDING NOTHING. No policy loaded, no PEP wired.
+#
+# This is deliberate and is recorded so the seat is not removed as dead
+# weight: shipping it now means Arc 2 (ADR-0029) adds RULES to a deployed
+# component rather than adding a COMPONENT under enforcement pressure. It is
+# also the per-tier local authorizer the architecture requires — decisions
+# local, so a severed tier still decides, and (ADR-0033 §Lateral peer
+# topology) a peer request is answered from the RESPONDING tier's own policy
+# with no reachback.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-topaz-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8282
+      name: grpc
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-topaz-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 8 }}
+    spec:
+      containers:
+        - name: topaz
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.topaz.image.repository "tag" $tn.topaz.image.tag "root" $root) }}
+          args: ["run"]
+          ports:
+            - containerPort: 8282
+          resources:
+            {{- toYaml $tn.topaz.resources | nindent 12 }}
+{{- end }}
+
+{{- end }}
+{{- end }}
+{{- end }}

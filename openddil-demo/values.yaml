@@ -650,3 +650,91 @@ ingress:
   # tls:
   #   - hosts: [openddil.example.com]
   #     secretName: openddil-tls
+
+# --- Tier presentation node (ADR-0032 §d, Arc 1 Phase 3) --------------------
+# The deployable unit that makes a tier's own truth visible AT that tier, and
+# keeps it visible when the uplink is cut.
+#
+# Named tier-agnostically on purpose: this is the generic recursive node's
+# presentation kit (ADR-0033), attachable to ANY broker-bearing tier at any
+# depth — not an "edge" thing. In THIS deployment it instantiates at the leaf
+# tiers, because those are the tiers configured with brokers and staffed with
+# operators. The root already has an equivalent stack.
+#
+# Components, and why each is here:
+#   postgres      — the tier-local read model. Without it the tier has state
+#                   (compacted topics) but no queryable surface over it.
+#   schema-init   — same Atlas migrations as root. IDENTICAL DDL at every
+#                   tier (ADR-0032 §b) so the read contract is tier-independent.
+#   projector     — tier-scoped topic set; reads THIS tier's broker, writes
+#                   THIS tier's store.
+#   restate       — durable-workflow substrate for fusion + cm-service today,
+#                   configurable analytics and sovereignty process workflows
+#                   later (ADR-0032 §d three legs, ADR-0034 execution classes).
+#   fusion + cm   — detection at the tier that presents, so a severed tier
+#                   still computes severity and CM state rather than showing
+#                   position without judgement.
+#   electric      — streams the tier store to the tier's own UI.
+#   frontend      — served locally; a bundle fetched from the parent cannot
+#                   load DURING severance (ADR-0032 §e).
+#   topaz         — deployed, healthy, DECIDING NOTHING. Arc 2's landing zone
+#                   (ADR-0029); shipping the seat now means Arc 2 adds rules
+#                   to a deployed component rather than adding a component.
+tierNode:
+  # Additive and off by default. Enabling changes nothing about the existing
+  # root-tier stack — this phase ADDS, it does not modify.
+  enabled: false
+
+  # Which configured tiers get the kit. Empty => all entries in `edges`.
+  # The framework rule (ADR-0032 §a) is that ANY tier may take the kit but a
+  # severance-tolerant one requires that tier's OWN broker; this list is the
+  # instantiation of that rule for this deployment.
+  tiers: []
+
+  postgres:
+    image:
+      repository: postgres
+      tag: "15"
+    auth:
+      username: openddil
+      password: openddil
+      database: openddil
+    port: 5432
+    storageSize: 8Gi
+    storageClass: ""
+    useEmptyDir: false
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 1Gi }
+
+  restate:
+    # MEASURED 2026-08-08, not guessed (ADR-0032 §d):
+    #   24 partitions (product default) -> 243 MiB budget / 389 MiB RSS idle
+    #    6 partitions                   ->  61 MiB budget / 167 MiB RSS idle
+    # Roughly linear over a ~110 MiB runtime floor; per-asset state is
+    # negligible (order-KB/asset), so the cost is BASELINE, not data.
+    #
+    # PROVISION-TIME ONLY. restate-server documents that
+    # --default-num-partitions "only impacts the INITIAL number of
+    # partitions" — it cannot be changed after first boot. So this is a
+    # first-boot template parameter, not a tuning knob, and it is sized for
+    # CAPACITY (partitions are the parallelism substrate ADR-0034's
+    # registration contract keys against) rather than for the prettiest idle
+    # figure. Being wrong costs a reprovision.
+    defaultNumPartitions: 6
+    storageSize: 2Gi
+    useEmptyDir: false
+    resources:
+      requests: { cpu: 150m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 1Gi }
+
+  # Passive policy sidecar — Arc 2's seat. Deployed and healthy; no rules
+  # loaded, no decisions made. See ADR-0029.
+  topaz:
+    enabled: true
+    image:
+      repository: ghcr.io/aserto-dev/topaz
+      tag: "latest"
+    resources:
+      requests: { cpu: 50m,  memory: 64Mi }
+      limits:   { cpu: 200m, memory: 256Mi }
