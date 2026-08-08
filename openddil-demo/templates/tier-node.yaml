@@ -432,8 +432,27 @@ spec:
               value: {{ $tier.id | quote }}
             - name: OPENDDIL_REGION_ID
               value: {{ $tier.region | quote }}
+            # SEVERANCE-INDICATOR INVERSION (ADR-0032 §f), and it needs no
+            # schema change — only this tier's broker.
+            #
+            # The monitor writes a singleton row id='edge' to
+            # edge_buffer_status. At the ROOT that was one global row: HQ's
+            # view of an edge, observed centrally, and unavailable to the
+            # edge when the edge most needed it. Here each tier has its OWN
+            # store, so the singleton row per store IS that tier's own
+            # uplink state — "my data is current, my uplink is down, N
+            # events are buffered."
+            #
+            # The lag probe reads THIS tier's broker, so it keeps working
+            # while severed, which is the whole point.
             - name: BUFFER_MONITOR_ENABLED
-              value: "false"
+              value: "true"
+            - name: BRIDGE_CONSUMER_GROUP
+              value: "bridge-group"
+            - name: TOXIPROXY_API_URL
+              value: {{ printf "http://%s-toxiproxy%s:8475" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
+            - name: HQ_LINK_PROXY
+              value: "hq-link"
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL
