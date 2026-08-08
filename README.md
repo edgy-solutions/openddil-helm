@@ -89,6 +89,47 @@ helm install openddil oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo
   --namespace openddil --create-namespace
 ```
 
+## ⚠ Upgrading an EXISTING cluster: one-time Atlas re-baseline (2026-08-08)
+
+**Applies only to clusters installed before 2026-08-08. Fresh installs
+can ignore this entirely.**
+
+Migration `20260520010000_phase7_asset_capability_state.sql` had a
+**comment line** reworded to match the standardized weapons-capability
+naming. Atlas checksums migration file *content*, so the file's hash
+changed and `atlas.sum` was regenerated.
+
+**The DDL is byte-identical** — same table, columns, indexes,
+constraints. Nothing needs re-applying, and the schema in an existing
+database is already correct.
+
+**What will happen if you do nothing:** the schema-init job's
+`atlas migrate apply` will report a **checksum mismatch** against the
+revision it recorded when that migration was first applied, and the
+upgrade stops.
+
+**Fix — re-baseline that one revision** (safe by construction here,
+because the DDL did not change):
+
+```bash
+# inspect the recorded revision first
+kubectl -n <ns> exec <release>-postgres-hq-0 -- \
+  psql -U <user> -d openddil -c \
+  "SELECT version, description, hash FROM atlas_schema_revisions.atlas_schema_revisions
+     WHERE version = '20260520010000';"
+
+# then re-baseline to the current file hash
+atlas migrate set 20260520010000 \
+  --dir file://openddil-stack/schema/migrations \
+  --url "postgres://<user>:<pass>@<host>:5432/openddil?sslmode=disable"
+```
+
+This notice lives here rather than only in the commit body deliberately:
+a next-deploy-breaks condition recorded where nobody looks until after
+the error fires is the failure pattern this project has already been
+bitten by. Provenance for the change is in `openddil-stack` commit
+`9027dbe`.
+
 ## Common adjustments via values.yaml
 
 | Want to | Change |
