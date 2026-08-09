@@ -43,16 +43,30 @@ COPY openddil-stack/electric  /bundle/stack/electric/
 COPY openddil-tactical-agents/hub/restate_hub.py /bundle/agents/hub/restate_hub.py
 
 # ----- openddil-demo configs ----------------------------------------------
-# Inline-mounted yaml/json configs for redpanda-connect (DIS mappers),
-# toxiproxy bootstrap, restate config, and dynamic Bloblang mappings.
+# ONLY what the chart actually loads. Verified against every `"src" "demo/..."`
+# in openddil-demo/templates/ — the chart reads exactly two paths from here.
 COPY openddil-demo/openddil-base-connect.yaml    /bundle/demo/openddil-base-connect.yaml
-COPY openddil-demo/redpanda-connect-edge-01.yaml /bundle/demo/redpanda-connect-edge-01.yaml
-COPY openddil-demo/redpanda-connect-edge-02.yaml /bundle/demo/redpanda-connect-edge-02.yaml
-COPY openddil-demo/redpanda-connect-edge-03.yaml /bundle/demo/redpanda-connect-edge-03.yaml
-COPY openddil-demo/redpanda-connect.yaml         /bundle/demo/redpanda-connect.yaml
-COPY openddil-demo/restate-config.toml           /bundle/demo/restate-config.toml
-COPY openddil-demo/toxiproxy.json                /bundle/demo/toxiproxy.json
 COPY openddil-demo/dynamic-mappings              /bundle/demo/dynamic-mappings/
+
+# REMOVED (GD-09): redpanda-connect-edge-01/02/03.yaml and restate-config.toml.
+#
+# The chart now GENERATES the per-edge bridge configs and the root Restate
+# cluster list from .Values.edges (0.1.40), so these copies were shipped and
+# read by nothing. Leaving them in the image is an EDIT TRAP: the obvious
+# move when the bridge misbehaves is to edit the file you can see in the
+# bundle, which would have no effect and no error to say so.
+#
+# The SOURCE files stay in openddil-demo/ — docker-compose still mounts all
+# three (docker-compose.yml ~456-490) and they remain the compose stack's
+# real configuration. This removes the redundant BUNDLE copies, not the
+# compose inputs. That distinction is the whole verification: "unread" was
+# true of the bundle path and false of the repo path.
+#
+# STILL SHIPPED BUT ALSO UNREAD by the chart, found while verifying and left
+# alone pending a decision: redpanda-connect.yaml and toxiproxy.json. The
+# chart renders its own toxiproxy ConfigMap (infrastructure.yaml), so
+# toxiproxy.json looks like the same class of leftover — but both are
+# compose-era inputs and removing them was not in tonight's box.
 
 # Permissions — readable by any non-root UID.
 RUN find /bundle -type d -exec chmod 755 {} \; \
