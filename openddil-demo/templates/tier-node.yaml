@@ -881,6 +881,68 @@ spec:
 # topology) a peer request is answered from the RESPONDING tier's own policy
 # with no reachback.
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-tier-topaz-config-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  # Minimal config, VERIFIED against topazd 0.33.16 by running it. Two keys
+  # that appear in the published docs and the online JSON schema are REJECTED
+  # by this build — `plugins` and `decision_logger` both fail startup with
+  # "'config.Config' has invalid keys". Consequence: DECISION LOGGING IS NOT
+  # CONFIGURED HERE and remains unproven; ADR-0029's auditability requirement
+  # ("every decision records the policy version that produced it") is an open
+  # item for Arc 2, not something this seat currently satisfies.
+  config.yaml: |
+    version: 2
+    logging:
+      prod: true
+      log_level: info
+    directory:
+      db_path: /db/tier-{{ $tier.id }}.db
+      request_timeout: 5s
+    api:
+      health:
+        listen_address: "0.0.0.0:9494"
+      services:
+        authorizer:
+          grpc:
+            connection_timeout_seconds: 2
+            listen_address: "0.0.0.0:8282"
+          gateway:
+            listen_address: "0.0.0.0:8383"
+            # Plaintext inside the cluster; the tier's mesh boundary is the
+            # trust boundary. Revisit with mTLS when Arc 2 lands.
+            http: true
+    opa:
+      instance_id: openddil-tier-{{ $tier.id }}
+      graceful_shutdown_period_seconds: 2
+      local_bundles:
+        paths:
+          - /policy
+        skip_verification: true
+
+  # EMPTY BUNDLE — a valid bundle root with no policy in it.
+  #
+  # This is what makes "deployed, healthy, deciding nothing" TRUE rather than
+  # aspirational: the authorizer runs, serves, and answers nothing because it
+  # has been given nothing to answer with. Arc 2 (ADR-0029) adds rules to a
+  # component that is already deployed and verified, which was the whole
+  # argument for shipping the seat early.
+  #
+  # Policy CONTENT deliberately does not live here — it is Arc 2's, and it
+  # belongs in a deployment's own overlay rather than baked into the chart.
+  #
+  # roots must NAME the namespace even when nothing occupies it. `{"roots":
+  # []}` is not an empty bundle, it is an invalid one — OPA refuses it with
+  #   manifest roots [] do not permit data at path '/'
+  # and topazd exits. Declaring `openddil` reserves the namespace Arc 2 will
+  # fill while permitting the bundle to contain nothing today.
+  .manifest: |
+    {"roots": ["openddil"]}
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: {{ $root.Release.Name }}-tier-topaz-{{ $tier.id }}
@@ -890,6 +952,8 @@ spec:
   ports:
     - port: 8282
       name: grpc
+    - port: 8383
+      name: authz-http
   selector:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 4 }}
 ---
@@ -914,11 +978,51 @@ spec:
       containers:
         - name: topaz
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.topaz.image.repository "tag" $tn.topaz.image.tag "root" $root) }}
-          args: ["run"]
+          # THE PROVEN INVOCATION — established by running the image, not
+          # inferred. `args: ["run"]` alone exits immediately with
+          #   required flag(s) "config-file" not set
+          # `topazd run --help` (read from inside the image) gives the real
+          # contract: -c/--config-file, and -b/--bundle for local policy roots.
+          args: ["run", "--config-file", "/config/config.yaml"]
           ports:
             - containerPort: 8282
+              name: grpc
+            - containerPort: 8383
+              name: authz-http
+            - containerPort: 9494
+              name: health
+          # TCP, not HTTP. Topaz's health service on 9494 speaks the gRPC
+          # health protocol — an HTTP GET against it never becomes ready, and
+          # the pod sits 0/1 forever while the logs say every server started.
+          # A TCP probe on the authorizer's own gRPC port is true by
+          # construction: the port is open exactly when the service is
+          # listening. Upgrade to a grpc: probe if a richer signal is wanted.
+          readinessProbe:
+            tcpSocket: { port: 8282 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             {{- toYaml $tn.topaz.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            # subPath -> a REAL FILE. A whole-ConfigMap mount produces a
+            # symlink farm (..data -> ..<timestamp>/) and OPA's bundle loader
+            # walks real directory entries.
+            - name: policy
+              mountPath: /policy/.manifest
+              subPath: .manifest
+            - name: db
+              mountPath: /db
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $root.Release.Name }}-tier-topaz-config-{{ $tier.id }}
+        - name: policy
+          configMap:
+            name: {{ $root.Release.Name }}-tier-topaz-config-{{ $tier.id }}
+        - name: db
+          emptyDir: {}
 {{- end }}
 
 {{- end }}

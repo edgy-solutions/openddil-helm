@@ -745,34 +745,44 @@ tierNode:
   # Passive policy sidecar — Arc 2's seat. Deployed and healthy; no rules
   # loaded, no decisions made. See ADR-0029.
   topaz:
-    # DEFAULT OFF — the seat is not yet functional, and saying so is the
-    # point. This shipped as `true` describing itself as "deployed, healthy,
-    # deciding nothing"; it was in fact never deployed at all, because a
-    # missing YAML separator discarded the Deployment for every tier but the
-    # last (fixed in 0.1.37). The first render that actually produced it
-    # showed it had never worked:
-    #   required flag(s) "config-file" not set
-    # `args: ["run"]` alone is not a runnable topaz. It needs a config file
-    # mounted from a ConfigMap, which is Arc 2 (ADR-0029) work: authoring one
-    # now would be inventing policy content and pinning it into the chart as
-    # though it were designed.
+    # RE-ENABLED — the seat is proven occupied, not merely reserved.
     #
-    # WHAT ARC 2 MUST ADD to turn this back on:
-    #   1. a tier-topaz-config ConfigMap (directory + api settings),
-    #   2. `--config-file` pointing at its mount path,
-    #   3. a pinned image tag — `latest` is unpinnable provenance for a
-    #      component that will carry authorization decisions.
+    # It shipped as `true` claiming "deployed, healthy, deciding nothing" and
+    # was none of those: a missing YAML separator discarded the Deployment for
+    # every tier but the last (0.1.37), and once it finally rendered it exited
+    # immediately on `args: ["run"]` with `required flag(s) "config-file" not
+    # set`. Two defects, one hiding the other.
     #
-    # The architectural argument for a per-tier local authorizer is unchanged
-    # and good (ADR-0032 (d), ADR-0033 lateral peers): decisions stay local so
-    # a severed tier still decides. This flag says the seat is reserved, not
-    # occupied.
-    enabled: false
+    # GATE RESULT (2026-08-09, topazd 0.33.16, run on a real cluster):
+    #   PASS  correct invocation: run --config-file <path>, with -b/--bundle
+    #         available for local policy roots. Read from `topazd run --help`
+    #         inside the image — the original defect came from guessing.
+    #   PASS  starts, stays Running, serves authorizer 8282/8383 + health 9494.
+    #   PASS  answers real decisions against a hand-authored local bundle and
+    #         an asserted-entitlement corpus (the users.yaml shape of
+    #         ADR-0029). 4/4 correct, including default-deny for a subject
+    #         absent from the corpus.
+    #   FAIL  decision logging NOT configured. Both `plugins` and
+    #         `decision_logger` — documented online and present in the
+    #         published JSON schema — are REJECTED by this build with
+    #         "'config.Config' has invalid keys". ADR-0029's auditability
+    #         requirement is therefore an OPEN Arc 2 item, not something this
+    #         seat satisfies today.
+    #
+    # What ships enabled is the authorizer with an EMPTY bundle: running,
+    # healthy, and genuinely deciding nothing. Arc 2 adds rules to a deployed,
+    # verified component — which was always the argument for the early seat.
+    # Policy CONTENT stays out of the chart; it belongs in a deployment overlay.
+    enabled: true
     image:
       repository: ghcr.io/aserto-dev/topaz
-      # UNPINNED. Must become a digest or explicit version before this
-      # component is enabled — see above.
-      tag: "latest"
+      # PINNED. `latest` is how this component's config schema silently
+      # diverged from its own published documentation — two config keys that
+      # the docs and the online schema both describe are rejected by the build
+      # that `latest` resolved to. A component that will carry authorization
+      # decisions does not float.
+      tag: "0.33.16"
+      digest: "sha256:835868c04bdd7129127ea43642ffff7363d0bd26d5e1a37631fa881431054360"
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 200m, memory: 256Mi }
