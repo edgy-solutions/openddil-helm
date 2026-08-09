@@ -58,8 +58,15 @@ session.
 
 ### P0. Chart version — **HARD GATE, check before anything else**
 
-**Required: chart ≥ 0.1.41.** If the cluster is on anything earlier, stop
+**Required: chart ≥ 0.1.42.** If the cluster is on anything earlier, stop
 and upgrade before running a single step below.
+
+> **If this cluster is on a pre-0.1.42 chart, its buffer signal is blind
+> RIGHT NOW.** The edge→HQ buffer counter has read 0 since the feature
+> shipped — not because buffering fails, but because the monitor queried a
+> consumer group that never existed (see 0.1.42 below). Any prior observation
+> that "the buffer never moves" is an artefact of the instrument, not
+> evidence about the link.
 
 ```bash
 helm list -n "$NS" -f "^${REL}$" -o json | python -c \
@@ -78,6 +85,7 @@ of this runbook**, and each was found by deploying to a real cluster on
 | 0.1.39 | `wal_level=logical` on tier-pg; schema-init shell/atlas invocation; topaz defaulted off | **§4 rung (i).** Without the first, tier-electric crash-loops and the tier UI never streams — *while tier-pg looks perfectly healthy*. Without the second, the tier store is never migrated. |
 | 0.1.40 | per-edge bridge config and root restate clusters generated from values | **§5 rungs (iii)–(iv).** The bridge is the buffering path being severed and drained; before this it read a baked file keyed by edge name. |
 | 0.1.41 | comment/record correction only | none — no behaviour change. |
+| 0.1.42 | **buffer monitor consumer-group name** | **§5 rungs (iii)–(iv), load-bearing.** The monitor queried `bridge-group`; the bridge commits under `bridge-group-<edge_id>`, so the probe read a group that never existed and reported 0 permanently. Rung (iv)'s entire proof is that this number climbs and drains. Measured before/after on a real cluster: `0 0 0 0 0` vs `30 65 97 130 165` against a broker-confirmed `32 66 99 132 165`. |
 
 **If the release is older than 0.1.41,** upgrade first (P1's re-baseline
 applies to that upgrade too — do P1, then upgrade, then return here). An
@@ -129,6 +137,123 @@ kubectl -n $NS exec $REL-postgres-hq-0 -- \
   psql -U openddil -d openddil -tAc \
   "SELECT count(*) FROM telemetry_latest_state;"
 ```
+
+---
+
+## 0.5 VR-Forces preparation — do this BEFORE the session
+
+Every parameter below was established by driving this pipeline with real
+IEEE 1278.1 traffic in rehearsal. Treat this as configuration to apply, not
+investigation to perform. **One genuine unknown remains — the enumeration
+coverage check in step 4. Walk in holding its answer.**
+
+### 1. Wire settings VR-Forces must emit
+
+| setting | value | why |
+|---|---|---|
+| DIS protocol version | **7** | `sensor-ingest` decodes via `opendis` `dis7`. Version 6 PDUs are structurally close but not verified here. |
+| PDU type | **1** (Entity State) | the only type the ingestor extracts. Fire/Detonation PDUs are received and ignored. |
+| Exercise ID | **1** (or match `DIS_EXERCISE_ID`) | not currently filtered on — recorded so a later filter does not surprise anyone. |
+| Heartbeat | **~5 s** | VR-Forces default. Also what fusion's gone-quiet staleness detection is tuned against; much faster floods the buffer and proves less. |
+| Transport | **UDP unicast** to the ingest Service | see step 2 — broadcast/multicast is the thing most likely to bite. |
+
+### 2. Network path to sensor-ingest
+
+Each edge runs its own listener on its own port:
+
+```bash
+kubectl -n $NS get svc | grep sensor-ingest
+# edge-01 -> 62040/UDP, edge-02 -> 62041/UDP, edge-03 -> 62042/UDP
+```
+
+**The reachability question, stated plainly:** VR-Forces normally emits DIS as
+**broadcast or multicast** on a simulation LAN. A Kubernetes ClusterIP Service
+is **unicast only** — broadcast will not reach it, and multicast requires
+cluster network support that should not be assumed. Resolve one of:
+
+- point VR-Forces at a **unicast** destination (the NodePort on any node, or
+  a LoadBalancer address), **or**
+- run a small relay on the simulation LAN that joins the multicast group and
+  forwards unicast to the Service.
+
+Confirm before the session — this is configuration on the VR-Forces side and
+cannot be fixed from inside the cluster.
+
+```bash
+# NodePorts, if unicast-to-node is the chosen path
+kubectl -n $NS get svc -o wide | grep sensor-ingest
+```
+
+### 3. Confirm arrival — the two counters that matter
+
+```bash
+kubectl -n $NS logs deploy/$REL-sensor-ingest-$PILOT --tail=3
+# Stats snapshot — received=N.0 decoded=N.0 decode_errors=0.0
+```
+
+**`received` rising but `decoded` flat** means PDUs arrive and fail to parse —
+almost always a protocol-version or PDU-type mismatch, not a network problem.
+**Both flat** means nothing is arriving: go back to step 2.
+
+### 4. ⚠ Enumeration coverage — THE OPEN QUESTION
+
+Platform variant resolution runs off the DIS entity-type 7-tuple. An
+unrecognised tuple **does not error** — it falls to `_default`, resolves to
+`UNKNOWN`, and the asset loses its platform metadata and effectively vanishes
+from meaningful display. Silent, and indistinguishable from an asset that is
+merely uninteresting.
+
+The recognised set lives in
+`openddil-contracts/ontology/dis_entity_types.yaml` and is currently **11
+entries**, all `country=225` (US):
+
+```
+1_1_225_1_1_1_0   M1A1              1_2_225_20_1_3_0  AH-64E-V6
+1_1_225_1_3_1_0   M1A2-SEPv3        1_2_225_21_1_2_0  UH-60M
+1_1_225_2_1_1_0   M2A3-Bradley      1_2_225_22_1_1_0  CH-47F-BlockII
+1_1_225_3_1_1_0   HMMWV-M1151A1     1_2_225_40_1_5_0  F-35A-Block4
+1_1_225_80_1_1_0  RCV-M             1_2_225_41_1_1_0  F-16C-Block50
+                                    1_2_225_50_1_1_0  MQ-9A-Block5
+```
+
+Print the same list from the generator (they are kept in step):
+
+```bash
+python openddil-customer-bundle-example/tools/dis-sim/dis_sim.py --list-types
+```
+
+**Before the session, answer:** which entity types will the VR-Forces
+scenario actually emit, and is each one in that list? Every gap is either a
+scenario change or an ontology addition — and ontology additions are
+deployment configuration, so they belong in the deployment's overlay rather
+than in a hurried edit to the shared file.
+
+After traffic starts, the same question answered empirically:
+
+```bash
+kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- psql -U openddil -d openddil -tAc \
+  "SELECT platform_variant, count(*) FROM telemetry_latest_state GROUP BY 1 ORDER BY 2 DESC;"
+```
+
+**A large `UNKNOWN` bucket is the coverage gap made visible.** That query is
+the fastest read on whether the ontology matches the scenario.
+
+### 5. No VR-Forces yet? Use the rehearsal generator
+
+`openddil-customer-bundle-example/tools/dis-sim/` emits real EntityState PDUs
+using the same library the ingestor decodes with, so the wire format is not
+in question. It is **not a simulation** — no physics, no behaviours — but it
+is sufficient to prove the chain end to end, and it produced this runbook's
+rung (iii)/(iv) evidence.
+
+```bash
+cd openddil-customer-bundle-example/tools/dis-sim && ./deploy.sh $NS
+```
+
+> **`rpk produce` onto `raw-sensor-stream` is a debugging tool for one stage,
+> NOT a proof path.** It skips decode and mapping and requires reproducing an
+> internal wire shape by inspection. Entering at the DIS socket keeps the
+> format an open published standard the pipeline already decodes.
 
 ---
 
