@@ -267,13 +267,24 @@ spec:
 # the broker address and the consumer-group name — pure topology, nothing
 # authored. Nothing is lost by generating them.
 #
-# It also repairs a latent breakage. The bundled files hardcoded
-# docker-compose hostnames (`redpanda-edge-01:9092`, `toxiproxy:8474`) and
-# never referenced the ${EDGE_BROKER}/${HQ_BROKER} env this chart injects —
-# despite a comment below claiming they did. Those names do not resolve in
-# Kubernetes, where the Services are release-prefixed, so this bridge could
-# not have worked in ANY helm deployment at ANY edge name. Renaming the edges
-# only made it fail loudly instead of silently accruing lag.
+# It also removes a dependency on the bare-name ALIAS Services.
+#
+# The bundled files hardcoded docker-compose hostnames
+# (`redpanda-edge-01:9092`, `toxiproxy:8474`). Those DO resolve, because
+# infrastructure.yaml and hub.yaml deliberately publish unprefixed alias
+# Services for exactly this reason — a documented compatibility shim for
+# compose-era configs, not an accident. So the bridge worked wherever the
+# edge ids matched the baked filenames; the lab failure was the missing FILE
+# alone, and never reached hostname resolution.
+#
+# Generating removes the coupling to those aliases: this config now carries
+# release-prefixed Service names and works whether or not the shim exists.
+#
+# One genuine piece of dead weight confirmed on the way: the baked configs
+# never referenced the ${EDGE_BROKER}/${HQ_BROKER} env this chart injected,
+# despite a comment claiming they did. Cosmetic rather than breaking — but it
+# is why the configuration looked parameterised while the real coupling was a
+# filename.
 apiVersion: v1
 kind: ConfigMap
 metadata:

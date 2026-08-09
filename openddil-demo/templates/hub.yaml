@@ -127,13 +127,17 @@ spec:
 # tier-node.yaml tier-restate-config) — and this is the root tier adopting it.
 #
 # The bundle's baked demo/restate-config.toml hardcoded three cluster names
-# (openddil-edge-01/02/03) AND docker-compose broker hostnames
-# (`redpanda-edge-01:9092`), so:
-#   - an overlay naming its edges anything else failed subscription creation
-#     with "specified cluster in the source URI does not exist", and
-#   - the broker addresses did not resolve under Kubernetes at all, where
-#     Services are release-prefixed.
-# Both are topology, which ADR-0033 says is deployment configuration.
+# (openddil-edge-01/02/03) and docker-compose broker hostnames
+# (`redpanda-edge-01:9092`). An overlay naming its edges anything else failed
+# subscription creation with "specified cluster in the source URI does not
+# exist" — the cluster set is topology, which ADR-0033 says is deployment
+# configuration.
+#
+# The bare hostnames themselves DID resolve: infrastructure.yaml publishes
+# unprefixed alias Services precisely so compose-era configs keep working.
+# Generating from values removes the dependency on that shim rather than
+# repairing a break — the addresses below are release-prefixed and correct
+# with or without the aliases.
 #
 # Generating from .Values.edges means the cluster set follows the DECLARED
 # topology automatically: N edges produce N clusters, named and addressed
