@@ -23,10 +23,66 @@ export PILOT=edge-01             # the pilot site (see §1)
 
 ---
 
-## Pre-flight — three parked items, same credentials
+## Rehearsal substitutions — one procedure, declared translations
 
-Do these first. They are unrelated to the pilot but need the same access,
-and each has been waiting on a cluster session.
+This runbook was **rehearsed end-to-end on a lab k3s cluster before being
+handed to an operator**, so the steps below have been executed rather than
+merely written. The lab differs from the work cluster in four known ways.
+They are listed here as *substitutions*, not as a second procedure: the
+rehearsed document and the operator document are the same document, and
+every divergence is declared.
+
+| | work cluster | lab | note |
+|---|---|---|---|
+| edge ids | `edge-01…03` | `edge-northpoint`, `edge-capeverdant` | **name-parameterized.** Everything below uses `$PILOT`; nothing depends on the literal name (that became true in 0.1.40 — see GD-09). |
+| P1 Atlas re-baseline | **required** | not applicable | work-cluster-only: the lab store is created fresh by this chart, so there is no pre-existing schema to re-baseline. |
+| P2/P3 measurements | real ORBAT data | synthetic sim data | work-cluster-only for *values*. The lab confirms the **queries run**; it cannot confirm the numbers mean anything. |
+| fleet | populated | logistics-sim generated | affects rung (ii) parity richness, not the mechanism. |
+
+**What the lab does prove, at full strength:** it is genuine Kubernetes, and
+**toxiproxy is the severance mechanism at both sites**. So rungs (iii)–(iv)
+exercise the identical mechanism — the credibility gap between a rehearsal
+recording and the official one is *data realism only*, not fidelity of the
+thing being demonstrated.
+
+The work-cluster recording remains the official proof artifact. The
+rehearsal recording is internal validation, and a serviceable backup demo.
+
+---
+
+## Pre-flight — a version gate, then three parked items
+
+**P0 gates everything below it.** The three parked items are unrelated to
+the pilot but need the same access, and each has been waiting on a cluster
+session.
+
+### P0. Chart version — **HARD GATE, check before anything else**
+
+**Required: chart ≥ 0.1.41.** If the cluster is on anything earlier, stop
+and upgrade before running a single step below.
+
+```bash
+helm list -n "$NS" -f "^${REL}$" -o json | python -c \
+  "import json,sys; r=json.load(sys.stdin)[0]; print(r['chart'], '|', r['status'])"
+# expect: openddil-demo-0.1.41 (or later) | deployed
+```
+
+This is not routine hygiene. Every fix below is **load-bearing for a rung
+of this runbook**, and each was found by deploying to a real cluster on
+2026-08-08 — the first time the tier node had ever executed anywhere:
+
+| chart | fix | which rung breaks without it |
+|---|---|---|
+| 0.1.37 | loop-boundary `---` in `tier-node.yaml` | **all of §3–§5.** Every tier but the last silently lost objects at render time. On a multi-tier deployment you would deploy, see no error, and be missing components. |
+| 0.1.38 | restate-wipe hook image (`bitnami/kubectl:1.30` was withdrawn from Docker Hub and now 404s) | **install itself** — fails as `failed pre-install: timed out waiting for the condition`, which names no image and sends you hunting. |
+| 0.1.39 | `wal_level=logical` on tier-pg; schema-init shell/atlas invocation; topaz defaulted off | **§4 rung (i).** Without the first, tier-electric crash-loops and the tier UI never streams — *while tier-pg looks perfectly healthy*. Without the second, the tier store is never migrated. |
+| 0.1.40 | per-edge bridge config and root restate clusters generated from values | **§5 rungs (iii)–(iv).** The bridge is the buffering path being severed and drained; before this it read a baked file keyed by edge name. |
+| 0.1.41 | comment/record correction only | none — no behaviour change. |
+
+**If the release is older than 0.1.41,** upgrade first (P1's re-baseline
+applies to that upgrade too — do P1, then upgrade, then return here). An
+operator session spent rediscovering bugs already fixed in git is the
+worst possible use of credentialed time.
 
 ### P1. Atlas re-baseline (REQUIRED before any `helm upgrade`)
 
@@ -111,6 +167,54 @@ kubectl -n $NS exec $REL-redpanda-$PILOT-0 -- \
 
 **Expect:** `telemetry-latest-state`, `raw-sensor-stream` present.
 
+### 2.5 Confirm data is actually FLOWING — not just that topics exist
+
+**Do not skip this.** Everything in §4 and §5 measures rows and lag. If
+nothing is being produced, every rung reads as a failure of the thing you
+just deployed, and the runbook will appear to indict the tier node.
+
+```bash
+# High-watermark on the pilot's raw sensor topic. Run twice, ~30s apart.
+kubectl -n $NS exec $REL-redpanda-$PILOT-0 -- \
+  rpk topic describe raw-sensor-stream -p
+```
+
+**Expect:** `HIGH-WATERMARK` non-zero, and **larger on the second run**.
+
+**If it is 0 and stays 0, STOP — the site has no data feed.** Nothing below
+will pass, and none of it will be the tier node's fault. Confirm with:
+
+```bash
+kubectl -n $NS logs deploy/$REL-sensor-ingest-$PILOT --tail=3
+# "Stats snapshot — received=0.0 decoded=0.0" means no DIS PDUs are arriving
+```
+
+Telemetry originates as **DIS UDP traffic from the upstream simulator**
+(NodePorts 62040–62042). It is not generated by this stack — there is no
+seed script and none is missing. A site whose feed is not yet wired looks
+byte-for-byte identical to a broken deployment from inside the cluster.
+Resolve the feed first, then return here.
+
+*Found by rehearsal: a lab cluster with no upstream feed produced zeros at
+every rung, and the original §4 text attributed them to the tier projector.*
+
+### 2.6 Expect alarming, self-healing errors in the first ~60 seconds
+
+The tier projector starts before `tier-schema-init` finishes, so early logs
+contain lines like:
+
+```
+edge_buffer_status write failed: relation "edge_buffer_status" does not exist
+Subscribed topic not available: asset-cm-state: UNKNOWN_TOPIC_OR_PART
+```
+
+**These are a startup race and they resolve themselves.** Both the table and
+the topics are created moments later by the schema-init Job and topic-init
+hook. Judge by `--since=2m` rather than by the log tail, which shows the
+noisiest minute of the pod's life forever.
+
+**Escalate only if they are still appearing after ~2 minutes.**
+
 ---
 
 ## 3. Deploy the tier node to the pilot only
@@ -190,8 +294,22 @@ kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- \
 **Expect:** a non-zero count, and **`edge_id` distinct = 1**. More than
 one means the tier is receiving other tiers' data — **stop and report**.
 
-**If the count is 0:** the tier projector is not writing. Check
-`kubectl -n $NS logs deploy/$REL-tier-projector-$PILOT`.
+**If the count is 0 — check §2.5 FIRST, before suspecting the tier.**
+
+A zero here means "no rows arrived", which has two very different causes and
+the unhelpful one is far more common:
+
+1. **Nothing is being produced at all** (no DIS feed at this site, or the
+   upstream sim is not running). Then the ROOT store is *also* empty for this
+   site, every tier looks broken, and nothing is wrong with the tier node.
+   §2.5 distinguishes this in one command.
+2. **The tier projector is not writing** — only worth investigating once
+   §2.5 shows data actually flowing:
+   `kubectl -n $NS logs deploy/$REL-tier-projector-$PILOT`.
+
+An earlier version of this runbook named cause 2 only, which sends you to
+read logs of a component that is behaving correctly. Rehearsal walked
+straight into it.
 
 ### (ii) Parity with the root's view of the same site
 
@@ -201,7 +319,10 @@ kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- psql -U openddil -d openddil -tAc \
   "SELECT count(*) FROM telemetry_latest_state;"
 
 # root's view of that same site
-kubectl -n $NS exec $REL-postgres-hq-0 -- psql -U openddil -d openddil -tAc \
+# NOTE the different -U: the ROOT store's superuser is `postgres`, the TIER
+# store's is `openddil`. They are not symmetric. Using -U openddil here fails
+# with: FATAL: role "openddil" does not exist
+kubectl -n $NS exec $REL-postgres-hq-0 -- psql -U postgres -d openddil -tAc \
   "SELECT count(*) FROM telemetry_latest_state WHERE edge_id = '$PILOT';"
 ```
 
