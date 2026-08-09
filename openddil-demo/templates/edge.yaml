@@ -430,6 +430,27 @@ spec:
               value: {{ $edge.region | quote }}
             - name: BUFFER_MONITOR_ENABLED
               value: "true"
+            # THE GROUP NAME IS PER-EDGE AND MUST BE PASSED.
+            #
+            # edge_buffer_monitor.py defaults BRIDGE_CONSUMER_GROUP to the
+            # bare "bridge-group", but the bridge commits under
+            # "bridge-group-<edge_id>" — deliberately, so per-edge lag is
+            # unambiguous. Leaving the default makes the monitor query a group
+            # that has NEVER EXISTED.
+            #
+            # It then fails silently: a missing group yields no committed
+            # offsets, and the probe's own contract is "returns 0 if the group
+            # has not committed any offsets yet". A broken lookup and a quiet
+            # link produce the identical reading, so the UI buffer counter
+            # reads 0 forever and looks plausible while doing so.
+            #
+            # Measured on a real cluster 2026-08-08: with the link severed,
+            # `rpk group describe bridge-group-<edge>` climbed 32 -> 265 over
+            # 160s while this monitor reported 0 throughout. The DDIL
+            # buffering was working the whole time; only its instrument was
+            # blind.
+            - name: BRIDGE_CONSUMER_GROUP
+              value: "bridge-group-{{ $edge.id }}"
           ports:
             - name: metrics
               containerPort: {{ $root.Values.projector.port }}

@@ -376,11 +376,37 @@ curl -X POST http://localhost:8474/proxies/hq-link \
    of this site, computed centrally and unavailable here precisely when
    it mattered. Now it is the site describing itself.
 
-> **Honest caveat to watch for:** the buffer monitor's lag probe reads
-> the tier's own broker (works while severed), but its toxiproxy probe
-> reaches a root-tier service. If the *link-down flag* fails to appear
-> while the *buffer count still climbs*, that is a known seam — record it
-> and report; the buffer number is the load-bearing signal.
+**CROSS-CHECK THE BUFFER AGAINST THE BROKER.** Do not trust the UI counter
+alone — read the number the broker itself holds:
+
+```bash
+kubectl -n $NS exec $REL-redpanda-$PILOT-0 -- \
+  rpk group describe bridge-group-$PILOT | grep TOTAL-LAG
+```
+
+**Expect:** climbing steadily while severed, collapsing to ~0 within one
+probe interval of the heal. Measured in rehearsal: 32 → 265 over 160s of
+severance at ~1.65 msg/s, then back to 1 within 20 seconds of healing.
+
+> **Fixed in chart 0.1.42 — and worth knowing if you are on anything older.**
+> The buffer counter read **0 permanently**, on every cluster, since the
+> feature shipped. `edge_buffer_monitor.py` defaults its consumer group to
+> the bare `bridge-group`, while the bridge commits under
+> `bridge-group-<edge_id>` — so the probe queried a group that never
+> existed. A missing group returns no offsets, and the probe's contract is
+> "0 if the group has not committed offsets yet", so a broken lookup and a
+> quiet link are indistinguishable. **The DDIL buffering was working the
+> whole time; only the instrument was blind.** 0.1.42 passes the correct
+> per-edge group name from the chart.
+>
+> If the counter stays 0 while the `rpk` command above shows real lag, you
+> are on a pre-0.1.42 chart. The buffering is fine — believe `rpk`.
+
+> **Second caveat, still open:** the monitor's lag probe reads the tier's own
+> broker (works while severed) but its toxiproxy probe reaches a root-tier
+> service. In rehearsal the link-down flag appeared correctly at +20s but
+> flapped back to `false` at +80s on a pre-0.1.42 build. The buffer number
+> is the load-bearing signal; record any flag flapping and report it.
 
 ### Heal — rung (iv)
 

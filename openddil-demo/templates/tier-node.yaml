@@ -500,8 +500,11 @@ spec:
             # while severed, which is the whole point.
             - name: BUFFER_MONITOR_ENABLED
               value: "true"
+            # Per-tier group name — see the identical fix in edge.yaml for why
+            # the bare "bridge-group" default is a silent zero rather than an
+            # error. This line previously carried that default verbatim.
             - name: BRIDGE_CONSUMER_GROUP
-              value: "bridge-group"
+              value: "bridge-group-{{ $tier.id }}"
             - name: TOXIPROXY_API_URL
               value: {{ printf "http://%s-toxiproxy%s:8475" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
             - name: HQ_LINK_PROXY
