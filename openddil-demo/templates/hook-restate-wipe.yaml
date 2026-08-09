@@ -118,7 +118,10 @@ spec:
             - sh
             - -c
             - |
-              # POSIX sh -- bitnami/kubectl's /bin/sh is dash. No pipefail.
+              # POSIX sh ONLY -- no pipefail, no bashisms. The runner image
+              # (alpine/k8s) gives BusyBox ash; the previous one gave dash.
+              # Neither supports pipefail, and any replacement image must
+              # ship a shell at all -- the distroless kubectl images do not.
               set -eu
               STS="{{ .Release.Name }}-restate-server"
               PVC="data-${STS}-0"

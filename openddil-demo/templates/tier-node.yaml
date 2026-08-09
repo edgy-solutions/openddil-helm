@@ -103,6 +103,14 @@ spec:
       containers:
         - name: postgres
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.postgres.image.repository "tag" $tn.postgres.image.tag "root" $root) }}
+          # wal_level=logical is REQUIRED, exactly as for postgres-hq
+          # (infrastructure.yaml). tier-electric is an ElectricSQL instance
+          # and refuses to start without it:
+          #   [emergency] Electric requires wal_level >= logical
+          # It then exits, so the symptom is a CrashLoopBackOff on electric
+          # while postgres itself looks perfectly healthy — the failing pod
+          # is not the misconfigured one.
+          args: ["postgres", "-c", "wal_level=logical"]
           env:
             - name: POSTGRES_USER
               value: {{ $tn.postgres.auth.username | quote }}
@@ -176,18 +184,50 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "stack/schema" "dst" "schema")
           ) "root" $root) | nindent 8 }}
-      containers:
-        - name: atlas-apply
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.atlas.repository "tag" $root.Values.utilities.atlas.tag "root" $root) }}
-          command: ["/bin/sh", "-c"]
-          args:
+        # WAIT HERE, NOT INSIDE atlas-apply.
+        #
+        # The arigaio/atlas image has no shell and no `nc` — its ENTRYPOINT
+        # is the atlas binary itself. A wait loop in that container dies at
+        # container init with:
+        #   exec: "/bin/sh": stat /bin/sh: no such file or directory
+        # which reads as a broken image rather than a wrong invocation.
+        #
+        # postgres-schema-init.yaml had already solved this and says so in
+        # its comments. This template copied that Job's SHAPE and lost the
+        # constraint — similarity is a code claim, not a deployment claim.
+        # Blocking in a container that DOES have a shell is the fix, and the
+        # postgres image is the natural one: it ships pg_isready, so the
+        # check is a real readiness probe rather than a port knock.
+        - name: wait-postgres
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.postgres.image.repository "tag" $tn.postgres.image.tag "root" $root) }}
+          resources:
+            {{- toYaml $root.Values.jobs.resources | nindent 12 }}
+          command:
+            - sh
+            - -c
             - |
               set -e
               echo "waiting for tier store {{ $tier.id }} ..."
-              until nc -z {{ $root.Release.Name }}-tier-pg-{{ $tier.id }} {{ $tn.postgres.port }}; do sleep 2; done
-              atlas migrate apply \
-                --dir "file:///bundle/schema/migrations" \
-                --url "{{ $dsn }}?sslmode=disable"
+              until pg_isready -h {{ $pgHost }} -p {{ $tn.postgres.port }} -U {{ $tn.postgres.auth.username }} -d {{ $tn.postgres.auth.database }}; do
+                sleep 2
+              done
+              echo "tier store {{ $tier.id }} accepting connections"
+      containers:
+        # Entrypoint IS the atlas binary, so `args:` carries only subcommand
+        # arguments — no `command:` override, no shell.
+        - name: atlas-apply
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.atlas.repository "tag" $root.Values.utilities.atlas.tag "root" $root) }}
+          # Bounded, so an OOM cannot leave a tier DB half-migrated. The
+          # root-tier Jobs have always had this; the tier Jobs did not.
+          resources:
+            {{- toYaml $root.Values.jobs.resources | nindent 12 }}
+          args:
+            - migrate
+            - apply
+            - --dir
+            - "file:///bundle/schema/migrations"
+            - --url
+            - "{{ $dsn }}?sslmode=disable"
           volumeMounts:
             - name: bundle-shared
               mountPath: /bundle
@@ -815,13 +855,24 @@ spec:
 {{- if $tn.topaz.enabled }}
 ---
 # ===========================================================================
-# tier-topaz-{{ $tier.id }} — PASSIVE. Arc 2's landing zone.
+# tier-topaz-{{ $tier.id }} — RESERVED SEAT. Arc 2's landing zone.
 # ===========================================================================
-# Deployed, healthy, DECIDING NOTHING. No policy loaded, no PEP wired.
+# DEFAULT OFF, and the honest description is "not yet runnable" rather than
+# the "deployed, healthy, deciding nothing" this comment used to claim.
 #
-# This is deliberate and is recorded so the seat is not removed as dead
-# weight: shipping it now means Arc 2 (ADR-0029) adds RULES to a deployed
-# component rather than adding a COMPONENT under enforcement pressure. It is
+# That claim was never tested, because a missing YAML separator meant this
+# Deployment was discarded at render time for every tier but the last. The
+# first render that produced it showed `args: ["run"]` is not a runnable
+# topaz — it exits with `required flag(s) "config-file" not set`. A component
+# that never rendered could not reveal that it also never worked; two
+# defects, one hiding the other.
+#
+# Enabling it is Arc 2 work: a config ConfigMap, a --config-file argument,
+# and a pinned image tag. See values.yaml tierNode.topaz.
+#
+# The intent is unchanged and still good: shipping the seat means Arc 2
+# (ADR-0029) adds RULES to a deployed component rather than adding a
+# COMPONENT under enforcement pressure. It is
 # also the per-tier local authorizer the architecture requires — decisions
 # local, so a severed tier still decides, and (ADR-0033 §Lateral peer
 # topology) a peer request is answered from the RESPONDING tier's own policy

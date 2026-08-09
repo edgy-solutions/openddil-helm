@@ -264,29 +264,43 @@ restate:
   # `flush-assets.sh --deep` to clean state when needed.
   ephemeralOnUpgrade: true
 
-  # Image used by the restate-wipe hook Job. Same kubectl-runner the
-  # other overlay hooks use; bumping it independently of the chart's
-  # default kubectl version is rarely needed but possible here.
+  # Image used by the restate-wipe hook Job. This is the ONLY consumer of a
+  # kubectl-runner image in the chart -- an earlier version of this comment
+  # claimed other hooks shared it; they do not.
   wipe:
     image:
-      # Default points at docker.io/bitnami/kubectl. Bitnami's Aug-2025
-      # catalog restructure has made most of the historical bitnami/
-      # kubectl tags hard to obtain reliably -- many customer
-      # environments have a different in-house kubectl-shipping image
-      # at this point (alpine/k8s, dtzar/helm-kubectl, or a platform-
-      # team-blessed build).
+      # WAS docker.io/bitnami/kubectl:1.30. That tag NO LONGER EXISTS.
+      # Bitnami's Aug-2025 catalog restructure withdrew the historical
+      # bitnami/kubectl tags from Docker Hub; both :1.30 and :1.31 now
+      # return HTTP 404. Verified 2026-08-08 against the registry API.
+      #
+      # This failed in the worst available way: the pre-install hook Job
+      # sat in ImagePullBackOff and helm reported only
+      #   "Error: failed pre-install: timed out waiting for the condition"
+      # which names nothing about an image. Nothing in the chart changed --
+      # the registry did.
+      #
+      # THE REPLACEMENT MUST CONTAIN A SHELL. The hook runs a POSIX sh
+      # script, which rules out the obvious modern picks -- both
+      # registry.k8s.io/kubectl:v1.31.4 and docker.io/rancher/kubectl:v1.31.4
+      # exist but are distroless and fail at container init with
+      #   exec: "sh": executable file not found in $PATH
+      # Verified by running all three candidates on a real cluster rather
+      # than inferring from their base images.
+      #
+      # alpine/k8s ships kubectl on Alpine, so /bin/sh is BusyBox ash --
+      # still POSIX-only, so the "no pipefail" constraint in
+      # hook-restate-wipe.yaml continues to apply unchanged.
       #
       # OVERRIDE for air-gapped / mirror-only deploys:
       #   --set restate.wipe.image.repository=<your-registry>/path/to/kubectl
-      #   --set restate.wipe.image.tag=<your-version>      # e.g. "1.25.5"
+      #   --set restate.wipe.image.tag=<your-version>
+      # Any replacement needs kubectl AND a shell; check both.
       #
-      # The mirror script (scripts/mirror-to-artifactory.ps1) deliberately
-      # does NOT include bitnami/kubectl in its inventory because the
-      # docker.io source is unreliable. Add a line back to that script
-      # if your platform has a reliable source path, and add a
+      # If you add this to scripts/mirror-to-artifactory.ps1, add a
       # values-pinned.yaml mapping entry alongside it.
-      repository: docker.io/bitnami/kubectl
-      tag: "1.30"
+      repository: docker.io/alpine/k8s
+      tag: "1.31.4"
       digest: ""
       pullPolicy: IfNotPresent
 
@@ -731,9 +745,33 @@ tierNode:
   # Passive policy sidecar — Arc 2's seat. Deployed and healthy; no rules
   # loaded, no decisions made. See ADR-0029.
   topaz:
-    enabled: true
+    # DEFAULT OFF — the seat is not yet functional, and saying so is the
+    # point. This shipped as `true` describing itself as "deployed, healthy,
+    # deciding nothing"; it was in fact never deployed at all, because a
+    # missing YAML separator discarded the Deployment for every tier but the
+    # last (fixed in 0.1.37). The first render that actually produced it
+    # showed it had never worked:
+    #   required flag(s) "config-file" not set
+    # `args: ["run"]` alone is not a runnable topaz. It needs a config file
+    # mounted from a ConfigMap, which is Arc 2 (ADR-0029) work: authoring one
+    # now would be inventing policy content and pinning it into the chart as
+    # though it were designed.
+    #
+    # WHAT ARC 2 MUST ADD to turn this back on:
+    #   1. a tier-topaz-config ConfigMap (directory + api settings),
+    #   2. `--config-file` pointing at its mount path,
+    #   3. a pinned image tag — `latest` is unpinnable provenance for a
+    #      component that will carry authorization decisions.
+    #
+    # The architectural argument for a per-tier local authorizer is unchanged
+    # and good (ADR-0032 (d), ADR-0033 lateral peers): decisions stay local so
+    # a severed tier still decides. This flag says the seat is reserved, not
+    # occupied.
+    enabled: false
     image:
       repository: ghcr.io/aserto-dev/topaz
+      # UNPINNED. Must become a digest or explicit version before this
+      # component is enabled — see above.
       tag: "latest"
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
