@@ -46,7 +46,20 @@
 {{- $broker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
 {{- $pgHost := printf "%s-tier-pg-%s%s" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) }}
 {{- $dsn := printf "postgres://%s:%s@%s:%d/%s" $tn.postgres.auth.username $tn.postgres.auth.password $pgHost (int $tn.postgres.port) $tn.postgres.auth.database }}
-
+---
+# LOOP-BOUNDARY SEPARATOR — do not remove.
+#
+# The 19 objects below are separated from each other, but that only covers
+# separators WITHIN one iteration. Without this one, the LAST object of tier N
+# (the topaz Deployment) and the FIRST object of tier N+1 (the tier-pg Service)
+# concatenate into a single YAML document with duplicate top-level keys, and
+# last-wins silently swallows the Deployment for every tier except the last.
+#
+# The failure is invisible in `helm template | grep`: the raw text still
+# contains both `kind:` lines, so only a real parse catches it. Observed as
+# 3 topaz Services against 1 topaz Deployment. Guarded by the render audit in
+# tests/test_tier_node_renders_against_overlay.py, which now asserts Service
+# and workload counts match per component.
 # ===========================================================================
 # tier-pg-{{ $tier.id }} — the tier-local read model
 # ===========================================================================
