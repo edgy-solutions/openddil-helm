@@ -71,8 +71,147 @@ and upgrade before running a single step below.
 ```bash
 helm list -n "$NS" -f "^${REL}$" -o json | python -c \
   "import json,sys; r=json.load(sys.stdin)[0]; print(r['chart'], '|', r['status'])"
-# expect: openddil-demo-0.1.41 (or later) | deployed
+# expect: openddil-demo-0.1.42 (or later) | deployed
 ```
+
+### P0.1 The upgrade itself — REHEARSED 2026-08-10
+
+If P0 says you are behind, this is the procedure. It was executed end to end
+on a lab cluster: a from-scratch install of an older chart, populated with
+live DIS traffic, then upgraded in place. The chart transition took **65
+seconds**, ended with **zero unhealthy pods**, and **every data row
+survived**.
+
+Read the whole section before running anything — one step (P0.1.c) is a
+safety gate that must be evaluated, not assumed.
+
+#### a. Establish what you are actually on
+
+Two facts are needed and they can disagree:
+
+```bash
+# 1. the CHART version (drives template/topology changes)
+helm list -n "$NS"
+
+# 2. the BUNDLE digest (drives SCHEMA MIGRATIONS — this is the one that bites)
+kubectl -n "$NS" get statefulset,deploy -o jsonpath='{range .items[*]}{.spec.template.spec.initContainers[*].image}{"\n"}{end}' \
+  | grep -i runtime-bundle | sort -u
+```
+
+**These are independent.** A deployment can carry a June chart with a July
+bundle if images were re-mirrored without a chart change — which is exactly
+the case this rehearsal was built against. **The Atlas hazard tracks the
+bundle, not the chart**, and reasoning about it from the chart version alone
+produces a confident wrong answer. (It did here, twice, until the pinned
+digests were checked.)
+
+#### b. Expect exactly two schema events
+
+Determined by comparing the migration set in the pinned bundle against
+current — not by observation, so it is knowable *before* the maintenance
+window:
+
+| event | what it is |
+|---|---|
+| **new migrations applied forward** | normal; count them from the diff between the pinned bundle's migration directory and current |
+| **a checksum mismatch on an already-applied migration** | `atlas migrate apply` refuses. This is the re-baseline trigger. |
+
+To compute both before touching the cluster, in the schema repo:
+
+```bash
+PIN=$(git rev-list -1 --before="<your bundle's mirror date>" HEAD)
+# migrations added since the pin:
+diff <(git ls-tree -r --name-only $PIN schema/migrations | grep '\.sql$' | xargs -n1 basename | sort) \
+     <(ls schema/migrations/*.sql | xargs -n1 basename | sort) | grep '^>'
+# already-applied migrations whose CONTENT changed since the pin:
+for f in $(git ls-tree -r --name-only $PIN schema/migrations | grep '\.sql$'); do
+  git diff --quiet $PIN HEAD -- "$f" || echo "CHANGED: $(basename $f)"
+done
+```
+
+#### c. ⚠ SAFETY GATE — is the re-baseline legitimate?
+
+**Re-baselining tells Atlas "trust the new checksum for a migration already
+applied." That is correct ONLY if the SQL is unchanged.** If real SQL
+changed, re-baselining silently records schema you never applied — the
+drift becomes invisible instead of loud.
+
+Prove it rather than assume it. For each CHANGED file from (b):
+
+```bash
+F=schema/migrations/<the-changed-migration>.sql
+a=$(git show "$PIN:$F" | grep -vE '^\s*--' | grep -vE '^\s*$' | md5sum)
+b=$(git show "HEAD:$F"  | grep -vE '^\s*--' | grep -vE '^\s*$' | md5sum)
+[ "$a" = "$b" ] && echo "comment-only — re-baseline SAFE" \
+                || echo "SQL DIFFERS — STOP, do not re-baseline"
+```
+
+**If any file reports SQL DIFFERS, stop and escalate.** A re-baseline over a
+real schema change is the failure this gate exists to prevent, and it is not
+recoverable by inspection afterwards.
+
+#### d. Capture rollback state first
+
+```bash
+helm get values "$REL" -n "$NS" > /tmp/values-before.yaml   # KEEP THIS
+helm history "$REL" -n "$NS" | tail -5                      # note the revision
+kubectl -n "$NS" exec "$REL-postgres-hq-0" -- \
+  psql -U postgres -d openddil -tAc "SELECT count(*) FROM telemetry_latest_state;"
+```
+
+The values file matters more than the revision number: `helm rollback`
+restores the chart, not any values you passed with `-f`.
+
+#### e. Upgrade
+
+```bash
+helm upgrade "$REL" <path-to-openddil-demo-chart> -n "$NS" \
+  -f <your values file(s), including any digest-pinned overlay> \
+  --timeout 15m
+```
+
+Keep passing every `-f` you originally installed with. Helm does not
+remember file-supplied values across an upgrade; omitting one silently
+reverts those settings to chart defaults.
+
+**Rehearsed result:** completes in ~1 minute. Hooks run from the NEW chart,
+so a hook image that has been withdrawn from a registry since the old chart
+shipped does **not** block the upgrade — it blocks fresh *installs* of the
+old chart only.
+
+#### f. If the re-baseline fires
+
+The schema-init job fails on the checksum mismatch predicted in (b). With
+gate (c) passed, apply the re-baseline procedure from the helm README, then
+re-run the job:
+
+```bash
+kubectl -n "$NS" delete job "$REL-postgres-schema-init" --ignore-not-found
+helm upgrade "$REL" <chart> -n "$NS" -f <values...>   # re-runs the hook
+```
+
+#### g. Verify — and do not accept "pods are Running" as verification
+
+```bash
+kubectl -n "$NS" get pods | grep -vE "Running|Completed"     # expect: nothing
+kubectl -n "$NS" exec "$REL-postgres-hq-0" -- \
+  psql -U postgres -d openddil -tAc "SELECT count(*) FROM telemetry_latest_state;"
+# compare against the count captured in (d)
+```
+
+Then run **§4 rung (i)** below as the real smoke test: it exercises the
+store, the projector and the UI path rather than pod status.
+
+#### h. Rollback
+
+```bash
+helm rollback "$REL" <previous-revision> -n "$NS"
+```
+
+**Rollback returns the chart, not the schema.** Migrations applied forward in
+(b) are not reversed, and a re-baseline is not undone. For a comment-only
+re-baseline that is harmless — the schema was already correct. It is another
+reason gate (c) is a gate and not a formality.
 
 This is not routine hygiene. Every fix below is **load-bearing for a rung
 of this runbook**, and each was found by deploying to a real cluster on
