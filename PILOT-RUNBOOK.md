@@ -190,6 +190,43 @@ kubectl -n "$NS" delete job "$REL-postgres-schema-init" --ignore-not-found
 helm upgrade "$REL" <chart> -n "$NS" -f <values...>   # re-runs the hook
 ```
 
+#### f.2 Expect one silent repair: topic configs
+
+Upgrading across **0.1.34** changes topic-init from create-only to
+create-then-`alter-config`. That is not cosmetic — it **self-heals topics
+that lost the create race**.
+
+The failure it repairs: if a producer or consumer connects before the
+post-install topic-init hook completes, redpanda auto-creates the topic with
+DEFAULT config. The old `rpk topic create … || true` then no-ops (the topic
+exists), so the intended `-c` settings — including
+`max.message.bytes=16777216` — never land. Per-asset element snapshots are
+several MB, exceed the 1 MB default ceiling, `publish_snapshot` fails with
+`MessageSizeTooLargeError`, and **no per-element data ever reaches the
+topic** — the maintainer 3D tiles stay empty fleet-wide.
+
+**A cluster deployed before 0.1.34 may be in that state right now**, and it
+presents as a UI problem rather than a topic problem.
+
+Check before upgrading, so you can tell repair from coincidence:
+
+```bash
+kubectl -n "$NS" exec "$REL-redpanda-edge-01-0" -- \
+  rpk topic describe asset-element-telemetry -c | grep -E "max.message.bytes|cleanup.policy"
+# 1048576 means the topic lost the create race and has been dropping snapshots
+```
+
+Then re-check after (g). The alter-config is idempotent — setting a value to
+itself is a no-op — and **partition/replica counts are deliberately not
+altered**, only configs. Safe on every install and upgrade.
+
+If you would rather not wait for the upgrade, the same repair applies live
+with no redeploy:
+
+```bash
+rpk topic alter-config asset-element-telemetry --set max.message.bytes=16777216 …
+```
+
 #### g. Verify — and do not accept "pods are Running" as verification
 
 ```bash
