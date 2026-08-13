@@ -58,8 +58,17 @@ session.
 
 ### P0. Chart version — **HARD GATE, check before anything else**
 
-**Required: chart ≥ 0.1.42.** If the cluster is on anything earlier, stop
-and upgrade before running a single step below.
+**Two different numbers, and they are not interchangeable.**
+
+| | number | what it means |
+|---|---|---|
+| **Hard minimum** | **≥ 0.1.42** | Below this the runbook's own claims are void — rung (iv) cannot be proven. **Stop and upgrade.** |
+| **Session target** | **0.1.46** *(current)* | What to actually upgrade to. Nothing below §5 *requires* it; see the note. |
+
+The minimum is 0.1.42 and **stays** 0.1.42, because that is where the thing
+this runbook depends on landed. Later versions are worth having; they are
+not preconditions, and stating them as preconditions would make a gate
+nobody can distinguish from a real one.
 
 > **If this cluster is on a pre-0.1.42 chart, its buffer signal is blind
 > RIGHT NOW.** The edge→HQ buffer counter has read 0 since the feature
@@ -68,10 +77,30 @@ and upgrade before running a single step below.
 > that "the buffer never moves" is an artefact of the instrument, not
 > evidence about the link.
 
+**Why upgrade to 0.1.46 anyway, and one case where it is not optional:**
+
+- **0.1.45** — the Topaz gate. An **Arc 2** precondition, not used by
+  anything here: Arc 1 runs open-access and the sidecar decides nothing.
+- **0.1.46** — bounds the NFS `emptyDir` escape hatch with `sizeLimit`.
+  **If this cluster sets `persistence.redpandaUseEmptyDir` or
+  `restateUseEmptyDir`, treat 0.1.46 as required, not preferred.** Below it
+  those volumes are unbounded against node ephemeral storage, and a broker
+  that fills the node evicts pods *chosen by usage* — so the casualties are
+  frequently other components, on a node where nothing local looks wrong.
+  A long severance rung is exactly the condition that grows a broker's
+  on-disk backlog. (ADR-0036 **UD-7**.)
+
 ```bash
 helm list -n "$NS" -f "^${REL}$" -o json | python -c \
   "import json,sys; r=json.load(sys.stdin)[0]; print(r['chart'], '|', r['status'])"
-# expect: openddil-demo-0.1.42 (or later) | deployed
+# hard gate: openddil-demo-0.1.42 or later | deployed
+# target:    openddil-demo-0.1.46
+
+# Does this cluster use the escape hatch? If either prints true, 0.1.46 is required:
+helm get values "$REL" -n "$NS" -a -o json | python -c \
+  "import json,sys; p=json.load(sys.stdin).get('persistence',{}); \
+   print('redpandaUseEmptyDir:', p.get('redpandaUseEmptyDir')); \
+   print('restateUseEmptyDir:', p.get('restateUseEmptyDir'))"
 ```
 
 ### P0.1 The upgrade itself — REHEARSED 2026-08-10
