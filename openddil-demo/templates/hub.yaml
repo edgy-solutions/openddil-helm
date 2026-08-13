@@ -239,8 +239,15 @@ spec:
         # (`restate.ephemeralOnUpgrade` + flush-assets.sh --deep), so the
         # state-loss isn't a new failure mode. Toggle via
         # .Values.persistence.restateUseEmptyDir.
+        #
+        # sizeLimit mirrors persistence.restateSize, for the reason spelled
+        # out on the redpanda-edge StatefulSet: the PVC path it replaces is
+        # bounded, so the escape hatch must be bounded too, and an unbounded
+        # emptyDir turns a component-local disk problem into node-wide
+        # eviction of whichever pods happen to be using the most space.
         - name: data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.restateSize }}
         {{- end }}
   {{- if not .Values.persistence.restateUseEmptyDir }}
   volumeClaimTemplates:

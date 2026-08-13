@@ -215,9 +215,24 @@ spec:
       # ALL topic data, consumer offsets, and partition metadata. Acceptable
       # for dev / demo clusters where state durability isn't the contract;
       # NEVER set true in prod. Toggle via .Values.persistence.redpandaUseEmptyDir.
+      #
+      # sizeLimit mirrors persistence.redpandaSize deliberately: the PVC path
+      # below is bounded by that value, and an escape hatch must not silently
+      # drop a bound the path it replaces carried.
+      #
+      # WITHOUT it, the failure is node-wide and misattributed. An unbounded
+      # emptyDir is charged against the node's ephemeral storage with no cap,
+      # so a broker that fills the disk triggers kubelet eviction across that
+      # node -- and the pods evicted are chosen by usage, so the victims are
+      # frequently NOT the broker that caused it. WITH it, the broker alone is
+      # evicted, for a legible reason, and nothing else on the node notices.
+      #
+      # Same principle as the probe rule: make the failure attributable to
+      # its cause rather than to whoever happened to be nearby.
       volumes:
         - name: data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ $.Values.persistence.redpandaSize }}
       {{- end }}
   {{- if not $.Values.persistence.redpandaUseEmptyDir }}
   volumeClaimTemplates:
@@ -346,10 +361,11 @@ spec:
             {{- toYaml .Values.redpandaHq.resources | nindent 12 }}
       {{- if .Values.persistence.redpandaUseEmptyDir }}
       # See redpanda-edge StatefulSet above for the NFS-incompatible-cluster
-      # rationale + trade-offs.
+      # rationale + trade-offs, and for why sizeLimit mirrors redpandaSize.
       volumes:
         - name: data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.redpandaSize }}
       {{- end }}
   {{- if not .Values.persistence.redpandaUseEmptyDir }}
   volumeClaimTemplates:

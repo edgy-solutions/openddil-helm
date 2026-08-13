@@ -135,6 +135,17 @@ persistence:
   # clusters where state durability isn't the contract, that's fine.
   # NEVER set true in production -- you'll lose customer data on the
   # first node maintenance event.
+  # Both emptyDirs are bounded by sizeLimit, set from redpandaSize /
+  # restateSize above so the escape hatch carries the same bound as the PVC
+  # path it replaces. An escape hatch that silently drops a constraint is a
+  # second failure mode hiding inside a workaround for the first.
+  #
+  # SCOPE, stated rather than left implicit: only these two data volumes are
+  # bounded. The chart's other emptyDirs are bundle-asset and config copies
+  # whose contents are fixed by the image, so their size is bounded by
+  # construction rather than by policy. They were reviewed and deliberately
+  # left alone -- not missed. If one ever becomes a destination for
+  # component-generated data, it needs a sizeLimit at that moment.
   redpandaUseEmptyDir: false
   restateUseEmptyDir: false
 
