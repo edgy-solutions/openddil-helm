@@ -1,0 +1,50 @@
+name: Chart checks
+
+# Render-integrity guards for openddil-demo.
+#
+# `helm lint` does not catch either defect these guard against — both render
+# valid YAML and exit 0. Demonstrated, not assumed: with a loop-boundary
+# separator deleted, `helm lint` reports "0 chart(s) failed" and
+# `helm template` exits 0 while an object has silently vanished from the
+# release. That is why this job exists alongside lint rather than instead of.
+#
+# AUDIT-2026-08-15 F2 found these checks had only ever been run by hand, once,
+# in the sessions that found each defect. Nothing would have failed if either
+# came back.
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "openddil-demo/**"
+      - "scripts/check-chart-render.sh"
+      - ".github/workflows/chart-checks.yml"
+  pull_request:
+    paths:
+      - "openddil-demo/**"
+      - "scripts/check-chart-render.sh"
+      - ".github/workflows/chart-checks.yml"
+  workflow_dispatch:
+
+jobs:
+  render-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.2"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pyyaml
+
+      - name: helm lint
+        run: helm lint ./openddil-demo
+
+      # The guards lint cannot express.
+      - name: Render integrity guards
+        run: ./scripts/check-chart-render.sh
