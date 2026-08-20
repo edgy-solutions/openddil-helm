@@ -103,7 +103,67 @@ helm get values "$REL" -n "$NS" -a -o json | python -c \
    print('restateUseEmptyDir:', p.get('restateUseEmptyDir'))"
 ```
 
-### P0.1 The upgrade itself — REHEARSED 2026-08-10
+### P0.1 The upgrade itself — REHEARSED 2026-08-10, RE-REHEARSED 2026-08-19
+
+> **Re-run 2026-08-19 on the lab, 0.1.45 → 0.1.46, so every expected output
+> below was observed THIS WEEK rather than three weeks ago.**
+>
+> | | observed |
+> |---|---|
+> | duration | **60s** wall clock, `helm upgrade` to `deployed` |
+> | revision | 2 → 3 |
+> | migrations | **none fired.** 11 applied before and after, latest `20260807000000` unchanged |
+> | re-baseline | **not needed for this hop** — the §a checksum gate did not trigger |
+> | rows | `telemetry_latest_state` and `asset_logistics_status` intact across the upgrade |
+> | rung (i) | passes — 14 rows updated within 3 minutes of the upgrade |
+> | unhealthy pods | **one**, and it was not the chart — see below |
+>
+> **THE FINDING, and it is about image references rather than the chart.**
+> One `sensor-ingest` pod went `CrashLoopBackOff` after the upgrade. The
+> chart was innocent: the deployment references
+> `ghcr.io/…/sensor-ingest:latest`, a **rolling tag**, with
+> `imagePullPolicy: IfNotPresent`. The pod that restarted pulled a *newer*
+> `:latest` than its siblings were already running.
+>
+> Digests, taken from the three pods in the same release at the same moment:
+>
+> ```
+> sensor-ingest-edge-01   sha256:5c89ffc0e62b
+> sensor-ingest-edge-02   sha256:2ad9f52e71ca   <-- restarted, pulled newer
+> sensor-ingest-edge-03   sha256:5c89ffc0e62b
+> ```
+>
+> **Three pods, one tag, two images.** The upgrade did not deploy new code —
+> *a pod restart did*, and it pulled something nobody reviewed as part of
+> this change. Any restart — eviction, node drain, OOM, a severance rung —
+> is a silent deploy.
+>
+> **This is why the pilot cluster pins by digest, and the check belongs
+> BEFORE the upgrade, not after:**
+>
+> ```bash
+> kubectl -n "$NS" get deploy,statefulset -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+>   | grep -v '@sha256:' || echo "all images digest-pinned"
+> ```
+>
+> Anything printed is a component whose next restart is an unreviewed
+> deploy. On a digest-pinned cluster this prints nothing and the hazard
+> does not exist — which is the difference between the pilot cluster and
+> the lab, and the reason the lab found it first.
+>
+> **How it recovered is the sharper half.** Deleting the pod fixed it — the
+> replacement scheduled onto a node that still had the OLD image cached and
+> came up on `5c89ffc0`, matching its siblings. `imagePullPolicy:
+> IfNotPresent` means **which image you run depends on which node you land
+> on**, so the same manifest yields different code per node, and a delete/
+> recreate is a coin flip rather than a remedy.
+>
+> *That is the part to carry into a maintenance window:* if a pod fails
+> after a restart and the image is a rolling tag, **do not treat a
+> successful recreate as a fix** — it may only mean you landed somewhere
+> with an older cache, and the next eviction puts you back. Pin the digest,
+> then restart.
+
 
 If P0 says you are behind, this is the procedure. It was executed end to end
 on a lab cluster: a from-scratch install of an older chart, populated with
