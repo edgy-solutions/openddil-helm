@@ -41,8 +41,19 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
+        # ontology: DIS entity-appearance decoding reads dis_appearance.yaml
+        # from /ontology (ADR-0026 / ADR-0030). Stage 1 gained this dependency
+        # when appearance decoding landed; appearance.py defaults to that path.
+        #
+        # WITHOUT THE MOUNT THE DECODER IS INERT RATHER THAN BROKEN: a missing
+        # table means it emits no appearance facts at all, which is the same
+        # honest outcome as an undeclared source. Correct fail-safe behaviour —
+        # and exactly why the gap was invisible on 2026-08-28: the pipeline
+        # stayed green, no pod complained, and the health axis simply never
+        # populated. A dependency that fails safely still has to be declared.
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/ontology"   "dst" "ontology")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: sensor-ingest
@@ -74,6 +85,14 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            # The init container COPIES the ontology into the shared volume;
+            # this is what makes it visible to the process. Both halves are
+            # required and only one of them is obvious — adding the copy alone
+            # leaves /ontology absent and the appearance decoder silently
+            # inert, which is how this was missed the first time.
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
           resources:
             {{- toYaml $root.Values.sensorIngest.resources | nindent 12 }}
       volumes:
