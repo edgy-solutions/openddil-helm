@@ -891,6 +891,53 @@ curl -X POST http://localhost:8474/proxies/hq-link \
 converges with the tier's, and **the tier UI never flickered** — no
 reconnect, no reload, no gap. Keep recording until convergence.
 
+> ### AMENDMENT 2026-09-05 — what rung (iv) actually established
+>
+> **As written and as run, this rung proved that the bridge buffers and
+> drains. It did NOT prove that HQ's view depends on the bridge, and it
+> was read as if it had.**
+>
+> The sever above cuts `hq-link`, the toxiproxy the bridge publishes
+> through. The root ALSO ran a per-edge projector that read the edge
+> broker **directly**, never through that proxy, and wrote the root
+> store. So through every severance ever run here, HQ stayed fresh.
+> **HQ was never observed to diverge, so "converges" was convergence onto
+> a value it had never left** — and a convergence check that cannot fail
+> is not evidence of convergence.
+>
+> The buffer growing 32 → 165 and draining is real and still stands: the
+> bridge does buffer, and it does drain. That is a claim about the
+> bridge. The claim this rung was being cited for — that a severed site
+> keeps HQ's picture correct-but-stale and heals — was never tested.
+>
+> **Two things had to change before this rung means what it says.**
+> 1. The downward projector is retired for a tier-managed edge, and HQ's
+>    view of it is projected from the BRIDGED topics instead (UD-11), so
+>    there is exactly one writer and it is behind the bridge.
+> 2. The sever must cut **every** path across the boundary, not one link.
+>    `scripts/sever-tier.sh <tier> on` applies a default-deny
+>    NetworkPolicy to the site and **proves the cut both ways** before
+>    returning. Keep toxiproxy for the buffer demonstration — it is the
+>    right instrument for showing the bridge queue — but it is not the
+>    instrument for isolating a site.
+>
+> **The rung is not runnable as evidence until step (c) below can fail.**
+> Add to the expectations, and treat a miss as a stop-and-report:
+>
+> - **(c) During severance, HQ's view of `$PILOT` goes STALE — its
+>   freshness indicator degrades and its timestamps stop advancing.**
+>   Not fresh (a path is still open), and not empty (nothing is writing
+>   it at all — which is a different defect, and not the degraded mode
+>   ADR-0036 clause 4 specifies). Record the HQ timestamp at sever and
+>   again a minute later; it must not have moved.
+> - **(d) Only then is the heal meaningful**, because divergence was
+>   observed first and convergence now has somewhere to converge from.
+>
+> *The rule, which is not about this rung:* **a sever measures only the
+> paths it cuts.** Any component crossing the boundary by another route
+> makes the site look severance-tolerant for the wrong reason, and the
+> stronger the result looks, the less anyone re-examines it.
+
 ---
 
 ## 6. Report back

@@ -240,6 +240,49 @@ else
   echo "  ok   no tier node: the root subscribes to all $n edges, unchanged"
 fi
 
+# ---------------------------------------------------------------------------
+# THE PROJECTION CUTOVER (UD-11) — a REGRESSION guard, and only that.
+# ---------------------------------------------------------------------------
+# This asserts the repoint is still in place. It did not, and could not,
+# discover that the repoint was needed: the assertions below were written
+# after a live severance found the gap. Keep the severance in the ladder.
+echo
+echo "projection cutover invariant (UD-11)"
+for tm in "edge-01" "edge-02"; do
+  out="$(helm template t "$CHART" --set tierNode.enabled=true           --set "tierNode.tiers[0]=$tm" 2>/dev/null)"
+  if [ -z "$out" ]; then
+    echo "  FAIL: empty render — the invariant is unchecked" >&2; fail=1; continue
+  fi
+  # (1) the root's downward projector for a tier-managed edge must be gone
+  if grep -q "name: t-projector-$tm\$" <<<"$out"; then
+    echo "  FAIL [$tm]: the root still runs a downward projector for a" >&2
+    echo "        TIER-MANAGED edge. It reads that edge's broker directly," >&2
+    echo "        bypasses toxiproxy, and writes the root store — so a" >&2
+    echo "        severance test cannot see HQ lose this edge." >&2
+    fail=1
+  else
+    echo "  ok   [$tm] tier-managed: the root's downward projector retired"
+  fi
+  # (2) ... and HQ must have something to project INSTEAD, or it goes empty
+  if grep -q "telemetry-latest-state" <<<"$out"; then
+    echo "  ok   [$tm] the bridge carries telemetry-latest-state up"
+  else
+    echo "  FAIL [$tm]: projector retired AND telemetry-latest-state is not" >&2
+    echo "        bridged — HQ's telemetry_latest_state for this edge would" >&2
+    echo "        be EMPTY, not stale. Empty is not a degraded mode." >&2
+    fail=1
+  fi
+  # (3) non-vacuity: an edge that is NOT tier-managed must KEEP its projector
+  other="edge-03"; [ "$tm" = "edge-03" ] && other="edge-01"
+  if grep -q "name: t-projector-$other\$" <<<"$out"; then
+    echo "  ok   [$tm] untier-ed $other keeps its projector (guard non-vacuous)"
+  else
+    echo "  FAIL: $other is not tier-managed and lost its projector — this" >&2
+    echo "        guard would pass on a chart that renders no projectors." >&2
+    fail=1
+  fi
+done
+
 echo
 if [ "$fail" -eq 0 ]; then
   cat <<'NOTE'
@@ -257,20 +300,16 @@ WHAT THIS DID NOT CHECK, and it matters:
     nonetheless useful today.
   * That the UI actually reads the store its config names. That is the
     conjunction pilot rung (i) infers rather than observes.
-  * WHETHER THE ROOT STILL REACHES INTO A TIER-MANAGED EDGE BY SOME OTHER
-    PATH. This checks the SUBSCRIPTION list only. The root also runs a
-    per-edge PROJECTOR deployment that points straight at the edge broker
-    and writes the root store, and it is NOT gated on isTierManaged -- so
-    the cutover this file guards is, as of 2026-09-05, half of the cut.
-    See UD-11. Read the "ok" lines above as "the detection plane moved",
-    never as "the root is off this edge".
-
-    This omission is not an oversight to fix by adding one more assertion:
-    this guard was written in the same sitting as the cutover, from the
-    same understanding, so it tests what that understanding had already
-    seen. It catches a REGRESSION of the cut and cannot catch the cut
-    being INCOMPLETE. Only a live severance can -- assert the root's view
-    of the edge goes STALE. Freshness names no source.
+  * WHETHER THE ROOT STILL REACHES INTO A TIER-MANAGED EDGE BY SOME PATH
+    NOT LISTED ABOVE. Two are now checked -- the subscription list and the
+    downward projector -- because a live severance found the second after
+    this file had already passed on the first. That is the standing
+    caution: every assertion here was written from an understanding that
+    had already been surprised once, so this file catches these cuts
+    REGRESSING and cannot catch the set of cuts being INCOMPLETE.
+    Only a live sever can, and only if the sever cuts every path that
+    crosses the boundary -- a proxy on one link measures one link.
+    Assert the root's view goes STALE. Freshness names no source.
 NOTE
 else
   echo "tier config check: FAILED"

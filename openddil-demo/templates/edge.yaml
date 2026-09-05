@@ -341,6 +341,19 @@ data:
           # and the answer travels with the data.
           - asset-logistics-status
           - asset-cm-state
+          #
+          # AND THE ONE THAT IS NOT DERIVED STATE, carried for a different
+          # reason: `telemetry-latest-state` is what HQ's `telemetry_latest_state`
+          # table is projected FROM, and on the HQ broker that topic had never
+          # been produced to at all (high-watermark 0, measured 2026-09-05).
+          # Every row HQ held for this edge was written by the downward
+          # per-edge projector below. Retire that projector without bridging
+          # this topic and HQ's view of the edge does not go stale — IT GOES
+          # EMPTY, and "no rows" is not the degraded mode ADR-0036 clause 4
+          # specifies. `projector-hq` is already subscribed to this topic and
+          # has simply been sitting on an empty partition; bridging it is what
+          # gives that subscription something to read.
+          - telemetry-latest-state
           {{- end }}
         consumer_group: "bridge-group-{{ $edge.id }}"
 
@@ -413,6 +426,30 @@ spec:
 # postgres-hq. Per-edge projectors run alongside projector-hq (in hub.yaml)
 # so per-edge topics like telemetry-latest-state populate on every edge
 # while hq-only topics (regional rollups) populate from projector-hq.
+#
+# ---------------------------------------------------------------------------
+# NOT DEPLOYED FOR A TIER-MANAGED EDGE (UD-11) — THE LAST REACHBACK.
+# ---------------------------------------------------------------------------
+# This Deployment is edge-local at its INPUT and root-owned at its OUTPUT: it
+# reads the edge's broker directly and writes the ROOT's store. In the
+# pre-tier topology that was the root's legitimate feed. Once the edge has a
+# tier node it is a consumer above the tier reading that tier's streams —
+# the same rule the detection cutover applied to cm-service and fusion,
+# which this Deployment was missed by.
+#
+# It also read the edge broker DIRECTLY, never through toxiproxy, and that
+# is how it stayed invisible: the severance rehearsal cut the bridge and
+# this path was not on it, so HQ stayed fresh through every sever anyone
+# ever ran. HQ was never observed to diverge, so "HQ converges" was
+# convergence onto a value it had never left.
+#
+# The replacement is not a gate alone but a REPOINT: HQ's view of this edge
+# is now projected by `projector-hq` from the BRIDGED topics on the HQ
+# broker — derived state with the tier's releasability labels already
+# stamped, plus `telemetry-latest-state` (see the bridge config above).
+# One writer per edge, and for a tier-managed edge that writer is behind
+# the bridge, so cutting the bridge is now visible at HQ.
+{{- if not (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -502,5 +539,6 @@ spec:
       volumes:
         - name: bundle-shared
           emptyDir: {}
+{{- end }}
 ---
 {{- end }}

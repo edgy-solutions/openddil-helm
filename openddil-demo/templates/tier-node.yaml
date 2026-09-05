@@ -1088,37 +1088,57 @@ spec:
         {{- include "openddil.labels" $root | nindent 8 }}
     spec:
       restartPolicy: OnFailure
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # ---------------------------------------------------------------------
+      # WAS A SHELL SCRIPT POSTING `curl` PER SUBSCRIPTION (UD-12).
+      # ---------------------------------------------------------------------
+      # That script was a second implementation of what
+      # `openddil_bootstrap.restate_subscriptions` already did for the root,
+      # and it lost the part that mattered: the dedup pre-check. Restate 1.6
+      # answers a duplicate POST with 200, so every helm upgrade added
+      # another copy of all seven subscriptions. Measured here after two
+      # upgrades: 14 subscriptions over 7 distinct triples, every one
+      # duplicated x2, output still correct, nothing reporting it.
+      #
+      # It is now the same program the root runs, which is the actual fix --
+      # the tier is not a different kind of node, so its bootstrap is not a
+      # different kind of program. It also prunes, so a subscription
+      # retired from the desired set is deleted rather than merely not
+      # re-created.
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/bootstrap" "dst" "openddil_bootstrap")
+          ) "root" $root) | nindent 8 }}
       containers:
         - name: bootstrap
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.curl.repository "tag" $root.Values.utilities.curl.tag "root" $root) }}
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              ADMIN="http://{{ $root.Release.Name }}-tier-restate-{{ $tier.id }}:9070"
-              echo "waiting for tier restate ({{ $tier.id }}) ..."
-              until curl -sf "$ADMIN/deployments" >/dev/null 2>&1; do sleep 3; done
-
-              echo "registering services ..."
-              curl -sf -X POST "$ADMIN/deployments" -H 'Content-Type: application/json' \
-                -d '{"uri":"http://{{ $root.Release.Name }}-tier-fusion-{{ $tier.id }}:9081","force":true}' >/dev/null
-              curl -sf -X POST "$ADMIN/deployments" -H 'Content-Type: application/json' \
-                -d '{"uri":"http://{{ $root.Release.Name }}-tier-cm-{{ $tier.id }}:9080","force":true}' >/dev/null
-
-              echo "registering tier-scoped subscriptions ..."
-              sub() {
-                curl -s -o /dev/null -w "%{http_code} $1 -> $2\n" \
-                  -X POST "$ADMIN/subscriptions" -H 'Content-Type: application/json' \
-                  -d "{\"source\":\"kafka://openddil-{{ $tier.id }}/$1\",\"sink\":\"service://$2\",\"options\":{\"auto.offset.reset\":\"earliest\",\"group.id\":\"$3\"}}"
-              }
-              sub raw-sensor-stream         AssetCM/observe                        cm-service-silver-{{ $tier.id }}
-              sub cm-events                 AssetCM/apply_cm_event                 cm-service-cm-events-{{ $tier.id }}
-              sub raw-sensor-stream         AssetLogistics/on_proprietary_update   fusion-service-silver-{{ $tier.id }}
-              sub asset-telemetry-windows   AssetLogistics/on_telemetry_window     fusion-service-windows-{{ $tier.id }}
-              sub derived-sustainment       AssetLogistics/on_derived_sustainment  fusion-service-derived-{{ $tier.id }}
-              sub asset-capability-snapshot AssetLogistics/on_capability_snapshot  fusion-service-capability-{{ $tier.id }}
-              sub asset-cm-state            AssetLogistics/on_cm_state_change      fusion-service-cm-state-{{ $tier.id }}
-              echo "tier {{ $tier.id }} bootstrap complete"
+          image: {{ include "openddil.image" (dict "name" $root.Values.cmService.image.name "tag" $root.Values.cmService.image.tag "digest" $root.Values.cmService.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.cmService.image.pullPolicy "root" $root) }}
+          command: ["python", "-u", "/app/openddil_bootstrap/register_tier_subscriptions.py"]
+          env:
+            - name: TIER_ID
+              value: {{ $tier.id | quote }}
+            - name: RESTATE_ADMIN_URL
+              value: {{ printf "http://%s-tier-restate-%s%s:9070" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            - name: TIER_CM_ENDPOINT
+              value: {{ printf "http://%s-tier-cm-%s%s:9080" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            - name: TIER_FUSION_ENDPOINT
+              value: {{ printf "http://%s-tier-fusion-%s%s:9081" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            - name: PYTHONPATH
+              value: "/app"
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml $root.Values.jobs.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app/openddil_bootstrap
+              subPath: openddil_bootstrap
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
 
 {{- if $tn.topaz.enabled }}
 ---
