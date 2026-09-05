@@ -157,7 +157,7 @@ if [ -z "$CTX" ]; then
 fi
 echo "ADR-0029 completeness gate"
 echo "  context:   $CTX"
-echo "  store:     ${TIER:+tier $TIER}${TIER:-root}"
+echo "  store:     $([ -n "$TIER" ] && echo "tier $TIER" || echo root)"
 echo "  namespace: $NS   pod: $POD   db: $PGDB   user: $PGUSER"
 echo
 
