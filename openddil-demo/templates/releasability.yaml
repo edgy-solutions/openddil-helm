@@ -414,8 +414,67 @@ data:
   # policy it is paired with). This ConfigMap holds only the substitutions,
   # so the reviewed realm file stays in one place and the deployment-specific
   # values stay in the chart.
+  # ONE CLIENT PER TIER, RENDERED FROM THE SAME TIER LIST AND THE SAME
+  # HELPER THE TIER PEP READS. The realm previously defined exactly one
+  # hand-written client while the chart derived a per-tier id, so the two
+  # artifacts could not disagree at render time -- only one of them was
+  # rendered -- and the disagreement surfaced as a login failure against a
+  # client Keycloak had never heard of.
+  #
+  # Hand-adding the missing client would have fixed one tier and left the
+  # coupling open for the next. Rendering them here from `.Values.edges`,
+  # filtered by the SAME `openddil.isTierManaged` predicate that decides
+  # whether a tier node exists at all, is what closes it.
+  #
+  # Empty when no tier declares a publicOrigin, which is the common case:
+  # a tier without one is in-cluster only and its PEP runs in header mode,
+  # so it has no redirect URI and needs no client.
+  tier-clients.json: |
+{{- range $root.Values.edges }}
+{{- if and (include "openddil.isTierManaged" (dict "id" .id "root" $root)) .publicOrigin }}
+{{- if $root.Values.releasability.oidc.enabled }}
+    {
+      "clientId": {{ include "openddil.tierClientId" (dict "id" .id "root" $root) | quote }},
+      "name": {{ printf "OpenDDIL tier PEP (%s)" .id | quote }},
+      "description": "Backend-for-frontend for one tier. Confidential: the browser never holds a token.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__PEP_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        {{ printf "%s/auth/callback" (.publicOrigin | trimSuffix "/") | quote }}
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["openid", "profile", "email", "roles"]
+    },
+{{- end }}
+{{- end }}
+{{- end }}
+
   substitutions.sh: |
     set -eu
+    # SPLICE THE PER-TIER CLIENTS IN AT THE MARKER, BEFORE SUBSTITUTING.
+    # The fragment carries __PEP_CLIENT_SECRET__ like the root client does,
+    # so it is substituted by the same pass below and the guard covers it
+    # too. Tier clients are DISTINCT clients sharing ONE secret, because
+    # the tier PEP reads the same Secret the root PEP does — right for a
+    # lab, and the thing to split first in a real deployment.
+    #
+    # sed and cat only: this runs in the Keycloak image, and the two
+    # commands already proven present here are the two used below.
+    sed -n "/__TIER_CLIENTS__/q;p" /bundle-realm/realm-openddil.json  > /tmp/realm.json
+    cat /subst/tier-clients.json                                     >> /tmp/realm.json
+    sed -e "1,/__TIER_CLIENTS__/d" /bundle-realm/realm-openddil.json >> /tmp/realm.json
     # The client secret and the redirect URI are the two values the realm
     # cannot know. Substituting them here — rather than committing them —
     # keeps the realm file reviewable and the secret out of the repository.
@@ -434,7 +493,7 @@ data:
     # substitution silently does nothing.
     sed -e "s|__PEP_CLIENT_SECRET__|${OPENDDIL_PEP_CLIENT_SECRET}|g" \
         -e "s|__PEP_REDIRECT_URI__|${OPENDDIL_PEP_REDIRECT_URI}|g" \
-        /bundle-realm/realm-openddil.json > /import/realm-openddil.json
+        /tmp/realm.json > /import/realm-openddil.json
     # THE GUARD CAUGHT THE BUG ABOVE, which is the argument for it existing
     # at all: a realm that imports with an unsubstituted secret produces a
     # client nobody can authenticate against, and the symptom appears three
@@ -445,6 +504,10 @@ data:
       exit 1
     fi
     echo "realm prepared: $(grep -c '\"id\"' /import/realm-openddil.json) pinned ids"
+    # Report the CLIENT count too: a spliced fragment that produced no
+    # clients renders a valid realm and a broken tier, and the two are
+    # indistinguishable in "realm prepared" alone.
+    echo "realm clients: $(grep -c '"clientId"' /import/realm-openddil.json)"
 ---
 apiVersion: v1
 kind: Service

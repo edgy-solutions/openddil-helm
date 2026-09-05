@@ -43,6 +43,26 @@
 {{- range .Values.edges }}
 {{- $tier := . }}
 {{- if or (not $tn.tiers) (has $tier.id $tn.tiers) }}
+{{- /*
+SCHEME MUST MATCH THE ROOT, and this fails the render rather than the login.
+
+A tier served on a different scheme from the root gets a session cookie the
+browser silently discards -- Secure on plain http, or a cross-scheme
+SameSite rejection -- and the symptom is a login that "succeeds" and returns
+to the login page with nothing logged anywhere to say why. It is
+indistinguishable at the screen from a session bug, and it costs an hour.
+
+Both hosts sit behind one ingress controller routing on Host header, so
+there is no ordinary reason for them to differ. Checked only when OIDC is
+on, because without it there is no cookie to lose.
+*/ -}}
+{{- if and $tier.publicOrigin $root.Values.releasability.oidc.enabled }}
+{{- $tierHttps := hasPrefix "https://" $tier.publicOrigin }}
+{{- $rootHttps := not (empty $root.Values.ingress.tls) }}
+{{- if ne $tierHttps $rootHttps }}
+{{- fail (printf "tier %s publicOrigin is %s but the root ingress is %s. A scheme mismatch loses the session cookie silently: the login redirects, the cookie is dropped, and the browser returns to the login page with no error. Set the tier's publicOrigin to %s, or give both hosts TLS." $tier.id (ternary "https" "http" $tierHttps) (ternary "https" "http" $rootHttps) (ternary "https://..." "http://..." $rootHttps)) }}
+{{- end }}
+{{- end }}
 {{- $broker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
 {{- $pgHost := printf "%s-tier-pg-%s%s" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) }}
 {{- $dsn := printf "postgres://%s:%s@%s:%d/%s" $tn.postgres.auth.username $tn.postgres.auth.password $pgHost (int $tn.postgres.port) $tn.postgres.auth.database }}
@@ -814,7 +834,10 @@ spec:
             - name: OPENDDIL_OIDC_INTERNAL_ISSUER
               value: {{ printf "http://%s-keycloak%s:8080%s/realms/%s" $root.Release.Name (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
             - name: OPENDDIL_OIDC_CLIENT_ID
-              value: {{ printf "%s-%s" $root.Values.releasability.oidc.clientId $tier.id | quote }}
+              # Same helper the Keycloak realm renders its clients from, so
+              # the id the PEP presents and the id the realm defines cannot
+              # drift apart. See openddil.tierClientId.
+              value: {{ include "openddil.tierClientId" (dict "id" $tier.id "root" $root) | quote }}
             - name: OPENDDIL_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -826,6 +849,20 @@ spec:
               value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
+            - name: OPENDDIL_COOKIE_SECURE
+              # WAS NOT SET AT ALL, and the PEP defaults it to false — so a
+              # tier served over HTTPS emitted session cookies WITHOUT the
+              # Secure flag while the root, deriving from its own ingress,
+              # set it correctly. Not a login failure; a quiet weakening
+              # that only appears on the deployments that took the trouble
+              # to configure TLS.
+              #
+              # Derived from the TIER's own origin. The failure in the other
+              # direction is louder and stranger: Secure on plain HTTP means
+              # the browser accepts the redirect, drops the cookie, and
+              # returns the user to a login page with nothing logged
+              # anywhere to say why.
+              value: {{ include "openddil.tierCookieSecure" (dict "origin" $tier.publicOrigin) | quote }}
             {{- end }}
           ports:
             - containerPort: 8080

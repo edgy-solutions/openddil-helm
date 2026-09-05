@@ -238,6 +238,40 @@ rule.
 Usage: include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)
        -> "true" or ""
 */}}
+{{/*
+openddil.tierClientId — the OIDC client id for a tier.
+
+ONE DEFINITION, READ BY BOTH SIDES OF THE BOUNDARY. The chart configures
+the tier PEP with a client id, and the Keycloak realm has to CONTAIN a
+client by that name. Before this helper the chart derived the id inline
+and the realm defined exactly one hand-written client, so the two could
+not disagree at render time -- only one of them was rendered -- and the
+disagreement surfaced three components away, as a login failure against a
+client Keycloak had never heard of.
+
+Adding the missing client by hand would have fixed edge-01 and left the
+COUPLING broken for edge-02. Deriving both from here is what closes it.
+
+Usage: include "openddil.tierClientId" (dict "id" $tier.id "root" $root)
+*/}}
+{{- define "openddil.tierClientId" -}}
+{{- printf "%s-%s" .root.Values.releasability.oidc.clientId .id -}}
+{{- end }}
+
+{{/*
+openddil.tierCookieSecure — "true" when a tier is served over HTTPS.
+
+Derived from the TIER's own publicOrigin, not copied from the root's
+ingress. A cookie's Secure flag has to follow the scheme the browser
+actually used; a tier inheriting the root's answer is right only while the
+two happen to match, and wrong silently when they do not -- Secure on
+plain HTTP means the browser drops the session cookie and the user lands
+back at the login screen with no error to read.
+*/}}
+{{- define "openddil.tierCookieSecure" -}}
+{{- ternary "true" "false" (hasPrefix "https://" .origin) -}}
+{{- end }}
+
 {{- define "openddil.isTierManaged" -}}
 {{- if .root.Values.tierNode.enabled -}}
 {{- if empty .root.Values.tierNode.tiers -}}true
