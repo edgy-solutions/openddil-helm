@@ -666,6 +666,32 @@ chart bug, not an environment issue.
 
 ### (i) The tier serves its own UI from its own store
 
+> ### ⚠ THIS RUNG DOES NOT CURRENTLY CHECK ITS OWN HEADING (UD-9, 2026-09-05)
+>
+> The procedure below verifies **two things separately and infers the join**:
+> that the UI loads, and that the tier's store holds one distinct `edge_id`.
+> Nothing in it observes **what the UI is actually reading**.
+>
+> That gap is live. `tier-node.yaml` sets `ELECTRIC_URL` on the tier
+> frontend, and **nothing reads it** — the application's value is a Vite
+> BUILD-TIME constant baked into the bundle, and nginx defaults its upstream
+> to `electric-sync`, the ROOT's alias Service. So a tier node's UI reads the
+> ROOT's store while the tier's own store is, independently, perfectly
+> correct.
+>
+> **Both steps below then pass, and the heading is false.**
+>
+> Until the tier-presentation arc lands
+> (`openddil-contracts/decisions/PLAN-tier-presentation-opening-package.md`
+> §6a/§6b), treat this rung as proving **the tier's STORE is correct** — which
+> it genuinely does — and **not** that the UI is reading it. Those were always
+> two claims; only one is currently tested.
+>
+> *Same shape as the buffer probe two rungs down: the healthy reading and the
+> broken reading are identical from the observer's position. The difference
+> is that here the observer is a human with the screen in front of them, and
+> the screen looks right.*
+
 ```bash
 kubectl -n $NS port-forward svc/$REL-tier-frontend-$PILOT 8090:80
 ```
@@ -756,6 +782,21 @@ curl -X POST http://localhost:8474/proxies/hq-link \
 1. **The UI stays live.** Reload the page *while severed*. It must still
    load — this is the point of serving the UI from the tier. A cached tab
    surviving is not the proof; a **reload** is.
+
+   > ⚠ **THIS CAPTURE IS NOT VALID TODAY — DO NOT RECORD IT (UD-9).** The
+   > sever above is `toxiproxy` on `hq-link`, which sits on the **Kafka**
+   > path. Under UD-9 the tier UI is reading the ROOT's Electric over
+   > **HTTP**, which that sever does not touch — so the reload succeeds
+   > **for the opposite of the stated reason**: the page survives because it
+   > never depended on the tier.
+   >
+   > A recording made now would show the right picture and prove the wrong
+   > thing — an artifact asserting tier-local presentation, produced by a UI
+   > that was reading the root throughout. Captures 2–4 below are `psql` and
+   > `rpk` queries and remain **valid**: they do prove tier-local data and
+   > tier-local fusion. Only this one, the visual one, does not.
+   >
+   > Blocked on the tier-presentation arc's steps 1–3.
 2. **Telemetry keeps flowing.** Re-run the tier row-count query; the
    `last_sample_at` values keep advancing.
 3. **Severity keeps computing.** Re-run the severity query. Values still
