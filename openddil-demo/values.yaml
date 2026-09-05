@@ -886,9 +886,23 @@ releasability:
     adminUser: admin
     adminPassword: admin
     realmVolumeSize: 8Mi
+    # AN ABSOLUTE HEAP CAP PLUS HEADROOM, rather than a bigger limit.
+    #
+    # Keycloak 26 was OOMKilled at 1Gi and again at 2Gi. Raising the limit
+    # alone does not help: the JVM sizes its heap as a PERCENTAGE of the
+    # limit it is given, so a larger limit produces a proportionally larger
+    # heap and the same overshoot once metaspace, code cache and direct
+    # buffers are added on top.
+    #
+    # The symptom is a CrashLoopBackOff whose container log ends mid-startup
+    # with no error — the kill happens outside the JVM, so there is no
+    # OutOfMemoryError to print, and the process is simply gone. Diagnosable
+    # only from the pod's lastState (`reason: OOMKilled`), which is not where
+    # anyone looks first.
+    javaOpts: "-Xms256m -Xmx1024m"
     resources:
-      requests: { cpu: 100m, memory: 512Mi }
-      limits:   { cpu: 1000m, memory: 1Gi }
+      requests: { cpu: 100m, memory: 768Mi }
+      limits:   { cpu: 1000m, memory: 3Gi }
 
   pep:
     image:

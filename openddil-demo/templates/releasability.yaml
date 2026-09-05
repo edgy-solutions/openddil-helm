@@ -524,6 +524,21 @@ spec:
               value: "false"
             - name: KC_HEALTH_ENABLED
               value: "true"
+            # AN EXPLICIT HEAP CAP, NOT A BIGGER LIMIT.
+            #
+            # Keycloak was OOMKilled at 1Gi and again at 2Gi. Raising the
+            # limit alone does not help, because the JVM sizes its heap as a
+            # PERCENTAGE of whatever limit it is given and then needs
+            # metaspace, code cache, thread stacks and direct buffers on top
+            # — so a larger limit produces a proportionally larger heap and
+            # the same overshoot.
+            #
+            # Capping the heap absolutely and leaving generous headroom above
+            # it is the fix. The kill happens OUTSIDE the JVM, which is why
+            # the container log ends mid-startup with no error: there is no
+            # OutOfMemoryError to print, the process is simply gone.
+            - name: JAVA_OPTS_APPEND
+              value: {{ $root.Values.releasability.keycloak.javaOpts | quote }}
           ports:
             - containerPort: 8080
               name: http
