@@ -382,6 +382,15 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Roll the bridge when its config changes. Without this the
+        # ConfigMap updates and the running pod keeps the old topic list
+        # until something unrelated restarts it -- which is exactly what
+        # happened when telemetry-latest-state was added for tier-managed
+        # edges: the chart was right, the render was right, and the bridge
+        # carried the old set for as long as its pod happened to live.
+        # A config change that does not reach the process is not a change.
+        checksum/connect-config: {{ printf "%s|%s|%v" $edge.id $edgeBroker (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) | sha256sum }}
       labels:
         {{- include "openddil.labels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 8 }}
