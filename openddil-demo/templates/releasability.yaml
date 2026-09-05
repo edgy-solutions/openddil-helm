@@ -259,6 +259,43 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            {{- if $root.Values.releasability.oidc.enabled }}
+            # --- authentication (BFF) ---------------------------------------
+            # Setting OPENDDIL_OIDC_ISSUER is what selects `oidc` auth mode.
+            # The PEP refuses to start if the issuer is set and the secret or
+            # redirect URI is not — a gateway that silently fell back to
+            # header mode because a secret was missing would be a fail-open
+            # wearing a configuration error as a disguise.
+            - name: OPENDDIL_OIDC_ISSUER
+              value: {{ include "openddil.keycloakIssuer" $root | quote }}
+            # The address THIS PROCESS uses. Differs from the issuer because
+            # the browser arrives through the ingress and this pod goes
+            # straight to the Service; conflating them is the standard way
+            # this breaks. See gateway/oidc.py, "the two-address problem".
+            - name: OPENDDIL_OIDC_INTERNAL_ISSUER
+              value: {{ printf "http://%s-keycloak%s:8080%s/realms/%s" $root.Release.Name (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            - name: OPENDDIL_OIDC_CLIENT_ID
+              value: {{ $root.Values.releasability.oidc.clientId | quote }}
+            - name: OPENDDIL_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-pep-oidc
+                  key: client-secret
+            - name: OPENDDIL_OIDC_REDIRECT_URI
+              value: {{ include "openddil.pepRedirectUri" $root | quote }}
+            # SESSION LIFETIME IS A DDIL PARAMETER, NOT A SECURITY CONSTANT.
+            # Existing sessions survive a severed link (validation is against
+            # a cached JWKS and a local session table); NEW LOGINS DO NOT,
+            # because the code exchange is a live call. So this value is
+            # "long enough to outlast a plausible severance window, short
+            # enough to bound a stolen cookie" — a deployment decision.
+            - name: OPENDDIL_SESSION_TTL_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_COOKIE_SAMESITE
+              value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
+            - name: OPENDDIL_COOKIE_SECURE
+              value: {{ ternary "true" "false" (not (empty $root.Values.ingress.tls)) | quote }}
+            {{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -276,6 +313,184 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+{{- if $root.Values.releasability.oidc.enabled }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $root.Release.Name }}-pep-oidc
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+type: Opaque
+stringData:
+  # THE CONFIDENTIAL CLIENT-S CREDENTIAL. It is what makes this a
+  # backend-for-frontend rather than a public SPA client: the browser never
+  # sees it and never sees a token.
+  #
+  # A chart default is a published secret and is therefore only ever
+  # acceptable in a lab. `helm upgrade` without an override reuses whatever
+  # is in values, so a deployment that means it sets
+  # releasability.oidc.clientSecret from its own secret store.
+  client-secret: {{ required "releasability.oidc.clientSecret is required when oidc is enabled" $root.Values.releasability.oidc.clientSecret | quote }}
+{{- end }}
+{{- if $root.Values.releasability.keycloak.enabled }}
+---
+# ===========================================================================
+# keycloak — the identity provider. AUTHENTICATION ONLY.
+# ===========================================================================
+# It answers WHO THIS IS. It does not answer what they may see: that is
+# Topaz's job, decided against the git-asserted entitlements corpus. The one
+# value that crosses the seam is the stable subject id (`sub`), used as the
+# join key into policy/users.yaml.
+#
+# Keycloak may perfectly well carry groups or roles. Nothing here reads them,
+# and nothing should start to — a deployment with entitlements in both places
+# has two truths to keep in sync and no way to tell which one an operator's
+# screen reflected.
+#
+# ⚠ THIS IS A DEMO IDENTITY PROVIDER. `start-dev`, an in-memory H2 database,
+# published passwords in a realm file committed to a public repository, and
+# no TLS. Every one of those is correct for a lab and disqualifying anywhere
+# else. A real deployment points OPENDDIL_OIDC_ISSUER at the identity
+# provider it already runs and deletes this block — which is the whole reason
+# the PEP takes an issuer URL rather than embedding a Keycloak client.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-keycloak-realm
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  # The realm template arrives from the runtime bundle (it lives beside the
+  # policy it is paired with). This ConfigMap holds only the substitutions,
+  # so the reviewed realm file stays in one place and the deployment-specific
+  # values stay in the chart.
+  substitutions.sh: |
+    set -eu
+    # The client secret and the redirect URI are the two values the realm
+    # cannot know. Substituting them here — rather than committing them —
+    # keeps the realm file reviewable and the secret out of the repository.
+    #
+    # THE REDIRECT URI IS EXACT AND HAS NO WILDCARD. A wildcard redirect on
+    # an OIDC client is how an authorization code ends up somewhere other
+    # than the gateway that asked for it; the sibling project's UI client
+    # carries `["*"]` and this one deliberately does not.
+    sed -e "s|REPLACED_AT_TEMPLATE_TIME\"$|${OPENDDIL_PEP_REDIRECT_URI}\"|" \
+        /bundle-realm/realm-openddil.json > /import/realm-openddil.json
+    # Two placeholders share a literal, so the secret is substituted by key
+    # rather than by value to avoid replacing the redirect URI as well.
+    sed -i "s|\"secret\": \".*\"|\"secret\": \"${OPENDDIL_PEP_CLIENT_SECRET}\"|" \
+        /import/realm-openddil.json
+    grep -q "REPLACED_AT_TEMPLATE_TIME" /import/realm-openddil.json && {
+      echo "FATAL: a placeholder survived substitution — the realm would" >&2
+      echo "import a client nobody can authenticate against." >&2
+      exit 1; }
+    echo "realm prepared: $(grep -c '\"id\"' /import/realm-openddil.json) pinned ids"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-keycloak
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8080
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-keycloak
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
+      annotations:
+        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+    spec:
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
+          ) "root" $root) | nindent 8 }}
+        - name: prepare-realm
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.keycloak.image.repository "tag" $root.Values.releasability.keycloak.image.tag "digest" $root.Values.releasability.keycloak.image.digest "root" $root) }}
+          command: ["sh", "/subst/substitutions.sh"]
+          env:
+            - name: OPENDDIL_PEP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-pep-oidc
+                  key: client-secret
+            - name: OPENDDIL_PEP_REDIRECT_URI
+              value: {{ include "openddil.pepRedirectUri" $root | quote }}
+          volumeMounts:
+            - { name: subst,         mountPath: /subst }
+            - { name: bundle-shared, mountPath: /bundle-realm, subPath: bundle-realm }
+            - { name: import,        mountPath: /import }
+      containers:
+        - name: keycloak
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.keycloak.image.repository "tag" $root.Values.releasability.keycloak.image.tag "digest" $root.Values.releasability.keycloak.image.digest "root" $root) }}
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ $root.Values.releasability.keycloak.adminUser | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              value: {{ $root.Values.releasability.keycloak.adminPassword | quote }}
+            # Serve under a sub-path so the IdP shares the app's host, and
+            # therefore its site. See the ingress rule and the SameSite note
+            # in gateway/oidc.py.
+            - name: KC_HTTP_RELATIVE_PATH
+              value: {{ $root.Values.releasability.keycloak.basePath | quote }}
+            # THE ISSUER THE BROWSER SEES. Without this, Keycloak derives the
+            # issuer from the inbound request, so a token minted through the
+            # ingress and a discovery document fetched through the Service
+            # disagree — and the PEP's issuer check correctly rejects a token
+            # that is, in every other respect, valid. Pinning it makes `iss`
+            # one string regardless of how the request arrived.
+            - name: KC_HOSTNAME
+              value: {{ include "openddil.keycloakPublicUrl" $root | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: {{ printf "%s/realms/openddil/.well-known/openid-configuration" (trimSuffix "/" $root.Values.releasability.keycloak.basePath) }}
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            {{- toYaml $root.Values.releasability.keycloak.resources | nindent 12 }}
+          volumeMounts:
+            - name: import
+              mountPath: /opt/keycloak/data/import
+      volumes:
+        - name: subst
+          configMap:
+            name: {{ $root.Release.Name }}-keycloak-realm
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.keycloak.realmVolumeSize }}
+        - name: import
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.keycloak.realmVolumeSize }}
+{{- end }}
 {{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION. Without this the PEP is a suggestion: any pod in the

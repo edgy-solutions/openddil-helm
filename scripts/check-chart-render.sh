@@ -62,14 +62,30 @@ echo "guard 1: document integrity"
 # releasability stack renders nothing at all unless asked for, so without
 # its own variant a missing separator or a duplicated name in it would ship
 # — the exact defect guard 1 exists to catch, hiding behind a feature flag.
-for variant in "default" "emptydir" "releasability"; do
-  case "$variant" in
-    default)  args=() ;;
-    emptydir) args=(--set persistence.redpandaUseEmptyDir=true
-                    --set persistence.restateUseEmptyDir=true) ;;
-    releasability) args=(--set releasability.enabled=true
-                         --set releasability.lockDownElectric=true) ;;
+VARIANTS="default emptydir releasability"
+
+# ONE definition of each variant, read by every guard below. Guards 2 and 3
+# used to run against the DEFAULT RENDER ONLY, so anything behind an `if` was
+# checked by guard 1 and by nothing else — which is the same "a template
+# behind a feature flag is unguarded" defect guard 1 exists to catch, one
+# level up in the tooling.
+variant_args() {
+  case "$1" in
+    default)  echo "" ;;
+    emptydir) echo "--set persistence.redpandaUseEmptyDir=true --set persistence.restateUseEmptyDir=true" ;;
+    releasability)
+      # The whole stack, including the pieces that only appear when
+      # authentication is on. `publicOrigin` is supplied because the OIDC
+      # helpers deliberately `fail` without one rather than inventing a
+      # redirect URI — a wrong redirect URI is the misconfiguration whose
+      # usual repair is a wildcard.
+      echo "--set releasability.enabled=true --set releasability.lockDownElectric=true --set releasability.oidc.enabled=true --set releasability.keycloak.enabled=true --set releasability.publicOrigin=https://lab.invalid" ;;
   esac
+}
+
+for variant in $VARIANTS; do
+  # shellcheck disable=SC2207
+  args=($(variant_args "$variant"))
   out=$(render "${args[@]}")
   kinds=$(printf '%s\n' "$out" | grep -c '^kind:')
   docs=$(printf '%s\n' "$out" | "$PY" -c '
@@ -94,7 +110,11 @@ done
 # check against a DIFFERENT representation"): a merge can also produce two
 # objects sharing a name, or one with no name at all.
 echo "guard 2: object identity"
-render | "$PY" -c '
+for variant in $VARIANTS; do
+  # shellcheck disable=SC2207
+  args=($(variant_args "$variant"))
+  printf '  [%s] ' "$variant"
+  render "${args[@]}" | "$PY" -c '
 import sys, yaml, collections
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 seen = collections.Counter()
@@ -108,8 +128,9 @@ for d in docs:
 dupes = [f"{k}/{n}" for (k, n, _), c in seen.items() if c > 1]
 if bad:   print("  FAIL: " + "; ".join(bad)); sys.exit(1)
 if dupes: print("  FAIL: duplicate object identity: " + ", ".join(dupes)); sys.exit(1)
-print(f"  ok   : {len(docs)} objects, all named, no duplicate identities")
+print(f"ok   {len(docs)} objects, all named, no duplicate identities")
 ' || fail=1
+done
 
 # --- guard 3: the escape hatch stays bounded --------------------------------
 # THE DEFECT MODELLED: the NFS escape hatch swaps a PVC for an emptyDir and

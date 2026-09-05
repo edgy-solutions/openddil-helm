@@ -34,6 +34,27 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          {{- if and .Values.releasability.enabled .Values.releasability.keycloak.enabled }}
+          # The identity provider, on the SAME HOST as the app.
+          #
+          # Same host means same-site under the eTLD+1 rule, which is what
+          # lets the session cookie use SameSite=Strict if a deployment wants
+          # it — and it removes CORS from the login round trip entirely.
+          # A separate hostname works too and needs Lax; see the SameSite note
+          # in gateway/oidc.py for why that choice is not free.
+          #
+          # LISTED FIRST BECAUSE INGRESS PATH MATCHING IS LONGEST-PREFIX PER
+          # CONTROLLER, NOT DOCUMENT ORDER — but ordering it ahead of `/`
+          # costs nothing and makes the intent legible to a reader who does
+          # not know that.
+          - path: {{ .Values.releasability.keycloak.basePath }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-keycloak
+                port:
+                  number: 8080
+          {{- end }}
           - path: /
             pathType: Prefix
             backend:

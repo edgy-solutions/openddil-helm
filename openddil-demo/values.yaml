@@ -826,6 +826,59 @@ releasability:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 200m, memory: 256Mi }
 
+  # The app's public origin. Derived from the ingress when empty; set it
+  # explicitly for a deployment reached some other way. Everything the OIDC
+  # flow needs — the redirect URI, the issuer, the Keycloak public URL — is
+  # derived from this ONE value, because those three must agree exactly and
+  # the usual repair for a mismatch is to widen the client to a wildcard.
+  publicOrigin: ""
+
+  # --- authentication ---------------------------------------------------------
+  # OFF by default, which leaves the PEP in `header` mode: the subject arrives
+  # in a trusted header and the PEP is only safe where it is unreachable from
+  # outside the cluster. That is the correct default for a component whose
+  # other deployment mode needs an identity provider to exist.
+  oidc:
+    enabled: false
+    clientId: openddil-pep
+    # PUBLISHED, AND THEREFORE A LAB CREDENTIAL ONLY. A deployment that means
+    # it supplies this from its own secret store.
+    clientSecret: "openddil-pep-dev-secret"
+    # DDIL PARAMETER, not a security constant. Existing sessions survive a
+    # severed link; new logins do not, because the code exchange is a live
+    # call to the token endpoint. Long enough to outlast a plausible severance
+    # window, short enough to bound a stolen cookie.
+    sessionTtlSeconds: 43200
+    # `Lax`, deliberately. `Strict` breaks the login round trip when the IdP
+    # is on a different SITE — the post-callback navigation is attributed to
+    # the cross-site initiator and the cookie is withheld, so the user lands
+    # logged out and a reload fixes it. Intermittent, and indistinguishable
+    # from a flaky login. With the bundled Keycloak on the app's own host the
+    # two are same-site and `Strict` is available.
+    cookieSameSite: Lax
+
+  # A DEMO identity provider: start-dev, in-memory H2, published passwords,
+  # no TLS. Correct for a lab and disqualifying anywhere else. A real
+  # deployment turns this off and points releasability.oidc at the identity
+  # provider it already runs — which is why the PEP takes an issuer URL
+  # rather than embedding a Keycloak client.
+  keycloak:
+    enabled: false
+    image:
+      repository: quay.io/keycloak/keycloak
+      tag: "26.0"
+      digest: ""
+    realm: openddil
+    # Served under a sub-path of the app's own host, so the IdP and the app
+    # are same-site and the login round trip needs no CORS.
+    basePath: /idp
+    adminUser: admin
+    adminPassword: admin
+    realmVolumeSize: 8Mi
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits:   { cpu: 1000m, memory: 1Gi }
+
   pep:
     image:
       # A stock python image running stdlib-only source from the bundle. No

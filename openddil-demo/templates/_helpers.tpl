@@ -164,3 +164,36 @@ the frontend has a real proxy to enable/disable). Idempotent — POST to
 {{- define "openddil.toxiproxyTarget" -}}
 {{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }}
 {{- end }}
+
+{{/*
+ADR-0029 Slice 1 — the app's public origin, and the two URLs derived from it.
+
+DERIVED IN ONE PLACE, ON PURPOSE. The OIDC redirect URI must match EXACTLY
+between three artifacts: the Keycloak client registration, the URL the
+gateway sends to the authorization endpoint, and the URL the browser is
+returned to. A mismatch in any one of them fails at the callback with an
+error that names none of the three, and the usual repair is to widen the
+client to a wildcard — which is the misconfiguration this whole design
+declines. One template, three consumers, no opportunity to disagree.
+*/}}
+{{- define "openddil.publicOrigin" -}}
+{{- if .Values.releasability.publicOrigin -}}
+{{ .Values.releasability.publicOrigin | trimSuffix "/" }}
+{{- else if .Values.ingress.enabled -}}
+{{ printf "%s://%s" (ternary "https" "http" (not (empty .Values.ingress.tls))) .Values.ingress.host }}
+{{- else -}}
+{{ fail "releasability with OIDC needs a public origin: enable ingress or set releasability.publicOrigin" }}
+{{- end -}}
+{{- end }}
+
+{{- define "openddil.pepRedirectUri" -}}
+{{ printf "%s/auth/callback" (include "openddil.publicOrigin" .) }}
+{{- end }}
+
+{{- define "openddil.keycloakPublicUrl" -}}
+{{ printf "%s%s" (include "openddil.publicOrigin" .) (.Values.releasability.keycloak.basePath | trimSuffix "/") }}
+{{- end }}
+
+{{- define "openddil.keycloakIssuer" -}}
+{{ printf "%s/realms/%s" (include "openddil.keycloakPublicUrl" .) .Values.releasability.keycloak.realm }}
+{{- end }}

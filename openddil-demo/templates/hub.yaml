@@ -838,6 +838,27 @@ spec:
         - name: frontend
           image: {{ include "openddil.image" (dict "name" .Values.frontend.image.name "tag" .Values.frontend.image.tag "digest" .Values.frontend.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.frontend.image.pullPolicy "root" .) }}
+          {{- if .Values.releasability.enabled }}
+          env:
+            # WHERE THE BROWSER-S READ PATH ACTUALLY GOES.
+            #
+            # The browser keeps requesting the same same-origin
+            # `/electric/v1/shape`; nginx sends it to the PEP instead of to
+            # Electric. No frontend rebuild, no CORS, and the session cookie
+            # rides along because nothing about the origin changed.
+            #
+            # This and the NetworkPolicy are set from the SAME value on
+            # purpose. If this were left pointing at Electric while
+            # enforcement was on, the result would be a complete bypass that
+            # looked like everything working — so the NetworkPolicy makes
+            # that combination fail visibly instead.
+            - name: OPENDDIL_ELECTRIC_UPSTREAM
+              value: {{ printf "%s-pep" .Release.Name | quote }}
+            - name: OPENDDIL_ELECTRIC_PORT
+              value: "8080"
+            - name: OPENDDIL_PEP_UPSTREAM
+              value: {{ printf "%s-pep" .Release.Name | quote }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.frontend.port }}
