@@ -797,3 +797,44 @@ tierNode:
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 200m, memory: 256Mi }
+
+# --- ADR-0029 Arc 2 Slice 1: read-path releasability -------------------------
+# DEFAULT OFF. Enabling changes what users can see, and a chart that turned on
+# enforcement by default would turn it on in deployments whose §7 completeness
+# gate has never been run. Label first, enforce second, never the reverse.
+releasability:
+  enabled: false
+
+  # Close the direct route to Electric. Off by default because it breaks any
+  # existing direct consumer, and breaking reads is not something a chart
+  # should do unasked — but WITHOUT IT THE PEP IS A SUGGESTION: any pod in the
+  # namespace can read every nation's rows by using one different hostname.
+  lockDownElectric: false
+
+  topaz:
+    image:
+      repository: ghcr.io/aserto-dev/topaz
+      # PINNED, and pinned for a reason this component earned: `latest` is how
+      # its config schema silently diverged from its own published
+      # documentation. A component carrying authorization decisions does not
+      # float.
+      tag: "0.33.16"
+      digest: "sha256:835868c04bdd7129127ea43642ffff7363d0bd26d5e1a37631fa881431054360"
+    policyVolumeSize: 16Mi
+    dbVolumeSize: 64Mi
+    resources:
+      requests: { cpu: 50m,  memory: 64Mi }
+      limits:   { cpu: 200m, memory: 256Mi }
+
+  pep:
+    image:
+      # A stock python image running stdlib-only source from the bundle. No
+      # openddil image to build, no wheels to resolve at start-up.
+      repository: python
+      tag: "3.11-slim"
+      digest: ""
+    appVolumeSize: 8Mi
+    logLevel: INFO
+    resources:
+      requests: { cpu: 50m,  memory: 64Mi }
+      limits:   { cpu: 300m, memory: 256Mi }

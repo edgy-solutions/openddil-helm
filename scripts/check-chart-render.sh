@@ -57,11 +57,18 @@ require_nonempty_render
 # A swallowed object leaves its `kind:` line in the text while the document
 # count drops, so the two disagree exactly when a separator is lost.
 echo "guard 1: document integrity"
-for variant in "default" "emptydir"; do
+# A variant per OPTIONAL BLOCK, because a template guarded by `if` is
+# invisible to a default render and therefore unguarded by it. The
+# releasability stack renders nothing at all unless asked for, so without
+# its own variant a missing separator or a duplicated name in it would ship
+# — the exact defect guard 1 exists to catch, hiding behind a feature flag.
+for variant in "default" "emptydir" "releasability"; do
   case "$variant" in
     default)  args=() ;;
     emptydir) args=(--set persistence.redpandaUseEmptyDir=true
                     --set persistence.restateUseEmptyDir=true) ;;
+    releasability) args=(--set releasability.enabled=true
+                         --set releasability.lockDownElectric=true) ;;
   esac
   out=$(render "${args[@]}")
   kinds=$(printf '%s\n' "$out" | grep -c '^kind:')

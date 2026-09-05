@@ -59,6 +59,22 @@ COPY openddil-demo/dynamic-mappings              /bundle/demo/dynamic-mappings/
 # the discipline, not any particular naming convention or fleet.
 COPY openddil-demo/ontology                      /bundle/demo/ontology/
 
+# ADR-0029 Slice 1 — the asserted-entitlement corpus, the Rego policy, and the
+# read-path PEP's source.
+#
+# THE PEP SHIPS AS SOURCE, NOT AS AN IMAGE, AND THAT IS DELIBERATE. It is
+# stdlib-only Python run inside a stock python image, so there is no new image
+# to build, no wheels to resolve at start-up and no network at boot. A
+# component whose job is to REFUSE requests should not have a dependency that
+# can fail to install — a PEP that will not start is a PEP that is not
+# enforcing, and the difference between "not enforcing" and "not deployed" is
+# invisible from outside.
+#
+# Policy CONTENT living here rather than in the chart is the same rule as the
+# ontology overlay above: the chart defines the seat, the deployment fills it.
+COPY openddil-demo/policy                        /bundle/demo/policy/
+COPY openddil-demo/gateway                       /bundle/demo/gateway/
+
 # REMOVED (GD-09): redpanda-connect-edge-01/02/03.yaml and restate-config.toml.
 #
 # The chart now GENERATES the per-edge bridge configs and the root Restate

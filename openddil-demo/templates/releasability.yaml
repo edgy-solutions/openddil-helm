@@ -1,0 +1,308 @@
+{{- if .Values.releasability.enabled }}
+{{- $root := . }}
+# =============================================================================
+# ADR-0029 Arc 2 Slice 1 — read-path releasability enforcement
+# =============================================================================
+# Two components, deployed together because neither is meaningful alone:
+#
+#   topaz-hq   the PDP. One Topaz at the HQ tier, per ADR-0029 §6 — the
+#              read-path gateway it serves is an HQ-tier component. This is a
+#              SCOPE decision, not a revision of the architecture: the
+#              architecture is one local authorizer per tier, and per-tier
+#              locals land with the tier-bridge slice, which is the first
+#              slice where an edge must decide during severance.
+#
+#   pep        the read-path gateway. A reverse proxy in front of Electric's
+#              shape endpoint that owns the WHERE clause.
+#
+# DEFAULT OFF. Enabling this changes what users can see, and a chart that
+# turns on enforcement by default would turn it on in deployments whose §7
+# completeness gate has never been run. Label first, enforce second.
+#
+# ---------------------------------------------------------------------------
+# WHY THE PEP GOES HERE AND NOWHERE ELSE
+# ---------------------------------------------------------------------------
+# The PEP goes at the one read surface users actually touch, on the tier that
+# serves them, and nothing else may reach that surface. Recorded so the
+# alternatives are not re-litigated:
+#
+#   frontend filtering    bypassed by anyone with a dev-tools tab
+#   Postgres RLS          Electric reads via replication as its OWN database
+#                         role, not as the end user, so RLS never sees who is
+#                         asking. Dead on arrival for this read path.
+#   per-nation stores     ADR-0029 rejected it; the coalition liaison breaks
+#   inside Electric       no policy hook exists; modifying it forks a dep
+#
+# BYPASS PREVENTION IS NETWORK TOPOLOGY, NOT APPLICATION LOGIC. Electric's
+# shape endpoint is ClusterIP with no ingress route, and the NetworkPolicy
+# below admits only the PEP. The frontend is given the PEP's URL and never
+# holds an Electric URL.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS DOES *NOT* COVER — say so, so "PEP live" is not read as "enforced"
+# ---------------------------------------------------------------------------
+#   * INTERNAL SERVICE READS (fusion into edge brokers, Restate
+#     subscriptions, the projector) are system-to-system, inside one tier,
+#     and not user-facing. ADR-0029 §4 does not gate them: the data has
+#     already been admitted to that tier.
+#   * EGRESS — connectors publishing outward, tier bridges forwarding upward
+#     or laterally — is Slice 2 and is NOT enforced by anything here.
+#
+# Those are different gates against different adversaries. This one protects
+# against the WRONG PERSON: a user asking for data they are not entitled to,
+# decided per subject, and its failure mode is a human seeing a screen they
+# should not. The egress gate protects against the WRONG DESTINATION, decided
+# per link, and its failure mode is a system durably HOLDING data it should
+# not, with no human in the loop to notice. Sharing the policy engine is what
+# keeps them from drifting into two truths; separating the enforcement points
+# is what makes each complete for its own threat.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-topaz-hq-config
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  # VERIFIED against topazd 0.33.16 by running it (2026-08-09 deployment
+  # gate). `plugins` and `decision_logger` — both documented online and
+  # present in the published JSON schema — are REJECTED by this build with
+  # "'config.Config' has invalid keys", and the co-located reasoning plane
+  # running the same generation carries no such block either. So there is no
+  # newer version to inherit and no solved configuration to copy.
+  #
+  # Consequence, stated rather than left implicit: TOPAZ LOGS NO DECISIONS
+  # HERE. The PEP's own decision log is the audit trail, not defence in depth
+  # alongside a second independent record.
+  config.yaml: |
+    version: 2
+    logging:
+      prod: true
+      log_level: info
+    directory:
+      db_path: /db/hq.db
+      request_timeout: 5s
+    api:
+      health:
+        listen_address: "0.0.0.0:9494"
+      services:
+        authorizer:
+          grpc:
+            connection_timeout_seconds: 2
+            listen_address: "0.0.0.0:8282"
+          gateway:
+            listen_address: "0.0.0.0:8383"
+            # Plaintext inside the cluster; the tier's mesh boundary is the
+            # trust boundary. Revisit with mTLS.
+            http: true
+    opa:
+      instance_id: openddil-hq
+      graceful_shutdown_period_seconds: 2
+      local_bundles:
+        paths:
+          - /policy
+        skip_verification: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-topaz-hq
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8282
+      name: grpc
+    - port: 8383
+      name: authz-http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-topaz-hq
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 8 }}
+      annotations:
+        # Roll the pod when the policy changes. The bundle image is a rolling
+        # tag, so without this a helm upgrade that ships new policy leaves the
+        # old policy running and reports success — the rolling-tag hazard, in
+        # the one component where a stale artifact means stale ENFORCEMENT.
+        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+    spec:
+      initContainers:
+        # THE ENTITLEMENTS FILE IS RENAMED IN TRANSIT, AND THAT IS CALLED OUT
+        # IN BOTH PLACES. The reviewed artifact is policy/users.yaml; OPA's
+        # bundle convention names data files `data.yaml`, and the bundle's
+        # .manifest declares roots ["openddil"], so data outside that root is
+        # refused outright. Hence /policy/openddil/data.yaml.
+        #
+        # A silent rename during transport is exactly how a reviewed file and
+        # a running file drift apart, so: same content, different name, said
+        # out loud here and in users.yaml's header.
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+            (dict "src" "demo/policy/users.yaml"         "dst" "policy/openddil/data.yaml")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: topaz
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.topaz.image.repository "tag" $root.Values.releasability.topaz.image.tag "digest" $root.Values.releasability.topaz.image.digest "root" $root) }}
+          # THE PROVEN INVOCATION — established by running the image, not
+          # inferred. `args: ["run"]` alone exits with
+          #   required flag(s) "config-file" not set
+          args: ["run", "--config-file", "/config/config.yaml"]
+          ports:
+            - containerPort: 8282
+              name: grpc
+            - containerPort: 8383
+              name: authz-http
+            - containerPort: 9494
+              name: health
+          # TCP, not HTTP. Topaz's health service on 9494 speaks the gRPC
+          # health protocol; an HTTP GET never becomes ready and the pod sits
+          # 0/1 forever while the logs say every server started.
+          readinessProbe:
+            tcpSocket: { port: 8282 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $root.Values.releasability.topaz.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: bundle-shared
+              mountPath: /policy
+              subPath: policy
+            - name: db
+              mountPath: /db
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $root.Release.Name }}-topaz-hq-config
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.topaz.policyVolumeSize }}
+        - name: db
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.topaz.dbVolumeSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-pep
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8080
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-pep
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 4 }}
+spec:
+  # ONE REPLICA, AND THE REASON IS AN AUTHORIZATION PROPERTY, NOT A CAPACITY
+  # ONE. The PEP binds Electric shape handles to the subject they were minted
+  # for, in memory. A second replica would not know the first replica's
+  # bindings and would refuse valid resumptions — failing CLOSED, which is the
+  # right direction, but confusingly. Scaling out needs shared handle storage;
+  # Slice 1 says so rather than pretending the component is stateless.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
+      annotations:
+        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+    spec:
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/gateway" "dst" "app")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: pep
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
+          # Stdlib-only source from the bundle, run by a stock python image.
+          # No pip, so no network at boot and nothing to resolve — a component
+          # whose job is to refuse requests must not have a dependency that
+          # can fail to install.
+          command: ["python", "-u", "/app/pep.py"]
+          env:
+            - name: OPENDDIL_ELECTRIC_URL
+              value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            - name: OPENDDIL_TOPAZ_URL
+              value: {{ printf "http://%s-topaz-hq%s:8383" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
+            - name: OPENDDIL_PEP_PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: {{ $root.Values.releasability.pep.logLevel | quote }}
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml $root.Values.releasability.pep.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app
+              subPath: app
+      volumes:
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+{{- if $root.Values.releasability.lockDownElectric }}
+---
+# BYPASS PREVENTION. Without this the PEP is a suggestion: any pod in the
+# namespace — including a browser reaching a port-forward — can talk to
+# Electric directly and read every nation's rows. Enforcement that can be
+# stepped around is not enforcement, and the step around it is one hostname.
+#
+# Off by default because it will break any existing direct consumer, and
+# breaking reads is not something a chart should do without being asked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-electric-pep-only
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.electric.port }}
+{{- end }}
+{{- end }}
