@@ -123,11 +123,26 @@ echo
 echo "dwelling ${DWELL}s under severance"
 sleep "$DWELL"
 
+# FROZEN IS A COMPARISON BETWEEN TWO SAMPLES TAKEN DURING SEVERANCE, never
+# a comparison against the baseline. Between reading the baseline and the
+# cut taking hold, a few in-flight messages still land at HQ -- measured
+# once at 4.4 seconds' worth. Requiring HQ's timestamp to equal the
+# baseline exactly fails on that race and reports a working sever as
+# broken, which is the mirror image of the bug this whole test exists for.
+#
+# So: sample, wait, sample again. If HQ did not move BETWEEN those two, it
+# has stopped, whatever it did in the first seconds.
+d_hq1="$(hq_q "$HQ_NEWEST")"
+echo "  HQ at T1: ${d_hq1}"
+sleep 40
+echo "  HQ at T2: $(hq_q "$HQ_NEWEST")"
+
 d_tier="$(tier_q "$TIER_NEWEST")"
 d_sevage="$(tier_q "$TIER_SEV_AGE")"
 d_hq="$(hq_q "$HQ_NEWEST")"
 d_rows="$(hq_q "$HQ_ROWS")"
 d_peerlag="$(hq_q "select coalesce(extract(epoch from now()-max(last_sample_at))::int,-1) from telemetry_latest_state where edge_id='${PEER}';")"
+d_hqlag="$(hq_q "select coalesce(extract(epoch from now()-max(last_sample_at))::int,-1) from telemetry_latest_state where edge_id='${TIER}';")"
 
 echo
 echo "during severance"
@@ -147,15 +162,20 @@ fi
 if [ -z "$d_rows" ] || [ "$d_rows" -eq 0 ] 2>/dev/null; then
   bad "(c) HQ went EMPTY for ${TIER}. Not stale — nothing writes its view."
   note "" "'No data' and 'old data' say opposite things to an operator."
-elif [ "$d_hq" != "$b_hq" ]; then
-  bad "(c) HQ is STILL FRESH (${b_hq} -> ${d_hq}) while the site is severed."
+elif [ "$d_hq" != "$d_hq1" ]; then
+  bad "(c) HQ IS STILL ADVANCING while the site is severed:"
+  note "" "${d_hq1} -> ${d_hq}, 40s apart, both during severance."
   note "" "A path still crosses the boundary. Every severance result from"
   note "" "this deployment is void until it is found."
+elif [ -z "$d_hqlag" ] || [ "$d_hqlag" -lt 45 ] 2>/dev/null; then
+  bad "(c) HQ stopped advancing but is only ${d_hqlag:-?}s behind — too"
+  note "" "little to distinguish a severed edge from a slow one. Dwell longer."
 elif [ -z "$d_peerlag" ] || [ "$d_peerlag" -lt 0 ] 2>/dev/null || [ "$d_peerlag" -gt 90 ] 2>/dev/null; then
   bad "(c) ${TIER} froze at HQ, but so did the peer ${PEER} (${d_peerlag:-?}s)."
   note "" "That is an HQ-wide outage wearing a successful sever's clothes."
 else
-  ok "(c) HQ STALE and intact — frozen at ${d_hq}, ${d_rows} rows retained"
+  ok "(c) HQ STALE and intact — frozen at ${d_hq} (${d_hqlag}s behind),"
+  note "" "unmoved across 40s of severance, ${d_rows} rows retained"
   note "" "control: peer ${PEER} still fresh at HQ (${d_peerlag}s) — HQ is"
   note "" "healthy and ingesting, so this staleness is ${TIER}-specific"
   c_froze=1

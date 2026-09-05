@@ -248,7 +248,10 @@ case "$ACTION" in
     # reaching HQ and the cut is not what it claims.
     bstate="$(kubectl get pods -n "$NS" -l app.kubernetes.io/component=edge-hq-bridge-${TIER}                 --no-headers 2>/dev/null | grep -v Completed | awk '{print $3}' | head -1)"
     case "${bstate:-missing}" in
-      Running) echo "  WARNING: the bridge is Running while severed — it may still reach HQ" >&2 ;;
+      Running) echo "  note: the bridge is Running — checked seconds after restart, so" ;
+               echo "        it may simply not have failed its first publish yet. Only" ;
+               echo "        a bridge still Running LATE in the dwell means it is still" ;
+               echo "        reaching HQ; assertion (c) is what settles that." ;;
       *)       echo "  ok: the bridge is ${bstate:-absent}, as a severed bridge should be" ;;
     esac
 
