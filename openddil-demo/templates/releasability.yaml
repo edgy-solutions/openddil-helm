@@ -424,16 +424,26 @@ data:
     # an OIDC client is how an authorization code ends up somewhere other
     # than the gateway that asked for it; the sibling project's UI client
     # carries `["*"]` and this one deliberately does not.
-    sed -e "s|REPLACED_AT_TEMPLATE_TIME\"$|${OPENDDIL_PEP_REDIRECT_URI}\"|" \
+    #
+    # TWO DISTINCT PLACEHOLDERS, SUBSTITUTED BY NAME. The first version of
+    # this used ONE placeholder for both values and told them apart by
+    # anchoring on what followed — which matched NEITHER, because one line
+    # ends `",` and the other `" ],`. Nothing about that was visible in the
+    # template; it surfaced as Keycloak importing a client whose secret was
+    # the literal placeholder. Clever matching on a shared literal is how a
+    # substitution silently does nothing.
+    sed -e "s|__PEP_CLIENT_SECRET__|${OPENDDIL_PEP_CLIENT_SECRET}|g" \
+        -e "s|__PEP_REDIRECT_URI__|${OPENDDIL_PEP_REDIRECT_URI}|g" \
         /bundle-realm/realm-openddil.json > /import/realm-openddil.json
-    # Two placeholders share a literal, so the secret is substituted by key
-    # rather than by value to avoid replacing the redirect URI as well.
-    sed -i "s|\"secret\": \".*\"|\"secret\": \"${OPENDDIL_PEP_CLIENT_SECRET}\"|" \
-        /import/realm-openddil.json
-    grep -q "REPLACED_AT_TEMPLATE_TIME" /import/realm-openddil.json && {
-      echo "FATAL: a placeholder survived substitution — the realm would" >&2
-      echo "import a client nobody can authenticate against." >&2
-      exit 1; }
+    # THE GUARD CAUGHT THE BUG ABOVE, which is the argument for it existing
+    # at all: a realm that imports with an unsubstituted secret produces a
+    # client nobody can authenticate against, and the symptom appears three
+    # components away, as a login failure.
+    if grep -q "__[A-Z_]*__" /import/realm-openddil.json; then
+      echo "FATAL: a placeholder survived substitution:" >&2
+      grep -o "__[A-Z_]*__" /import/realm-openddil.json | sort -u >&2
+      exit 1
+    fi
     echo "realm prepared: $(grep -c '\"id\"' /import/realm-openddil.json) pinned ids"
 ---
 apiVersion: v1
