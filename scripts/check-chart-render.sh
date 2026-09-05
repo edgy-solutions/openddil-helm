@@ -62,7 +62,7 @@ echo "guard 1: document integrity"
 # releasability stack renders nothing at all unless asked for, so without
 # its own variant a missing separator or a duplicated name in it would ship
 # — the exact defect guard 1 exists to catch, hiding behind a feature flag.
-VARIANTS="default emptydir releasability"
+VARIANTS="default emptydir releasability tiernode"
 
 # ONE definition of each variant, read by every guard below. Guards 2 and 3
 # used to run against the DEFAULT RENDER ONLY, so anything behind an `if` was
@@ -80,6 +80,16 @@ variant_args() {
       # redirect URI — a wrong redirect URI is the misconfiguration whose
       # usual repair is a wildcard.
       echo "--set releasability.enabled=true --set releasability.lockDownElectric=true --set releasability.oidc.enabled=true --set releasability.keycloak.enabled=true --set releasability.publicOrigin=https://lab.invalid" ;;
+    tiernode)
+      # THE TIER NODE, WITH ENFORCEMENT. Added 2026-09-05: the tier-node
+      # templates were behind `tierNode.enabled` and therefore rendered by
+      # NO variant — the same "a template behind a feature flag is
+      # unguarded" defect guard 1 exists to catch, for the third time.
+      #
+      # This variant carries the per-tier PEP, the per-tier NetworkPolicy
+      # and the per-tier Ingress, which are the objects most likely to
+      # collide by name across tiers.
+      echo "--set tierNode.enabled=true --set releasability.enabled=true --set releasability.lockDownElectric=true --set releasability.publicOrigin=https://lab.invalid" ;;
   esac
 }
 

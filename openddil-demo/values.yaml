@@ -710,6 +710,28 @@ tierNode:
   # root-tier stack — this phase ADDS, it does not modify.
   enabled: false
 
+  # PER-TIER SHAPE AND ADDRESS — the fields an `edges[]` entry may carry for
+  # the tier-parameterized presentation (ADR-0033 §Tier-parameterized
+  # presentation). All optional, and the defaults are correct for an edge:
+  #
+  #   hasChildren    does this tier roll anything up? Default false — an
+  #                  edge is a leaf. Set true for an intermediate.
+  #   parent         defaults to the entry's `region`, because an edge's
+  #                  parent IS its region and the topology list already
+  #                  says so. Set explicitly for a tier that is not an edge.
+  #   label          human label for the tier header. Defaults to `id`.
+  #   publicOrigin   the tier's own URL, e.g. https://edge-01.example. When
+  #                  set, the tier gets its OWN Ingress and its OWN OIDC
+  #                  client — a redirect URI is per host, so a tier reached
+  #                  at its own hostname cannot share the root's client.
+  #                  When absent the tier is in-cluster only and its PEP
+  #                  runs in header mode, which the PEP announces at boot.
+  #
+  # NOTE the shape fields are read as SHAPE, never as name: nothing branches
+  # on `id`. That is what makes a fourth tier render with no code change —
+  # subject to GD-01, which is why it cannot yet be SCOPED. See
+  # openddil-contracts/decisions/PLAN-tier-presentation-opening-package.md §2.
+
   # Which configured tiers get the kit. Empty => all entries in `edges`.
   # The framework rule (ADR-0032 §a) is that ANY tier may take the kit but a
   # severance-tolerant one requires that tier's OWN broker; this list is the

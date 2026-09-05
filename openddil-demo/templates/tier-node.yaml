@@ -531,6 +531,11 @@ spec:
 ---
 # ===========================================================================
 # tier-electric-{{ $tier.id }} — streams the TIER store to the TIER UI
+#
+# That heading was ASPIRATIONAL until 2026-09-05 and is now true. Until then
+# the tier UI reached `electric-sync`, the root's alias Service, because the
+# env var meant to point it here was read by nothing (UD-9). Two comments on
+# one path both asserted a property the deployment did not have.
 # ===========================================================================
 apiVersion: v1
 kind: Service
@@ -627,15 +632,255 @@ spec:
         - name: frontend
           image: {{ include "openddil.image" (dict "name" $root.Values.frontend.image.name "tag" $root.Values.frontend.image.tag "digest" $root.Values.frontend.image.digest "root" $root) }}
           env:
-            # Targets THIS tier's Electric. No parent-hosted asset on the
-            # critical path — the ADR-0032 §e corollary.
-            - name: ELECTRIC_URL
-              value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            # WHERE THE BROWSER'S READ PATH GOES, and it is an nginx upstream
+            # rather than an application setting — deliberately.
+            #
+            # UD-9: this block previously set `ELECTRIC_URL`, with a comment
+            # citing the ADR-0032 §e corollary, and NOTHING READ IT. The
+            # application's ELECTRIC_URL is a Vite BUILD-TIME constant baked
+            # into the bundle; a container env var cannot reach it. nginx
+            # defaulted its upstream to `electric-sync` — the ROOT's alias
+            # Service — so every tier's UI read the ROOT's store while this
+            # comment asserted tier-locality. No error at any layer.
+            #
+            # These two names ARE read: 40-resolver.sh substitutes them into
+            # nginx.conf at container start and FAILS if any placeholder
+            # survives. That is the difference between a setting and a claim.
+            - name: OPENDDIL_ELECTRIC_UPSTREAM
+              value: {{ include "openddil.tierReadUpstream" (dict "tier" $tier "root" $root) | quote }}
+            - name: OPENDDIL_ELECTRIC_PORT
+              value: {{ include "openddil.tierReadPort" (dict "tier" $tier "root" $root) | quote }}
+            {{- if $root.Values.releasability.enabled }}
+            - name: OPENDDIL_PEP_UPSTREAM
+              value: {{ printf "%s-tier-pep-%s" $root.Release.Name $tier.id | quote }}
+            {{- end }}
+          volumeMounts:
+            # The tier's identity, delivered on the channel that actually
+            # works: a file the application FETCHES at startup. One image,
+            # zero tier knowledge at build time, tier identity supplied
+            # entirely at deploy time.
+            - name: deployment-config
+              mountPath: /usr/share/nginx/html/deployment
           ports:
             - containerPort: 80
           resources:
             {{- toYaml $root.Values.frontend.resources | nindent 12 }}
-
+      volumes:
+        - name: deployment-config
+          configMap:
+            name: {{ $root.Release.Name }}-tier-frontend-config-{{ $tier.id }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-tier-frontend-config-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  # THE TIER PARAMETER. Fetched by the app at startup from
+  # /deployment/deployment.json — the same channel that already carried
+  # branding and FOB topology, which is why this needed no new mechanism.
+  #
+  # SHAPE, NOT NAME. Nothing downstream branches on `id`: `has_children` and
+  # `parent` select the panels, so a fourth tier resolves by shape with no
+  # code change. `id` is display and correlation only.
+  #
+  # `scope` is null because a tier node reads its OWN store, which holds its
+  # subtree and nothing else — scoping it again would be filtering a set by
+  # a property every member already has. Explicit null rather than omitted:
+  # the parser REJECTS an omitted scope, because omission reads as an
+  # oversight and an unscoped read at a tier WITH children would show the
+  # whole subtree under a leaf's label.
+  deployment.json: |
+    {
+      "title": {{ $root.Values.frontend.title | default "OpenDDIL" | quote }},
+      "tier": {
+        "id": {{ $tier.id | quote }},
+        "label": {{ $tier.label | default $tier.id | quote }},
+        "scope": null,
+        "has_children": {{ $tier.hasChildren | default false }},
+        {{- /* An edge's parent IS its region, and `edges[].region` already
+               says so — so the existing topology list describes the tree
+               and no new configuration is needed for the common case.
+               `parent` overrides it for a tier that is not an edge. */}}
+        "parent": {{ with (or $tier.parent $tier.region) }}{{ . | quote }}{{ else }}null{{ end }}
+      }
+    }
+{{- if $root.Values.releasability.enabled }}
+---
+# ===========================================================================
+# tier-pep-{{ $tier.id }} — THIS TIER'S read-path enforcement point
+# ===========================================================================
+# Slice 1 shipped ONE PEP, at the root, and one NetworkPolicy naming the
+# root's Electric. A tier node's read path was therefore unauthenticated AND
+# (per UD-9) reading the root's store — the two defects composing into the
+# worst available combination, which is why they are fixed together.
+#
+# ITEMS 2 AND 3 OF THE CHART DELTA LAND TOGETHER OR THE TIER IS WORSE THAN
+# BEFORE. Pointing the tier's nginx at a PEP that does not exist breaks the
+# UI; deploying a tier PEP without repointing nginx leaves the bypass open.
+# Both come from `openddil.tierReadUpstream`, so they cannot disagree.
+#
+# THE PDP IS STILL THE ROOT'S TOPAZ. Per-tier local authorizers are ADR-0029
+# §6's architecture and land with the tier-bridge slice; Slice 1's scope
+# decision stands. So this tier ENFORCES locally and DECIDES remotely, and
+# under severance it fails CLOSED — which is correct, and is NOT the
+# capstone. Do not record a severance demo against this and call it
+# tier-local authorization: the read path is tier-local, the decision is not.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-pep-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8080
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-pep-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  # One replica, and the reason is an authorization property rather than a
+  # capacity one: shape-handle bindings and sessions are in-memory, so a
+  # second replica would refuse valid resumptions. Failing closed is the
+  # right direction; scaling out needs shared storage.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
+      annotations:
+        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+    spec:
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/gateway" "dst" "app")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: pep
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
+          command: ["python", "-u", "/app/pep.py"]
+          env:
+            # THIS TIER'S Electric, which is the whole point.
+            - name: OPENDDIL_ELECTRIC_URL
+              value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            - name: OPENDDIL_TOPAZ_URL
+              value: {{ printf "http://%s-topaz-hq%s:8383" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
+            - name: OPENDDIL_PEP_PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            {{- if and $root.Values.releasability.oidc.enabled $tier.publicOrigin }}
+            # AUTH CLIENT PER TIER (chart delta item 4). A redirect URI is
+            # per host, so a tier reached at its own hostname needs its own
+            # confidential client and its own EXACT redirect URI. Configured
+            # only when the tier declares a public origin; a tier without one
+            # is reachable in-cluster and runs in header mode, which the PEP
+            # announces at boot rather than leaving to be inferred.
+            - name: OPENDDIL_OIDC_ISSUER
+              value: {{ include "openddil.keycloakIssuer" $root | quote }}
+            - name: OPENDDIL_OIDC_INTERNAL_ISSUER
+              value: {{ printf "http://%s-keycloak%s:8080%s/realms/%s" $root.Release.Name (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            - name: OPENDDIL_OIDC_CLIENT_ID
+              value: {{ printf "%s-%s" $root.Values.releasability.oidc.clientId $tier.id | quote }}
+            - name: OPENDDIL_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-pep-oidc
+                  key: client-secret
+            - name: OPENDDIL_OIDC_REDIRECT_URI
+              value: {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
+            - name: OPENDDIL_SESSION_TTL_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_COOKIE_SAMESITE
+              value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
+            {{- end }}
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml $root.Values.releasability.pep.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app
+              subPath: app
+      volumes:
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+{{- if $root.Values.releasability.lockDownElectric }}
+---
+# BYPASS PREVENTION AT THE TIER. Slice 1's policy named the ROOT's
+# electric-sync and left every tier's Electric uncovered — so a tier node
+# was, until this, protected by nothing at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-tier-electric-pep-only-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3000
+{{- end }}
+{{- end }}
+{{- if $tier.publicOrigin }}
+---
+# INGRESS PER TIER HOST (chart delta item 5) — each tier is a URL.
+#
+# That is not packaging: it is what makes the tab switcher unnecessary. A
+# tier's UI is reached at the tier's own endpoint, so "which view" stops
+# being a control on the page and becomes a fact about where you connected.
+# It is also what the per-tier auth client needs, since a redirect URI is
+# per host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $root.Release.Name }}-tier-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  {{- with $root.Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ $tier.publicOrigin | trimPrefix "https://" | trimPrefix "http://" | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $root.Release.Name }}-tier-frontend-{{ $tier.id }}
+                port:
+                  number: 80
+{{- end }}
 ---
 # ===========================================================================
 # tier-fusion-{{ $tier.id }} / tier-cm-{{ $tier.id }} — DETECTION AT THE TIER

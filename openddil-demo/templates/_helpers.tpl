@@ -197,3 +197,28 @@ declines. One template, three consumers, no opportunity to disagree.
 {{- define "openddil.keycloakIssuer" -}}
 {{ printf "%s/realms/%s" (include "openddil.keycloakPublicUrl" .) .Values.releasability.keycloak.realm }}
 {{- end }}
+
+{{/*
+Where a TIER's browser read path goes.
+
+THE PEP WHEN ENFORCEMENT IS ON, THE TIER'S OWN ELECTRIC WHEN IT IS NOT — and
+never the root's `electric-sync` alias, which is what it silently was before
+2026-09-05 (UD-9).
+
+Two callers derive from this one helper (the frontend's nginx upstream and
+the NetworkPolicy's allowed source), so the enforcement path and the network
+path cannot disagree. Pointing nginx at Electric while enforcement is on
+would be a complete bypass that looked like everything working; the policy
+makes that combination fail visibly instead.
+*/}}
+{{- define "openddil.tierReadUpstream" -}}
+{{- if .root.Values.releasability.enabled -}}
+{{ printf "%s-tier-pep-%s" .root.Release.Name .tier.id }}
+{{- else -}}
+{{ printf "%s-tier-electric-%s" .root.Release.Name .tier.id }}
+{{- end -}}
+{{- end }}
+
+{{- define "openddil.tierReadPort" -}}
+{{- if .root.Values.releasability.enabled -}}8080{{- else -}}3000{{- end -}}
+{{- end }}
