@@ -776,8 +776,28 @@ spec:
             # THIS TIER'S Electric, which is the whole point.
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            # THIS TIER'S OWN PDP — and this line is the difference between a
+            # degraded mode and an outage.
+            #
+            # Pointing a tier's PEP at the ROOT's Topaz made the read path
+            # SEVERANCE-INTOLERANT: cut the uplink and the PEP cannot reach
+            # its decision point, so it fails closed — correctly, loudly, with
+            # the marker — and the maintainer UI at a severed edge shows
+            # DENIED instead of data.
+            #
+            # That is ADR-0036 clause 4 violated BY THE ENFORCEMENT POINT: a
+            # severed tier is supposed to degrade, not stop. And it regressed
+            # a capability that already worked — Phase 5 rung (iii), "the tier
+            # UI live while severed", could no longer be demonstrated with
+            # enforcement on, because the enforcement was the thing going
+            # dark.
+            #
+            # With the tier's own authorizer, fail-closed regains its correct
+            # meaning: "MY OWN PDP is down", which is a real local fault,
+            # rather than "the link is cut", which is a mode this system is
+            # built to survive.
             - name: OPENDDIL_TOPAZ_URL
-              value: {{ printf "http://%s-topaz-hq%s:8383" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
+              value: {{ printf "http://%s-tier-topaz-%s%s:8383" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
             - name: OPENDDIL_PEP_PORT
               value: "8080"
             - name: LOG_LEVEL
@@ -1220,6 +1240,54 @@ spec:
         {{- include "openddil.labels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- if $root.Values.releasability.enabled }}
+      # THE SEAT IS OCCUPIED. Until 2026-09-05 this Topaz loaded an EMPTY
+      # bundle — running, healthy, and deciding nothing, which was honest and
+      # was the whole point of shipping the seat early (ADR-0029 Phase 3).
+      #
+      # It is filled by the SAME distribution seam the root's authorizer
+      # uses: the runtime bundle, pulled at pod start. That is ADR-0029 §6's
+      # model exactly — "policy distributed as versioned bundles", each tier
+      # deciding against its own copy, a severed link stopping policy UPDATES
+      # rather than decisions. A tier running yesterday's bundle through a
+      # severance window is a correct and acceptable posture, and it is
+      # auditable because every decision records the policy and corpus
+      # versions that produced it.
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+          ) "root" $root) | nindent 8 }}
+        - name: policy-loader
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
+          env:
+            - name: OPENDDIL_POLICY_VARIANT
+              value: {{ $root.Values.releasability.policyVariant | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              src="/bundle/demo/policy/${OPENDDIL_POLICY_VARIANT}.yaml"
+              # A missing variant would leave an EMPTY data document, and an
+              # empty corpus is a working authorizer that denies everyone —
+              # indistinguishable from a correctly-enforced revocation and
+              # arriving with no error.
+              if [ ! -f "$src" ]; then
+                echo "FATAL: no entitlements corpus at $src" >&2
+                ls /bundle/demo/policy/*.yaml >&2
+                exit 1
+              fi
+              mkdir -p /shared/policy/openddil
+              cp "$src" /shared/policy/openddil/data.yaml
+              echo "tier {{ $tier.id }} corpus: ${OPENDDIL_POLICY_VARIANT}.yaml"
+          resources:
+            {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
+      {{- end }}
       containers:
         - name: topaz
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.topaz.image.repository "tag" $tn.topaz.image.tag "root" $root) }}
@@ -1251,23 +1319,38 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+            {{- if $root.Values.releasability.enabled }}
+            # The real bundle, from the shared emptyDir the init containers
+            # filled. Replaces the ConfigMap's empty `.manifest`.
+            - name: bundle-shared
+              mountPath: /policy
+              subPath: policy
+            {{- else }}
             # subPath -> a REAL FILE. A whole-ConfigMap mount produces a
             # symlink farm (..data -> ..<timestamp>/) and OPA's bundle loader
             # walks real directory entries.
             - name: policy
               mountPath: /policy/.manifest
               subPath: .manifest
+            {{- end }}
             - name: db
               mountPath: /db
       volumes:
         - name: config
           configMap:
             name: {{ $root.Release.Name }}-tier-topaz-config-{{ $tier.id }}
+        {{- if $root.Values.releasability.enabled }}
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.topaz.policyVolumeSize }}
+        {{- else }}
         - name: policy
           configMap:
             name: {{ $root.Release.Name }}-tier-topaz-config-{{ $tier.id }}
+        {{- end }}
         - name: db
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.topaz.dbVolumeSize }}
 {{- end }}
 
 {{- end }}

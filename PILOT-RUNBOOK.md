@@ -666,40 +666,74 @@ chart bug, not an environment issue.
 
 ### (i) The tier serves its own UI from its own store
 
-> ### ⚠ THIS RUNG DOES NOT CURRENTLY CHECK ITS OWN HEADING (UD-9, 2026-09-05)
->
-> The procedure below verifies **two things separately and infers the join**:
-> that the UI loads, and that the tier's store holds one distinct `edge_id`.
-> Nothing in it observes **what the UI is actually reading**.
->
-> That gap is live. `tier-node.yaml` sets `ELECTRIC_URL` on the tier
-> frontend, and **nothing reads it** — the application's value is a Vite
-> BUILD-TIME constant baked into the bundle, and nginx defaults its upstream
-> to `electric-sync`, the ROOT's alias Service. So a tier node's UI reads the
-> ROOT's store while the tier's own store is, independently, perfectly
-> correct.
->
-> **Both steps below then pass, and the heading is false.**
->
-> Until the tier-presentation arc lands
-> (`openddil-contracts/decisions/PLAN-tier-presentation-opening-package.md`
-> §6a/§6b), treat this rung as proving **the tier's STORE is correct** — which
-> it genuinely does — and **not** that the UI is reading it. Those were always
-> two claims; only one is currently tested.
->
-> *Same shape as the buffer probe two rungs down: the healthy reading and the
-> broken reading are identical from the observer's position. The difference
-> is that here the observer is a human with the screen in front of them, and
-> the screen looks right.*
+**THE HEADING IS NOW WHAT THE RUNG CHECKS.** Until 2026-09-05 it was not:
+the procedure opened the UI, confirmed assets loaded, and then ran `psql`
+**against the tier's postgres** — two facts verified separately, with the
+join between them inferred. Under UD-9 the UI was reading the ROOT's
+Electric while the tier's store was independently perfect, so both halves
+passed and the heading was false.
+
+*The general form is worth keeping:* **a check that verifies A, verifies B,
+and concludes "A is joined to B" is not a check on the join.** Both halves
+were well constructed. Neither measured the conjunction, and the conjunction
+was the whole property.
 
 ```bash
 kubectl -n $NS port-forward svc/$REL-tier-frontend-$PILOT 8090:80
 ```
 
+#### 1. The UI states which tier it believes it is
+
 Open `http://localhost:8090`.
 
-**Expect:** the maintainer view loads and shows assets. Confirm it is
-reading tier-locally:
+**Expect:** the header shows `TIER <PILOT>` and, beside it, the data source
+this instance is configured to read.
+
+That claim is only possible because something told it — the tier parameter
+arrives at runtime in `/deployment/deployment.json`, served from that tier's
+own ConfigMap. A UI that had no tier config renders the demo shell and says
+`DEMO SHELL · all tiers composed`, which is the honest answer and is **not**
+a tier instance.
+
+**If you see the demo-shell label on a tier node, stop.** The tier config
+was rejected or never mounted, and the parser refuses a partial one rather
+than guessing — a half-applied tier identity is a UI that confidently
+believes it is a tier it is not.
+
+Confirm the config the browser actually fetched, rather than the one the
+chart meant to send:
+
+```bash
+curl -s http://localhost:8090/deployment/deployment.json
+```
+
+**Expect:** a `tier` block whose `id` is `$PILOT`.
+
+#### 2. The UI's OWN read path returns this tier's data, and only this tier's
+
+This is the join. It goes **through the same URL the browser uses** — not to
+the database beside it.
+
+```bash
+# The frontend proxies /electric/ to this tier's read path. Ask it for the
+# fleet exactly as the page does.
+curl -s "http://localhost:8090/electric/v1/shape?table=telemetry_latest_state&offset=-1" \
+  | grep -o '"edge_id":"[^"]*"' | sort -u
+```
+
+**Expect:** exactly one distinct `edge_id`, and it is `$PILOT`.
+
+**More than one, or a different one, means the UI is reading somewhere
+else** — which is precisely the defect this rung previously could not see.
+Stop and report.
+
+> **With enforcement enabled** (`releasability.enabled=true`) that request is
+> refused without a session, which is correct and is itself a result: a bare
+> `curl` returning `TOPAZ AUTHZ DENIED` proves the tier's PEP is in the path.
+> Log in through the tier's own endpoint and repeat with the session cookie;
+> `--tier` on the completeness gate covers the data half.
+
+#### 3. Cross-check against the tier's store — now as a SECOND source, not the only one
 
 ```bash
 kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- \
@@ -707,8 +741,9 @@ kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- \
   "SELECT count(*), count(DISTINCT edge_id) FROM telemetry_latest_state;"
 ```
 
-**Expect:** a non-zero count, and **`edge_id` distinct = 1**. More than
-one means the tier is receiving other tiers' data — **stop and report**.
+**Expect:** a non-zero count, `edge_id` distinct = 1, and the same value step
+2 returned. Two paths to one fact, compared — which is what makes this a
+check on the join rather than two checks that happen to agree.
 
 **If the count is 0 — check §2.5 FIRST, before suspecting the tier.**
 
@@ -726,6 +761,7 @@ the unhelpful one is far more common:
 An earlier version of this runbook named cause 2 only, which sends you to
 read logs of a component that is behaving correctly. Rehearsal walked
 straight into it.
+
 
 ### (ii) Parity with the root's view of the same site
 
@@ -783,20 +819,25 @@ curl -X POST http://localhost:8474/proxies/hq-link \
    load — this is the point of serving the UI from the tier. A cached tab
    surviving is not the proof; a **reload** is.
 
-   > ⚠ **THIS CAPTURE IS NOT VALID TODAY — DO NOT RECORD IT (UD-9).** The
-   > sever above is `toxiproxy` on `hq-link`, which sits on the **Kafka**
-   > path. Under UD-9 the tier UI is reading the ROOT's Electric over
-   > **HTTP**, which that sever does not touch — so the reload succeeds
-   > **for the opposite of the stated reason**: the page survives because it
-   > never depended on the tier.
+   > **VALID AGAIN AS OF 2026-09-05, and the history is worth one paragraph
+   > because the failure was invisible.** This capture was briefly worthless:
+   > the sever is `toxiproxy` on `hq-link`, which sits on the **Kafka** path,
+   > while the tier UI was reading the ROOT's Electric over **HTTP** — which
+   > that sever does not touch. The reload succeeded for the opposite of the
+   > stated reason, and a recording would have asserted tier-local
+   > presentation while the UI read the root throughout (UD-9).
    >
-   > A recording made now would show the right picture and prove the wrong
-   > thing — an artifact asserting tier-local presentation, produced by a UI
-   > that was reading the root throughout. Captures 2–4 below are `psql` and
-   > `rpk` queries and remain **valid**: they do prove tier-local data and
-   > tier-local fusion. Only this one, the visual one, does not.
+   > Two things had to change before this meant anything. The read path now
+   > goes to the tier's own Electric through the tier's own PEP, and **the
+   > tier's PEP now decides against the tier's OWN Topaz** — because pointing
+   > it at the root's made the UI severance-INTOLERANT: cut the link and the
+   > enforcement point could not reach its decision point, so it failed
+   > closed and the screen showed DENIED instead of data. That was ADR-0036
+   > clause 4 violated by the enforcement point, and it regressed this very
+   > rung.
    >
-   > Blocked on the tier-presentation arc's steps 1–3.
+   > **Run rung (i) step 2 while severed.** If the UI's own read path still
+   > returns this tier's data, the reload below is proving what it claims.
 2. **Telemetry keeps flowing.** Re-run the tier row-count query; the
    `last_sample_at` values keep advancing.
 3. **Severity keeps computing.** Re-run the severity query. Values still

@@ -67,13 +67,81 @@ PGDB="${OPENDDIL_PG_DB:-openddil}"
 # Defaults to the overlay beside this checkout; override for another layout.
 EXPECTED_EMPTY="${OPENDDIL_EXPECTED_EMPTY:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)/openddil-demo/ontology/expected-empty.yaml}"
 
+# --- which store? -----------------------------------------------------------
+# ONE GATE PER STORE, AND EVERY TIER HAS ONE.
+#
+# The §7 gate's question is "is every labelled row in THIS DEPLOYMENT
+# labelled?" — and once tiers have their own stores and their own
+# authorizers, "this deployment" stops being one place. A tier decides
+# locally against its own data, so enabling enforcement there is a decision
+# about THAT store, and a pass at the root says nothing about it.
+#
+# That is the same error the script's closing paragraph already refuses one
+# level up: a result about one cluster restated as a claim about another.
+# Tiers make it available one level down, inside a single cluster.
+#
+#   --tier <id>   gate the tier's own store (tier-pg-<id>, user `openddil`)
+#   --all-tiers   gate the root and every tier that has a store, and FAIL if
+#                 any of them does, rather than reporting the first
+TIER=""
+ALL_TIERS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) NS="$2"; shift 2 ;;
     -p) POD="$2"; shift 2 ;;
+    --tier) TIER="$2"; shift 2 ;;
+    --all-tiers) ALL_TIERS=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# The two stores are NOT symmetric and the difference has bitten before: the
+# ROOT store's superuser is `postgres`, a TIER store's is `openddil`. Using
+# the wrong one fails with `FATAL: role "openddil" does not exist`, which
+# reads as a broken gate rather than a wrong flag. (PILOT-RUNBOOK §4 rung
+# (ii) carries the same note for the same reason.)
+if [ -n "$TIER" ]; then
+  REL="${OPENDDIL_RELEASE:-openddil}"
+  POD="${REL}-tier-pg-${TIER}-0"
+  PGUSER="openddil"
+fi
+
+if [ "$ALL_TIERS" -eq 1 ]; then
+  # Discover tiers from the cluster rather than from a list. Same rule as the
+  # table enumeration below: ask the running system, because a hardcoded list
+  # answers a question about the schema of record instead of the deployment.
+  self="$0"
+  tiers="$(kubectl get pods -n "$NS" -o name 2>/dev/null \
+            | sed -n 's|^pod/.*-tier-pg-\(.*\)-0$|\1|p' | sort -u)"
+  echo "gating the root store and $(printf '%s' "$tiers" | grep -c .) tier store(s)"
+  echo
+  rc=0
+  "$self" -n "$NS" || rc=1
+  for t in $tiers; do
+    echo
+    echo "=============================================================="
+    "$self" -n "$NS" --tier "$t" || rc=1
+  done
+  echo
+  n_tiers="$(printf '%s' "$tiers" | grep -c .)"
+  if [ "$rc" -eq 0 ]; then
+    if [ "$n_tiers" -eq 0 ]; then
+      # "ALL STORES PASS" over zero tier stores is a true statement that
+      # reads as a claim about tiers. It is not one. A deployment with
+      # tierNode disabled has exactly one store, and saying so is the
+      # difference between a result and an impression.
+      echo "THE ROOT STORE PASSES. No tier store exists in this deployment,"
+      echo "so this says NOTHING about per-tier enforcement — there is none"
+      echo "to say anything about."
+    else
+      echo "ALL $((n_tiers + 1)) STORES PASS (root + $n_tiers tier)."
+    fi
+  else
+    echo "AT LEAST ONE STORE FAILS — enforcement must not be enabled there." >&2
+    echo "Every store is reported above; the first failure is not the only one." >&2
+  fi
+  exit "$rc"
+fi
 
 # WHICH CLUSTER AM I ABOUT TO ASSERT ABOUT?
 # Printed always, because this gate's output is a claim about ONE deployment
@@ -89,7 +157,8 @@ if [ -z "$CTX" ]; then
 fi
 echo "ADR-0029 completeness gate"
 echo "  context:   $CTX"
-echo "  namespace: $NS   pod: $POD   db: $PGDB"
+echo "  store:     ${TIER:+tier $TIER}${TIER:-root}"
+echo "  namespace: $NS   pod: $POD   db: $PGDB   user: $PGUSER"
 echo
 
 q() { kubectl exec -n "$NS" "$POD" -- psql -U "$PGUSER" -d "$PGDB" -At -c "$1" 2>&1; }
@@ -235,7 +304,9 @@ if [ -n "$declared_tables" ]; then
   done
 fi
 echo
-echo "This is a statement about '$CTX' AND NOTHING ELSE. Deployed schemas"
+echo "This is a statement about the ${TIER:+tier-$TIER}${TIER:-root} store on"
+echo "'$CTX' AND NOTHING ELSE — not about the other stores in this same"
+echo "cluster, which decide locally against their own data. Deployed schemas"
 echo "provably diverge between clusters, so a pass here must not be restated"
 echo "as a claim about another deployment (EXCHANGE-LEDGER X-7)."
 exit 0
