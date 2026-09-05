@@ -937,6 +937,37 @@ reconnect, no reload, no gap. Keep recording until convergence.
 > paths it cuts.** Any component crossing the boundary by another route
 > makes the site look severance-tolerant for the wrong reason, and the
 > stronger the result looks, the less anyone re-examines it.
+>
+> ### BOTH CHANGES LANDED, AND THE RUNG IS RUNNABLE — 2026-09-05
+>
+> Run it as `scripts/check-severance-acceptance.sh <tier>`, which performs
+> (a)-(d) and refuses to report on a sever it could not prove. First green
+> run on the lab:
+>
+> ```
+> (a) tier ADVANCED   17:09:17 -> 17:11:49   (isolated, own data)
+> (b) tier severity computing, 3s old
+> (c) HQ FROZEN at 17:09:21.822678 — identical at two samples 40s apart,
+>     149s behind, 8 rows retained (stale, NOT empty)
+>     control: peer edge-02 fresh at HQ (1s)
+> (d) HQ CONVERGED 17:09:21 -> 17:10:10, drained in 6s
+> ```
+>
+> **A note for whoever runs this and sees the bridge in
+> `CrashLoopBackOff`: that is correct.** The bridge publishes with
+> `max_retries: 0`, so under a real sever it dies rather than queueing in
+> memory. The buffer that grows and drains is the **consumer-group lag on
+> the edge broker** — its committed offset stops advancing and it resumes
+> from there on heal. The edge broker's retention IS the buffer, which is
+> why it survives the bridge process dying. A readiness gate that requires
+> the whole site healthy during severance contradicts the test; the first
+> version of this one did, and failed a site that was 13/14 up and
+> behaving exactly as designed.
+>
+> **Two things this still does not establish**, and both need an eye on a
+> screen rather than a query: that HQ's staleness is VISIBLE to an
+> operator — (c) reads the store, the freshness indicator is a separate
+> claim — and that any tier but the pilot behaves this way.
 
 ---
 
