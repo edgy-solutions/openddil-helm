@@ -35,20 +35,37 @@
 # of record instead, and silently substitutes one for the other.
 #
 # ---------------------------------------------------------------------------
-# EMPTY TABLES PROVE NOTHING, AND ARE REPORTED AS SUCH
+# EMPTY TABLES PROVE NOTHING, AND MUST BE EXPLAINED BY SOMEONE WHO KNOWS
 # ---------------------------------------------------------------------------
 # A zero over zero rows is vacuous. Counting it as evidence is the same error
-# this gate exists to prevent, one layer up. Empty tables are listed
-# separately and never contribute to a pass, and a run where EVERY table is
-# empty exits non-zero: a gate with nothing to check is not a gate that
-# passed, and "nothing is broken" must not stand in for "nothing was
-# examined".
+# this gate exists to prevent, one layer up. So empty tables never contribute
+# to a pass, and a run where EVERY table is empty exits non-zero: a gate with
+# nothing to check is not a gate that passed.
+#
+# Added 2026-09-05: an empty table is now also a FAILURE unless the
+# deployment has DECLARED it empty with a reason. There are two reasons a
+# table is empty —
+#
+#   * nothing here produces that data, which is normal;
+#   * something that should be producing it has stopped, which is a fault;
+#
+# — and from this gate's position they are byte-identical. The deployment is
+# the only party that knows, so it writes the reason down
+# (ontology/expected-empty.yaml) and the gate refuses to report a reassuring
+# zero for a table nobody has explained.
+#
+# The declaration is read from the deployment overlay, NOT from a flag on
+# this script. A reason typed on a command line vanishes; one in a file has
+# an author and a date and shows up in a diff when it becomes untrue.
 set -uo pipefail
 
 NS="${OPENDDIL_NAMESPACE:-openddil}"
 POD="${OPENDDIL_PG_POD:-openddil-postgres-hq-0}"
 PGUSER="${OPENDDIL_PG_USER:-postgres}"
 PGDB="${OPENDDIL_PG_DB:-openddil}"
+# Where the deployment declares which labelled tables it expects to be empty.
+# Defaults to the overlay beside this checkout; override for another layout.
+EXPECTED_EMPTY="${OPENDDIL_EXPECTED_EMPTY:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)/openddil-demo/ontology/expected-empty.yaml}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -76,6 +93,37 @@ echo "  namespace: $NS   pod: $POD   db: $PGDB"
 echo
 
 q() { kubectl exec -n "$NS" "$POD" -- psql -U "$PGUSER" -d "$PGDB" -At -c "$1" 2>&1; }
+
+# Declared-empty tables. Parsed with grep/sed rather than a YAML library so
+# this script keeps its only dependency being kubectl — the same reason the
+# rest of it composes SQL by hand.
+DECLARED_EMPTY=""
+if [ -f "$EXPECTED_EMPTY" ]; then
+  DECLARED_EMPTY="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" \
+    | sed -n 's/^  \([a-z_][a-z_0-9]*\):[[:space:]]*$/\1/p')"
+  echo "  declared-empty: $(printf '%s' "$DECLARED_EMPTY" | tr '\n' ' ')"
+  echo "                  (from $EXPECTED_EMPTY)"
+else
+  echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
+  echo "                  every empty labelled table will be reported as"
+  echo "                  unexplained, which is the intended default."
+fi
+echo
+
+is_declared_empty() {
+  printf '%s\n' "$DECLARED_EMPTY" | grep -qx "$1"
+}
+
+reason_for() {
+  # The declared reason, flattened onto one line for the report. Printing it
+  # here rather than only in the file is deliberate: the operator reading a
+  # gate result is the person who needs to judge whether the reason is still
+  # true.
+  sed -n "/^  $1:/,/^  [a-z_]*:/p" "$EXPECTED_EMPTY" 2>/dev/null \
+    | sed -n '/reason:/,/^    [a-z_]*:/p' \
+    | sed '1s/.*reason:[[:space:]]*>-*//' | sed '$d' \
+    | tr '\n' ' ' | tr -s ' ' | cut -c1-160
+}
 
 # --- step 1: derive the labelled-table set from the LIVE schema -------------
 TABLES="$(q "SELECT table_name FROM information_schema.columns WHERE column_name = 'originator_nation' AND table_schema = 'public' ORDER BY table_name;")"
@@ -115,10 +163,18 @@ printf '%-28s %8s %12s %16s\n' TABLE ROWS NULL_NATION NULL_RELEASABLE
 populated=0
 unlabelled=0
 empty_tables=""
+declared_tables=""
+undeclared_tables=""
 while IFS='|' read -r t n nn nr; do
   [ -n "$t" ] || continue
   if [ "$n" -eq 0 ]; then
-    printf '%-28s %8s %12s %16s   (empty - proves nothing)\n' "$t" "$n" "$nn" "$nr"
+    if is_declared_empty "$t"; then
+      printf '%-28s %8s %12s %16s   (empty - DECLARED)\n' "$t" "$n" "$nn" "$nr"
+      declared_tables="$declared_tables $t"
+    else
+      printf '%-28s %8s %12s %16s   <-- EMPTY, UNDECLARED\n' "$t" "$n" "$nn" "$nr"
+      undeclared_tables="$undeclared_tables $t"
+    fi
     empty_tables="$empty_tables $t"
     continue
   fi
@@ -155,9 +211,28 @@ if [ "$unlabelled" -gt 0 ]; then
   exit 1
 fi
 
+if [ -n "$undeclared_tables" ]; then
+  echo "GATE FAILS: labelled table(s) empty with no declared reason:$undeclared_tables"
+  echo
+  echo "An empty table and a stalled producer look identical from here. Only"
+  echo "the deployment knows which this is, so the deployment has to say —"
+  echo "add each table to $EXPECTED_EMPTY with a reason, a producer and a"
+  echo "date, or find out why the producer stopped."
+  echo
+  echo "That file is NOT a suppression list. A row in it is a dated claim"
+  echo "that a named producer is absent for a named reason, and it shows up"
+  echo "in a diff when it stops being true."
+  exit 1
+fi
+
 echo "GATE PASSES: $populated populated table(s), zero unlabelled values."
-if [ -n "$empty_tables" ]; then
-  echo "Empty, and therefore excluded from that result:$empty_tables"
+if [ -n "$declared_tables" ]; then
+  echo
+  echo "Empty by declaration, and excluded from that result:"
+  for t in $declared_tables; do
+    printf '  %s\n' "$t"
+    printf '      %s\n' "$(reason_for "$t")"
+  done
 fi
 echo
 echo "This is a statement about '$CTX' AND NOTHING ELSE. Deployed schemas"
