@@ -127,13 +127,26 @@ subPath-mounts /shared/<dst> at the target absolute path.
     - |
       set -e
       {{- range .paths }}
-      # {{ .src }} -> /shared/{{ .dst }}
+      # {{ .src }} -> /shared/{{ .dst }}{{ if .overlay }} (OVERLAY){{ end }}
       mkdir -p "$(dirname /shared/{{ .dst }})"
+      {{- if .overlay }}
+      # OVERLAY: merge CONTENTS into an existing destination directory.
+      # `cp -r src dst` on an existing dst copies the directory INTO it
+      # (/shared/ontology/ontology/), which is silent and produces a tree
+      # nothing reads. The trailing `/.` is what makes this a merge.
+      #
+      # Overlay entries must be listed AFTER the base they overlay; the
+      # later copy wins on a filename collision, which is the intended
+      # precedence (a deployment may override a shipped default).
+      mkdir -p "/shared/{{ .dst }}"
+      cp -r "/bundle/{{ .src }}/." "/shared/{{ .dst }}/"
+      {{- else }}
       if [ -f "/bundle/{{ .src }}" ]; then
         cp "/bundle/{{ .src }}" "/shared/{{ .dst }}"
       else
         cp -r "/bundle/{{ .src }}" "/shared/{{ .dst }}"
       fi
+      {{- end }}
       {{- end }}
   resources:
     {{- toYaml .root.Values.bundle.initResources | nindent 4 }}

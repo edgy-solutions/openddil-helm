@@ -632,6 +632,7 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
+            (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
           ) "root" .) | nindent 8 }}
       containers:
         - name: logistics-fusion

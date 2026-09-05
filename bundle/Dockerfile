@@ -44,9 +44,20 @@ COPY openddil-tactical-agents/hub/restate_hub.py /bundle/agents/hub/restate_hub.
 
 # ----- openddil-demo configs ----------------------------------------------
 # ONLY what the chart actually loads. Verified against every `"src" "demo/..."`
-# in openddil-demo/templates/ — the chart reads exactly two paths from here.
+# in openddil-demo/templates/ — the chart reads exactly three paths from here.
 COPY openddil-demo/openddil-base-connect.yaml    /bundle/demo/openddil-base-connect.yaml
 COPY openddil-demo/dynamic-mappings              /bundle/demo/dynamic-mappings/
+
+# Deployment ontology OVERLAY (ADR-0029 §3). Copied on top of
+# contracts/ontology by the chart's bundleInit, so a deployment can declare
+# facts about ITS OWN fleet — releasability labels, first — without those
+# facts entering the OSS contract layer.
+#
+# The distinction is load-bearing, not tidiness: openddil-contracts holds the
+# shared vocabulary every deployment agrees on, and "which nation owns
+# dis:1:1:1000" is not that. ADR-0029 §3 says the core defines the field and
+# the discipline, not any particular naming convention or fleet.
+COPY openddil-demo/ontology                      /bundle/demo/ontology/
 
 # REMOVED (GD-09): redpanda-connect-edge-01/02/03.yaml and restate-config.toml.
 #

@@ -54,6 +54,7 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
+            (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
           ) "root" $root) | nindent 8 }}
       containers:
         - name: sensor-ingest
@@ -163,6 +164,7 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/proto"      "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
+            (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
             (dict "src" "demo/openddil-base-connect.yaml" "dst" "connect.yaml")
             (dict "src" "demo/dynamic-mappings" "dst" "mappings")
           ) "root" $root) | nindent 8 }}

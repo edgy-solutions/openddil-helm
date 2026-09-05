@@ -20,6 +20,32 @@ PY=$(command -v python3 || command -v python || echo py)
 
 render() { helm template t "$CHART" "$@" 2>/dev/null; }
 
+# EVERY GUARD BELOW IS VACUOUS OVER AN EMPTY RENDER. "0 objects, 0 kinds,
+# balanced" is a true statement and a useless one, and guards 1 and 2 printed
+# exactly that — as `ok` — on a machine where `helm` was not installed, while
+# guard 3 was the only one that refused. Found 2026-09-04 by running this
+# script somewhere helm was missing.
+#
+# Same shape as everything else in this corpus about probes: the healthy
+# reading and the did-not-run reading were byte-identical from the observer's
+# position. Checked ONCE here rather than in each guard, so a guard added
+# later inherits the floor instead of having to remember it.
+require_nonempty_render() {
+  if ! command -v helm >/dev/null 2>&1; then
+    echo "helm not found — the guards below would all pass vacuously" >&2
+    exit 1
+  fi
+  local n
+  n=$(render | grep -c "^kind:")
+  if [ "$n" -lt 1 ]; then
+    echo "render produced no objects — the guards below would all pass" >&2
+    echo "vacuously. Run 'helm template' by hand to see the real error." >&2
+    exit 1
+  fi
+  echo "render: $n objects — guards below have something to check"
+}
+require_nonempty_render
+
 # --- guard 1: document integrity -------------------------------------------
 # THE DEFECT MODELLED: a missing `---` between loop iterations. Two objects
 # merge into one YAML document, the later keys win, and an object SILENTLY
