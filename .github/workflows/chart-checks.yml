@@ -18,11 +18,13 @@ on:
     paths:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
+      - "scripts/check-tier-config.sh"
       - ".github/workflows/chart-checks.yml"
   pull_request:
     paths:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
+      - "scripts/check-tier-config.sh"
       - ".github/workflows/chart-checks.yml"
   workflow_dispatch:
 
@@ -48,3 +50,17 @@ jobs:
       # The guards lint cannot express.
       - name: Render integrity guards
         run: ./scripts/check-chart-render.sh
+
+      # Does the chart emit a tier config the FRONTEND will accept?
+      #
+      # The chart writes deployment.json and the frontend parses it — two
+      # artifacts in two repositories agreeing by convention and by nothing
+      # else. UD-9 is what that costs when they drift: a per-tier env var
+      # read by nothing, every tier's UI silently on the root's store, no
+      # error at any layer.
+      #
+      # Also carries ADR-0033's forcing function: a FOURTH tier, supplied at
+      # render time and present in no committed values file, must produce a
+      # well-formed config with no code change.
+      - name: Tier config contract
+        run: ./scripts/check-tier-config.sh
