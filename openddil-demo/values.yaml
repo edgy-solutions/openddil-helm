@@ -833,6 +833,17 @@ releasability:
   # the usual repair for a mismatch is to widen the client to a wildcard.
   publicOrigin: ""
 
+  # Which entitlements corpus the authorizer loads, by basename under
+  # policy/. `users` is the one a deployment runs. `users-promoted` is a
+  # rehearsal aid for the demo's last beat and differs by exactly one list.
+  #
+  # A REAL DEPLOYMENT HAS ONE CORPUS and changes it by a pull request against
+  # that file — which is the whole basis of ADR-0029 §5's claim that every
+  # entitlement has a named author, a reviewer and a date. Two files that
+  # both claimed to be current would be the two-truths failure this project
+  # keeps writing about.
+  policyVariant: users
+
   # --- authentication ---------------------------------------------------------
   # OFF by default, which leaves the PEP in `header` mode: the subject arrives
   # in a trusted header and the PEP is only safe where it is unreachable from

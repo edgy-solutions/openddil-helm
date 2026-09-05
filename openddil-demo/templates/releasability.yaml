@@ -155,8 +155,57 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
             (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
-            (dict "src" "demo/policy/users.yaml"         "dst" "policy/openddil/data.yaml")
           ) "root" $root) | nindent 8 }}
+        # THE ENTITLEMENTS CORPUS, SELECTED BY ENV RATHER THAN BY TEMPLATE.
+        #
+        # A separate init container from the one above, for one reason: the
+        # variant must be changeable with a single command against a running
+        # release, so the demo's last beat ("policy is configuration") is one
+        # keystroke rather than a helm upgrade.
+        #
+        #   kubectl set env deploy/<release>-topaz-hq -c policy-loader \
+        #       OPENDDIL_POLICY_VARIANT=users-promoted
+        #
+        # which rolls the authorizer with the other corpus mounted.
+        #
+        # THE RENAME IS STILL CALLED OUT. The reviewed artifact is
+        # policy/<variant>.yaml; OPA's bundle convention names data files
+        # `data.yaml`, and the .manifest declares roots ["openddil"], so data
+        # outside that root is refused outright. Same content, different name
+        # and path — said out loud here and in users.yaml's header, because a
+        # silent rename in transport is how a reviewed file and a running file
+        # drift apart.
+        - name: policy-loader
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
+          env:
+            - name: OPENDDIL_POLICY_VARIANT
+              value: {{ $root.Values.releasability.policyVariant | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              src="/bundle/demo/policy/${OPENDDIL_POLICY_VARIANT}.yaml"
+              # A variant name that does not exist would otherwise produce an
+              # EMPTY data document, and an empty corpus is a working
+              # authorizer that denies everyone — indistinguishable from a
+              # correctly-enforced revocation, and arriving without an error.
+              # Refuse instead.
+              if [ ! -f "$src" ]; then
+                echo "FATAL: no entitlements corpus at $src" >&2
+                echo "available:" >&2
+                ls /bundle/demo/policy/*.yaml >&2
+                exit 1
+              fi
+              mkdir -p /shared/policy/openddil
+              cp "$src" /shared/policy/openddil/data.yaml
+              echo "entitlements corpus: ${OPENDDIL_POLICY_VARIANT}.yaml -> /policy/openddil/data.yaml"
+          resources:
+            {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
       containers:
         - name: topaz
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.topaz.image.repository "tag" $root.Values.releasability.topaz.image.tag "digest" $root.Values.releasability.topaz.image.digest "root" $root) }}
