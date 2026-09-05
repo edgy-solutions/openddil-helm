@@ -59,6 +59,28 @@
 # an author and a date and shows up in a diff when it becomes untrue.
 set -uo pipefail
 
+# ---------------------------------------------------------------------------
+# WHY THIS FILE USES `grep -q PATTERN <<<"$var"` AND NEVER `printf | grep -q`
+# ---------------------------------------------------------------------------
+# `set -o pipefail` and `grep -q` are a false-negative generator, and the
+# failure is SIZE-DEPENDENT, which is the worst property it could have.
+#
+# `grep -q` exits on the FIRST match and closes its input. The upstream
+# `printf` then takes SIGPIPE and exits 141. With `pipefail` the pipeline
+# reports 141 — so a pipeline that MATCHED reports FAILURE.
+#
+# It only happens when the data exceeds the pipe buffer (~64KB). Below that,
+# printf finishes writing before grep exits, there is no SIGPIPE, and the
+# check is correct. So every one of these worked on small inputs and would
+# have started lying as the fleet grew.
+#
+# The direction of the lie is what makes it worth this comment. In the
+# `match && bad || ok` shape a SIGPIPE reads as "no match" and takes the
+# `ok` branch — REPORTING A PASS ON A REAL LEAK. A check that gets quieter
+# as the data gets bigger is the exact opposite of what these files are for.
+#
+# A here-string is not a pipeline, so `pipefail` has nothing to report.
+
 NS="${OPENDDIL_NAMESPACE:-openddil}"
 POD="${OPENDDIL_PG_POD:-openddil-postgres-hq-0}"
 PGUSER="${OPENDDIL_PG_USER:-postgres}"
@@ -180,7 +202,7 @@ fi
 echo
 
 is_declared_empty() {
-  printf '%s\n' "$DECLARED_EMPTY" | grep -qx "$1"
+  grep -qx "$1" <<<"$DECLARED_EMPTY"
 }
 
 reason_for() {
@@ -196,7 +218,7 @@ reason_for() {
 
 # --- step 1: derive the labelled-table set from the LIVE schema -------------
 TABLES="$(q "SELECT table_name FROM information_schema.columns WHERE column_name = 'originator_nation' AND table_schema = 'public' ORDER BY table_name;")"
-if printf '%s' "$TABLES" | grep -qiE "error|refused|not found|Unable to connect"; then
+if grep -qiE "error|refused|not found|Unable to connect" <<<"$TABLES"; then
   echo "could not read information_schema — the gate DID NOT RUN." >&2
   echo "This is the absence of an answer, not a pass and not a fail:" >&2
   printf '%s\n' "$TABLES" | sed 's/^/    /' >&2
@@ -221,7 +243,7 @@ for t in $TABLES; do
   SQL="$SQL SELECT '$t' AS t, count(*) AS n, count(*) FILTER (WHERE originator_nation IS NULL) AS nn, count(*) FILTER (WHERE releasable_to IS NULL) AS nr FROM \"$t\""
 done
 ROWS="$(q "$SQL ORDER BY t;")"
-if printf '%s' "$ROWS" | grep -qiE "^ERROR|refused|Unable to connect"; then
+if grep -qiE "^ERROR|refused|Unable to connect" <<<"$ROWS"; then
   echo "counting query failed — the gate DID NOT RUN:" >&2
   printf '%s\n' "$ROWS" | sed 's/^/    /' >&2
   exit 1

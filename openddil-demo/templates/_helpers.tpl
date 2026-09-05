@@ -222,3 +222,26 @@ makes that combination fail visibly instead.
 {{- define "openddil.tierReadPort" -}}
 {{- if .root.Values.releasability.enabled -}}8080{{- else -}}3000{{- end -}}
 {{- end }}
+
+{{/*
+Is this edge managed by a tier node of its own?
+
+THE DETECTION CUTOVER (UD-10). An edge with a tier node computes its own
+severity and CM state locally. The root MUST NOT also compute them from the
+same raw stream — and this predicate is the one place that decides, so the
+root's subscription list and the bridge's topic list cannot disagree about
+which edges those are.
+
+`tierNode.tiers` empty means every edge, matching the tier-node kit's own
+rule.
+
+Usage: include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)
+       -> "true" or ""
+*/}}
+{{- define "openddil.isTierManaged" -}}
+{{- if .root.Values.tierNode.enabled -}}
+{{- if empty .root.Values.tierNode.tiers -}}true
+{{- else if has .id .root.Values.tierNode.tiers -}}true
+{{- end -}}
+{{- end -}}
+{{- end }}

@@ -28,9 +28,46 @@
     (include "openddil.svcDomain" .)
     (int .Values.postgresHq.port)
     .Values.postgresHq.auth.database }}
+{{/*
+THE DETECTION CUTOVER — UD-10, and ADR-0026's "coupled interim mechanisms
+retire together" applied to the detection reachback.
+
+This list drives the root's cm-service and fusion Restate subscriptions:
+for every edge in it, the ROOT reaches DOWN into that edge's broker and
+computes CM state and severity from its raw stream. That downward reach was
+the ADR-0034 interim — detection ran once, centrally, because no tier had a
+detection plane of its own. Tier-local detection is its REPLACEMENT, and a
+replacement that leaves the interim running is not a replacement.
+
+⚠ AN EDGE WITH A TIER NODE IS SKIPPED HERE, AND THE ALTERNATIVE IS WORSE
+THAN IT LOOKS. Leaving it in produced UD-10: the tier's Restate and the
+root's Restate registered the SAME consumer-group id against the SAME
+one-partition topic, so Kafka gave the partition to exactly one of them and
+the other went silent while reporting healthy.
+
+The obvious repair — give the tier a distinct group id — is REJECTED, and
+not merely because it leaves the design undecided. Distinct groups make BOTH
+consumers receive every message, so the tier computes severity for this edge
+AND the root computes severity for this edge, independently, from one raw
+stream. Two severity truths for one asset, arbitrated by whichever projector
+wrote last. That is the two-truths failure this project has refused every
+time it appeared — two authz corpora, two read paths, two policy stores —
+arriving in the detection plane wearing a one-line config fix.
+
+What the root gets instead is the tier's DERIVED state, carried up by the
+bridge (see edge.yaml): `asset-logistics-status` and `asset-cm-state`, with
+releasability labels already stamped by the tier's own fusion and
+cm-service. Same topic names at HQ, different producer — so the root's
+projector and its HQ-cluster fusion subscription need no change at all.
+
+Resolves GD-08 for tier-managed edges as a side effect, which is a sign this
+is the right cut rather than a workaround for the symptom.
+*/}}
 {{- $cmEdgeClusters := list }}
 {{- range .Values.edges }}
+{{- if not (include "openddil.isTierManaged" (dict "id" .id "root" $)) }}
 {{- $cmEdgeClusters = append $cmEdgeClusters (printf "%s=%s-redpanda-%s:%d" .id $.Release.Name .id (int $.Values.redpandaEdge.internalPort)) }}
+{{- end }}
 {{- end }}
 
 # ===========================================================================

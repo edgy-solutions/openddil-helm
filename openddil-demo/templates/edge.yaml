@@ -324,6 +324,24 @@ data:
         topics:
           - raw-sensor-stream
           - tactical-events
+          {{- if include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) }}
+          # THE TIER'S DERIVED STATE, carried up because the root no longer
+          # computes it for this edge (see hub.yaml, the detection cutover).
+          #
+          # The root's cm-service and fusion have retired their downward
+          # subscriptions here; this is what replaces them. Same topic names
+          # on the HQ broker as when the root produced them, so the HQ
+          # projector and fusion's HQ-cluster subscription are unchanged —
+          # only the producer moved, from the root reaching down to the tier
+          # publishing up.
+          #
+          # Labels are already stamped: the tier's own fusion and cm-service
+          # propagate releasability onto these rows before they leave the
+          # edge, so the completeness gate's question is answered at the tier
+          # and the answer travels with the data.
+          - asset-logistics-status
+          - asset-cm-state
+          {{- end }}
         consumer_group: "bridge-group-{{ $edge.id }}"
 
     output:

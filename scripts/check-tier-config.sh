@@ -31,6 +31,28 @@
 # half each, neither duplicating the other.
 set -uo pipefail
 
+# ---------------------------------------------------------------------------
+# WHY THIS FILE USES `grep -q PATTERN <<<"$var"` AND NEVER `printf | grep -q`
+# ---------------------------------------------------------------------------
+# `set -o pipefail` and `grep -q` are a false-negative generator, and the
+# failure is SIZE-DEPENDENT, which is the worst property it could have.
+#
+# `grep -q` exits on the FIRST match and closes its input. The upstream
+# `printf` then takes SIGPIPE and exits 141. With `pipefail` the pipeline
+# reports 141 — so a pipeline that MATCHED reports FAILURE.
+#
+# It only happens when the data exceeds the pipe buffer (~64KB). Below that,
+# printf finishes writing before grep exits, there is no SIGPIPE, and the
+# check is correct. So every one of these worked on small inputs and would
+# have started lying as the fleet grew.
+#
+# The direction of the lie is what makes it worth this comment. In the
+# `match && bad || ok` shape a SIGPIPE reads as "no match" and takes the
+# `ok` branch — REPORTING A PASS ON A REAL LEAK. A check that gets quieter
+# as the data gets bigger is the exact opposite of what these files are for.
+#
+# A here-string is not a pipeline, so `pipefail` has nothing to report.
+
 CHART="$(cd "$(dirname "$0")/.." && pwd)/openddil-demo"
 PY=$(command -v python3 || command -v python || echo py)
 fail=0
@@ -151,6 +173,72 @@ if len(shapes) < 2:
     sys.exit(1)
 print(f"  ok   {len(shapes)} distinct shapes across {len(seen)} tiers")
 ' || fail=1
+
+# ---------------------------------------------------------------------------
+# THE DETECTION CUTOVER INVARIANT (UD-10)
+# ---------------------------------------------------------------------------
+# NO EDGE MAY APPEAR IN BOTH the root's subscription list and the
+# tier-managed set. If one does, two detection planes read one raw stream —
+# and the two ways that goes wrong are opposite and both bad:
+#
+#   same consumer group     one wins the partition, the other freezes while
+#                           reporting healthy. And it INVERTS UNDER
+#                           SEVERANCE: cut the link, the root's consumer
+#                           drops out, the rebalance hands the partition to
+#                           the tier, and the tier starts working. The tier
+#                           functions ONLY WHILE SEVERED. A severance
+#                           recording would pass — because severance removed
+#                           the competitor, not because the tier is
+#                           severance-tolerant.
+#
+#   distinct groups         both receive every message, both compute
+#                           severity for the same asset, and which answer HQ
+#                           shows is decided by whichever projector wrote
+#                           last. Two truths, arbitrated by write order.
+#
+# The first is the defect that was found. The second is the "obvious fix"
+# that would have replaced it. This guard refuses both by refusing the
+# overlap that produces either.
+echo
+echo "detection cutover invariant"
+for tm in "edge-01" "edge-02"; do
+  out="$(helm template t "$CHART" --set tierNode.enabled=true \
+          --set "tierNode.tiers[0]=$tm" 2>/dev/null)"
+  list="$(printf '%s' "$out" | grep -A1 'name: CM_EDGE_CLUSTERS' \
+          | grep -o 'value: .*' | head -1)"
+  if [ -z "$list" ]; then
+    echo "  FAIL: no CM_EDGE_CLUSTERS rendered — the invariant is unchecked" >&2
+    fail=1
+    continue
+  fi
+  if grep -q "$tm=" <<<"$list"; then
+    echo "  FAIL [$tm]: the root still subscribes to a TIER-MANAGED edge." >&2
+    echo "        Two detection planes on one raw stream. $list" >&2
+    fail=1
+  else
+    echo "  ok   [$tm] tier-managed: the root's list excludes it"
+  fi
+  # And the derived state must actually be carried up, or HQ simply loses
+  # that edge's severity and CM state — a silent hole rather than a
+  # duplicate one.
+  if grep -q 'asset-logistics-status' <<<"$out"; then
+    echo "  ok   [$tm] the bridge carries the tier's derived state up"
+  else
+    echo "  FAIL [$tm]: the root stopped computing AND the bridge carries" >&2
+    echo "        nothing — HQ would lose this edge entirely." >&2
+    fail=1
+  fi
+done
+
+# The negative case matters as much: with no tier node, NOTHING changes.
+out="$(helm template t "$CHART" 2>/dev/null)"
+n="$(printf '%s' "$out" | grep -A1 'name: CM_EDGE_CLUSTERS' | grep -o 'edge-[0-9]*=' | sort -u | wc -l)"
+if [ "$n" -lt 3 ]; then
+  echo "  FAIL: with no tier node the root should subscribe to every edge; got $n" >&2
+  fail=1
+else
+  echo "  ok   no tier node: the root subscribes to all $n edges, unchanged"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then
