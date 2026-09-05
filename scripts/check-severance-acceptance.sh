@@ -47,6 +47,7 @@ if [ -z "$TIER" ]; then
 fi
 
 fail=0
+c_froze=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }
 bad()  { note "FAIL" "$1"; fail=1; }
 ok()   { note "ok" "$1"; }
@@ -96,6 +97,17 @@ if [ -z "$b_hqlag" ] || [ "$b_hqlag" -lt 0 ] 2>/dev/null || [ "$b_hqlag" -gt 60 
   note "" "at HQ is projecting it — fix that before running this."
   exit 1
 fi
+# A PEER EDGE, used as the control for (c). If HQ's view of ${TIER} goes
+# stale we need to know that HQ ITSELF is still ingesting -- otherwise a
+# stopped projector, a wedged HQ broker or a dead postgres would all
+# present as "the severed edge went stale" and pass.
+PEER="$(hq_q "select edge_id from telemetry_latest_state where edge_id <> '${TIER}' group by 1 order by max(last_sample_at) desc limit 1;")"
+if [ -z "$PEER" ]; then
+  bad "HQ holds rows for no edge other than ${TIER} — (c) would have no"
+  note "" "control, and an HQ-wide outage would read as a successful sever."
+  exit 1
+fi
+ok "peer edge for control: ${PEER}"
 ok "tier newest=${b_tier}"
 ok "HQ   newest=${b_hq}  rows=${b_rows}  lag=${b_hqlag}s (fresh — (c) can fail)"
 
@@ -115,6 +127,7 @@ d_tier="$(tier_q "$TIER_NEWEST")"
 d_sevage="$(tier_q "$TIER_SEV_AGE")"
 d_hq="$(hq_q "$HQ_NEWEST")"
 d_rows="$(hq_q "$HQ_ROWS")"
+d_peerlag="$(hq_q "select coalesce(extract(epoch from now()-max(last_sample_at))::int,-1) from telemetry_latest_state where edge_id='${PEER}';")"
 
 echo
 echo "during severance"
@@ -138,8 +151,14 @@ elif [ "$d_hq" != "$b_hq" ]; then
   bad "(c) HQ is STILL FRESH (${b_hq} -> ${d_hq}) while the site is severed."
   note "" "A path still crosses the boundary. Every severance result from"
   note "" "this deployment is void until it is found."
+elif [ -z "$d_peerlag" ] || [ "$d_peerlag" -lt 0 ] 2>/dev/null || [ "$d_peerlag" -gt 90 ] 2>/dev/null; then
+  bad "(c) ${TIER} froze at HQ, but so did the peer ${PEER} (${d_peerlag:-?}s)."
+  note "" "That is an HQ-wide outage wearing a successful sever's clothes."
 else
   ok "(c) HQ STALE and intact — frozen at ${d_hq}, ${d_rows} rows retained"
+  note "" "control: peer ${PEER} still fresh at HQ (${d_peerlag}s) — HQ is"
+  note "" "healthy and ingesting, so this staleness is ${TIER}-specific"
+  c_froze=1
 fi
 
 # --- 2. heal ----------------------------------------------------------------
@@ -160,9 +179,16 @@ done
 
 echo
 echo "after heal"
-if [ "$converged" -eq 1 ]; then
+if [ "$converged" -eq 1 ] && [ "$c_froze" -eq 1 ]; then
   ok "(d) HQ CONVERGED — ${d_hq} -> ${a_hq} (drained after $((i*6))s)"
   note "" "non-vacuous: HQ was observed frozen at ${d_hq} first"
+elif [ "$converged" -eq 1 ]; then
+  # HQ resumed advancing, but it had never stopped. That is not a
+  # convergence result -- it is the original rung (iv), which passed for
+  # months by comparing a moving value to itself. Reporting it as a pass
+  # here would launder a failed (c) into a green (d).
+  bad "(d) VACUOUS — HQ advanced after heal, but (c) never saw it freeze."
+  note "" "There is nothing to converge from. This is not evidence."
 else
   bad "(d) HQ did not resume advancing within 120s of heal (stuck at ${d_hq})"
 fi

@@ -37,6 +37,28 @@
 # cut. If that exception is ever widened to something that is not a sensor
 # stand-in, this test stops meaning anything.
 #
+# A POLICY IS NOT A CUT UNTIL EVERY FLOW RE-ESTABLISHES UNDER IT
+# ---------------------------------------------------------------
+# NetworkPolicy filters CONNECTIONS, and conntrack lets ESTABLISHED ones
+# through. Applying the policy to running pods stops nothing that is
+# already open. Measured here: with the policy applied and the site
+# "proven" isolated, the edge->HQ bridge kept publishing — the HQ topic
+# high-watermark went 92 -> 99 during severance. Deleting the bridge pod,
+# with the same policy still in place, froze it at 103 immediately.
+#
+# The reason this was so convincing is worth stating: the two-sided probe
+# below OPENS A NEW CONNECTION, so it correctly reported the policy was
+# live. It could not report that the traffic which mattered had never
+# stopped. *A control that tests the mechanism you installed is not a
+# control on the outcome you wanted.*
+#
+# So `on` restarts every pod in the site after applying the policy. That
+# also kills inbound sockets held by ROOT pods, which nothing on the site
+# side could otherwise close — the site pod is the server, and deleting
+# it is the only lever the site has. Deliberately NOT an enumeration of
+# which pods hold cross-boundary connections: the whole point is to catch
+# the one nobody listed.
+#
 # PROVING THE CUT
 # ---------------
 # `on` does not trust the policy. It probes from inside a site pod, both
@@ -185,7 +207,50 @@ case "$ACTION" in
       echo "FAIL: policy apply rejected" >&2
       exit 1
     fi
-    sleep 5
+    sleep 3
+
+    # Force every flow to re-establish under the policy. Without this the
+    # policy is applied and the traffic continues; see the header.
+    join="$(printf '%s,' "${SITE[@]}")"; join="${join%,}"
+    echo "  restarting ${#SITE[@]} site pod(s) so open connections re-establish under the policy"
+    kubectl delete pod -n "$NS"       -l "app.kubernetes.io/component in (${join})" --wait=false >/dev/null 2>&1
+
+    # Wait for the site to come back, or the measurements that follow are
+    # of a site that is down rather than a site that is isolated.
+    #
+    # TWO EXCLUSIONS, and the second is the interesting one:
+    #   * Completed pods (finished Jobs) are not workloads and never
+    #     become Ready.
+    #   * THE BRIDGE IS EXPECTED TO FAIL. Its entire job is to cross the
+    #     boundary this policy closes, so under a real sever it cannot
+    #     start. Requiring the WHOLE site to be healthy contradicts what
+    #     the test is for -- the first version of this gate did exactly
+    #     that and reported "site did not return to Ready" about a site
+    #     that was 13/14 up and behaving correctly.
+    deadline=$(( $(date +%s) + 300 ))
+    while :; do
+      notready="$(kubectl get pods -n "$NS"         -l "app.kubernetes.io/component in (${join})"         --no-headers 2>/dev/null         | grep -v "Completed"         | grep -v "edge-hq-bridge"         | grep -vc " Running")"
+      [ "${notready:-1}" -eq 0 ] && break
+      if [ "$(date +%s)" -gt "$deadline" ]; then
+        echo "FAIL: the site did not return to Ready within 300s" >&2
+        echo "      (${notready} serving pod(s) still not Running)." >&2
+        echo "      Refusing to measure a severed site that is also down:" >&2
+        echo "      a frozen tier would then be this, not a finding." >&2
+        kubectl get pods -n "$NS" -l "app.kubernetes.io/component in (${join})"           --no-headers 2>/dev/null | grep -v "Completed" | grep -v " Running" >&2
+        exit 1
+      fi
+      sleep 6
+    done
+    echo "  site serving pods are Ready again, isolated"
+
+    # CORROBORATION, not a requirement: the bridge SHOULD be unhealthy.
+    # If it is happily Running while the site is severed, it is still
+    # reaching HQ and the cut is not what it claims.
+    bstate="$(kubectl get pods -n "$NS" -l app.kubernetes.io/component=edge-hq-bridge-${TIER}                 --no-headers 2>/dev/null | grep -v Completed | awk '{print $3}' | head -1)"
+    case "${bstate:-missing}" in
+      Running) echo "  WARNING: the bridge is Running while severed — it may still reach HQ" >&2 ;;
+      *)       echo "  ok: the bridge is ${bstate:-absent}, as a severed bridge should be" ;;
+    esac
 
     r="$(probe "$ROOT_HOST" "$ROOT_PORT")"
     s="$(probe "$SITE_HOST" "$SITE_PORT")"
