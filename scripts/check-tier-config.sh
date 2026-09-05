@@ -257,6 +257,20 @@ WHAT THIS DID NOT CHECK, and it matters:
     nonetheless useful today.
   * That the UI actually reads the store its config names. That is the
     conjunction pilot rung (i) infers rather than observes.
+  * WHETHER THE ROOT STILL REACHES INTO A TIER-MANAGED EDGE BY SOME OTHER
+    PATH. This checks the SUBSCRIPTION list only. The root also runs a
+    per-edge PROJECTOR deployment that points straight at the edge broker
+    and writes the root store, and it is NOT gated on isTierManaged -- so
+    the cutover this file guards is, as of 2026-09-05, half of the cut.
+    See UD-11. Read the "ok" lines above as "the detection plane moved",
+    never as "the root is off this edge".
+
+    This omission is not an oversight to fix by adding one more assertion:
+    this guard was written in the same sitting as the cutover, from the
+    same understanding, so it tests what that understanding had already
+    seen. It catches a REGRESSION of the cut and cannot catch the cut
+    being INCOMPLETE. Only a live severance can -- assert the root's view
+    of the edge goes STALE. Freshness names no source.
 NOTE
 else
   echo "tier config check: FAILED"
