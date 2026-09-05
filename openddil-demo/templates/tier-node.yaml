@@ -673,6 +673,15 @@ spec:
             {{- if $root.Values.releasability.enabled }}
             - name: OPENDDIL_PEP_UPSTREAM
               value: {{ printf "%s-tier-pep-%s" $root.Release.Name $tier.id | quote }}
+            # THE SHELL REQUIRES A SESSION, not just the data paths.
+            # Set from the SAME condition that puts this tier's PEP into
+            # oidc mode, because the gate is only satisfiable when something
+            # can answer /auth/me: with no PEP that is a 502 and in header
+            # mode a 404, and nginx's auth_request turns either into a 500
+            # for the whole app. Tying them to one condition is what stops a
+            # deployment having a gate with nothing behind it.
+            - name: OPENDDIL_SESSION_GATE
+              value: {{ ternary "on" "off" (and $root.Values.releasability.oidc.enabled (not (empty $tier.publicOrigin))) | quote }}
             {{- end }}
           volumeMounts:
             # The tier's identity, delivered on the channel that actually
