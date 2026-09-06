@@ -231,6 +231,73 @@ if [ -z "$TABLES" ]; then
   exit 1
 fi
 
+# --- step 1b: THE TABLES THIS GATE COULD NOT SEE ----------------------------
+# The enumeration above asks for tables that HAVE `originator_nation`, and
+# then checks those for NULLs. It therefore answers "are the labelled tables
+# labelled?" while being read as "is the served data partitionable?" — and
+# those are different questions with different answers.
+#
+# A table with NO label columns at all was never in the enumeration, so the
+# gate said complete while nine of fourteen served tables were answering 502
+# through the gateway: the predicate names columns they do not have, Electric
+# rejects the query, and the browser renders a transport failure as an
+# absence of data. A 502 found what this gate could not.
+#
+# UNLABELABLE IS A FINDING, NOT A SKIP. It is reported here and, when the
+# deployment declares `releasability.labeledTables`, reconciled against it —
+# a list in a chart and columns in a schema are two copies of one fact.
+echo
+echo "labelability of every table in the store"
+ALL="$(q "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name;")"
+LABELLED_BOTH="$(q "SELECT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name IN ('originator_nation','releasable_to') GROUP BY table_name HAVING count(DISTINCT column_name)=2 ORDER BY table_name;")"
+unlabelable=""
+for t in $ALL; do
+  if ! grep -qx "$t" <<<"$LABELLED_BOTH"; then
+    unlabelable="$unlabelable $t"
+  fi
+done
+n_lab="$(printf '%s
+' $LABELLED_BOTH | grep -c . || true)"
+n_unl="$(printf '%s
+' $unlabelable | grep -c . || true)"
+echo "  labelable   : $n_lab — $(printf '%s ' $LABELLED_BOTH)"
+if [ -n "$unlabelable" ]; then
+  echo "  UNLABELABLE : $n_unl —$unlabelable"
+  echo "        These carry neither originator_nation nor releasable_to, so the"
+  echo "        read path CANNOT filter them. Any that the gateway serves will"
+  echo "        fail at Electric and reach the browser as a transport error."
+  echo "        Declaring them in releasability.labeledTables would be wrong;"
+  echo "        the fix is either labels on the rows or an explicit refusal."
+fi
+
+# Reconcile with what the deployment TELLS the gateway it may serve.
+if [ -n "${OPENDDIL_LABELED_TABLES:-}" ]; then
+  echo "  declared    : $OPENDDIL_LABELED_TABLES"
+  drift=0
+  # Membership by exact comma-delimited match, not by word-boundary regex.
+  # `` treats `_` as a word character, so `asset_cm_state` matched nothing
+  # inside a comma list and every declared table reported as missing — the
+  # check failed loudly and wrongly, which is at least the right direction.
+  for t in $(printf '%s' "$OPENDDIL_LABELED_TABLES" | tr ',' ' '); do
+    grep -qx "$t" <<<"$LABELLED_BOTH" || {
+      echo "  FAIL: '$t' is declared servable but has no label columns." >&2
+      drift=1; }
+  done
+  for t in $LABELLED_BOTH; do
+    case ",$OPENDDIL_LABELED_TABLES," in
+      *",$t,"*) : ;;
+      *) echo "  FAIL: '$t' carries labels but is NOT declared — it would be" >&2
+         echo "        refused as unlabelable, which is a lie about the data." >&2
+         drift=1 ;;
+    esac
+  done
+  [ "$drift" -eq 0 ] && echo "  ok: the declared list and the schema agree"
+  [ "$drift" -eq 0 ] || fail=1
+else
+  echo "  note: OPENDDIL_LABELED_TABLES not supplied to this run, so the"
+  echo "        chart's declaration was NOT reconciled against the schema."
+fi
+
 # --- step 2: count per table ------------------------------------------------
 # Counting NULLs on BOTH columns. A row with a nation but a NULL
 # releasable_to is HALF-labelled, and the §4 filter's second clause

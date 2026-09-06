@@ -340,6 +340,12 @@ spec:
             # enough to bound a stolen cookie" — a deployment decision.
             - name: OPENDDIL_SESSION_TTL_SECONDS
               value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_LABELED_TABLES
+              # Tables that can be partitioned, therefore tables that may be
+              # served. Anything else is refused with cause `unlabelable` —
+              # a statement about the DATA, identical for every subject,
+              # rather than a decision against the viewer.
+              value: {{ join "," $root.Values.releasability.labeledTables | quote }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE

@@ -890,6 +890,39 @@ releasability:
     # two are same-site and `Strict` is available.
     cookieSameSite: Lax
 
+  # WHICH TABLES CARRY RELEASABILITY LABELS, and so may be served at all.
+  #
+  # `policy_predicate` filters on originator_nation / releasable_to. A table
+  # without those columns cannot be filtered by it, and until 2026-09-06 the
+  # PEP forwarded the predicate anyway: Electric rejected the query and the
+  # browser got a 502 that its panels rendered as an ABSENCE OF DATA.
+  #
+  # Measured on the lab that day, through a fully-entitled session: five of
+  # fourteen served tables answered 200 and NINE answered 502 — the alert
+  # feed, inventory, buffer status, telemetry windows, the asset registry,
+  # the audit log and all three regional rollups. The read path had only
+  # ever been completed for the five, and nothing said so, because the
+  # completeness gate enumerated tables that HAVE the label columns and
+  # checked those for NULLs. The nine were never in its enumeration.
+  #
+  # Listing them here does not reduce what is served — those nine are
+  # already unserved. It converts nine silent transport failures into nine
+  # stated refusals with a cause, which is the difference between data that
+  # is missing and data the system refuses to serve because it cannot scope
+  # it.
+  #
+  # ⚠ THIS LIST AND THE DATABASE SCHEMA ARE TWO COPIES OF ONE FACT.
+  # `check-releasability-completeness.sh` reconciles them: every table with
+  # both label columns must appear here, and every table here must have
+  # them. Adding a table to the read path without labels is meant to be
+  # noisy.
+  labeledTables:
+    - telemetry_latest_state
+    - asset_logistics_status
+    - asset_cm_state
+    - asset_capability_state
+    - asset_element_telemetry
+
   # A DEMO identity provider: start-dev, in-memory H2, published passwords,
   # no TLS. Correct for a lab and disqualifying anywhere else. A real
   # deployment turns this off and points releasability.oidc at the identity
