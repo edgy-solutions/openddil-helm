@@ -923,6 +923,12 @@ releasability:
     - asset_cm_state
     - asset_capability_state
     - asset_element_telemetry
+    # Joined 2026-09-06 by the labelling block. tactical_events is stamped by
+    # fusion from the same state that stamps asset_logistics_status;
+    # asset_telemetry_windows has the columns and no rows yet, so it serves
+    # empty rather than refused — which is the accurate statement about it.
+    - tactical_events
+    - asset_telemetry_windows
 
   # --- CLASS 2: role-served. Nothing to partition BY. ---
   #
@@ -963,9 +969,14 @@ releasability:
   # assets needs a composition rule, which is the regional node's §4
   # decision and deliberately not defaulted.
   pendingLabelTables:
-    - tactical_events
+    # inventory_items: columns added, no producer emitting (topic
+    # high-watermark 0, table empty). Nothing to stamp until something
+    # writes it, and the frontend does not read it.
     - inventory_items
-    - asset_telemetry_windows
+    # asset_registry: columns added and existing rows backfilled, but the
+    # asset-registry-service does not stamp its writes yet, so new rows
+    # would arrive unlabelled. Stays refused until the service is taught —
+    # label first, enforce second.
     - asset_registry
     - region_fleet_summary
     - region_top_factors
