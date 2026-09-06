@@ -270,32 +270,61 @@ if [ -n "$unlabelable" ]; then
   echo "        the fix is either labels on the rows or an explicit refusal."
 fi
 
-# Reconcile with what the deployment TELLS the gateway it may serve.
-if [ -n "${OPENDDIL_LABELED_TABLES:-}" ]; then
-  echo "  declared    : $OPENDDIL_LABELED_TABLES"
+# Reconcile with what the deployment TELLS the gateway about each table.
+#
+# FOUR CLASSES, and the reconciliation is what stops any of them becoming a
+# hiding place:
+#   nation-filtered  must HAVE label columns, or the predicate fails
+#   role-served      must NOT have them — a table that CAN be partitioned and
+#                    is served unfiltered is the failure this path prevents
+#   subject-scoped   partitioned by who; the column must exist
+#   pending          known to need labels, refused meanwhile
+# Anything in NONE of them is the loud case: a table joined the store and
+# nobody decided how it may be read.
+if [ -n "${OPENDDIL_LABELED_TABLES:-}${OPENDDIL_ROLE_SERVED_TABLES:-}" ]; then
   drift=0
-  # Membership by exact comma-delimited match, not by word-boundary regex.
-  # `` treats `_` as a word character, so `asset_cm_state` matched nothing
-  # inside a comma list and every declared table reported as missing — the
-  # check failed loudly and wrongly, which is at least the right direction.
-  for t in $(printf '%s' "$OPENDDIL_LABELED_TABLES" | tr ',' ' '); do
-    grep -qx "$t" <<<"$LABELLED_BOTH" || {
-      echo "  FAIL: '$t' is declared servable but has no label columns." >&2
-      drift=1; }
-  done
+  in_list() { case ",$2," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+  SUBJ_TABLES="$(printf '%s' "${OPENDDIL_SUBJECT_SCOPED_TABLES:-}" | tr ',' '
+' | cut -d: -f1 | tr '
+' ',')"
+
   for t in $LABELLED_BOTH; do
-    case ",$OPENDDIL_LABELED_TABLES," in
-      *",$t,"*) : ;;
-      *) echo "  FAIL: '$t' carries labels but is NOT declared — it would be" >&2
-         echo "        refused as unlabelable, which is a lie about the data." >&2
-         drift=1 ;;
-    esac
+    if in_list "$t" "${OPENDDIL_ROLE_SERVED_TABLES:-}"; then
+      echo "  FAIL: '$t' HAS label columns but is declared role-served —" >&2
+      echo "        it would be served unfiltered though it can be" >&2
+      echo "        partitioned. That is the bypass this gate exists for." >&2
+      drift=1
+    elif ! in_list "$t" "${OPENDDIL_LABELED_TABLES:-}"; then
+      echo "  FAIL: '$t' carries labels but is declared in no class — it" >&2
+      echo "        would be refused as unlabelable, a lie about the data." >&2
+      drift=1
+    fi
   done
-  [ "$drift" -eq 0 ] && echo "  ok: the declared list and the schema agree"
+
+  for t in $unlabelable; do
+    if in_list "$t" "${OPENDDIL_LABELED_TABLES:-}"; then
+      echo "  FAIL: '$t' is declared nation-filtered but has no label" >&2
+      echo "        columns — every query against it fails at Electric." >&2
+      drift=1
+    elif in_list "$t" "${OPENDDIL_ROLE_SERVED_TABLES:-}"; then
+      echo "  ok   $t: role-served (declared — no asset data to partition)"
+    elif in_list "$t" "$SUBJ_TABLES"; then
+      echo "  ok   $t: subject-scoped (declared)"
+    elif in_list "$t" "${OPENDDIL_PENDING_LABEL_TABLES:-}"; then
+      echo "  note $t: pending labels — refused until stamped"
+    else
+      echo "  FAIL: '$t' is in NO declared class. A table reached the store" >&2
+      echo "        and nobody decided how it may be read; it is refused by" >&2
+      echo "        default, which is safe and silent — and silence is how" >&2
+      echo "        the previous nine went unnoticed." >&2
+      drift=1
+    fi
+  done
+  [ "$drift" -eq 0 ] && echo "  ok: every table is declared, and each class matches the schema"
   [ "$drift" -eq 0 ] || fail=1
 else
-  echo "  note: OPENDDIL_LABELED_TABLES not supplied to this run, so the"
-  echo "        chart's declaration was NOT reconciled against the schema."
+  echo "  note: no table-class declaration supplied to this run, so the"
+  echo "        chart's classes were NOT reconciled against the schema."
 fi
 
 # --- step 2: count per table ------------------------------------------------

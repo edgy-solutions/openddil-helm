@@ -862,6 +862,13 @@ spec:
               # a statement about the DATA, identical for every subject,
               # rather than a decision against the viewer.
               value: {{ join "," $root.Values.releasability.labeledTables | quote }}
+            - name: OPENDDIL_ROLE_SERVED_TABLES
+              # No nation filter. Declared position; see values.yaml.
+              value: {{ join "," $root.Values.releasability.roleServedTables | quote }}
+            - name: OPENDDIL_SUBJECT_SCOPED_TABLES
+              value: {{ join "," $root.Values.releasability.subjectScopedTables | quote }}
+            - name: OPENDDIL_OVERSIGHT_ROLES
+              value: {{ join "," $root.Values.releasability.oversightRoles | quote }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE

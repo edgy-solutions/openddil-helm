@@ -916,12 +916,60 @@ releasability:
   # both label columns must appear here, and every table here must have
   # them. Adding a table to the read path without labels is meant to be
   # noisy.
+  # --- CLASS 1: nation-filtered. The ADR-0029 predicate applies. ---
   labeledTables:
     - telemetry_latest_state
     - asset_logistics_status
     - asset_cm_state
     - asset_capability_state
     - asset_element_telemetry
+
+  # --- CLASS 2: role-served. Nothing to partition BY. ---
+  #
+  # A DECLARED POSITION, not an oversight: `edge_buffer_status` holds bridge
+  # lag, a severance flag and a probe result. No asset data, no nation, and
+  # therefore no partition — refusing it as "unlabelable" removed HQ's
+  # severance indicator, which is precisely what a severance recording
+  # exists to show. Infrastructure topology is visible to authenticated
+  # operators.
+  #
+  # ⚠ THE CLASS IS THE RISK. Anything asset-bearing put in this list is a
+  # bypass wearing the name of a policy. The completeness gate refuses a
+  # table here that carries label columns, because a table that CAN be
+  # partitioned and is served unfiltered is the failure this whole read path
+  # exists to prevent.
+  roleServedTables:
+    - edge_buffer_status
+
+  # --- CLASS 3: subject-scoped. Partitioned by WHO, not by nation. ---
+  # `table:column` — the column naming the subject a row belongs to. A
+  # subject sees their own rows; a subject holding an oversight role sees
+  # every row, which is what an auditor's remit means.
+  subjectScopedTables:
+    - audit_log:actor
+  oversightRoles:
+    - auditor
+
+  # --- CLASS 4: known to need labels, not yet stamped. REFUSED meanwhile. ---
+  #
+  # Declared so the gate can tell "a table we know about and have not
+  # finished" from "a table nobody has classified at all" — the second being
+  # the loud case, because it is how a new table joins the read path
+  # unpartitioned without anyone deciding that it should.
+  #
+  # These four are asset-bearing (each carries asset_id) and derive from
+  # assets that ARE labelled, so stamping them is propagation rather than
+  # new policy. The three region_* rollups are NOT here: a rollup over many
+  # assets needs a composition rule, which is the regional node's §4
+  # decision and deliberately not defaulted.
+  pendingLabelTables:
+    - tactical_events
+    - inventory_items
+    - asset_telemetry_windows
+    - asset_registry
+    - region_fleet_summary
+    - region_top_factors
+    - region_wear_trends
 
   # A DEMO identity provider: start-dev, in-memory H2, published passwords,
   # no TLS. Correct for a lab and disqualifying anywhere else. A real
