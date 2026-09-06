@@ -929,6 +929,21 @@ releasability:
     # empty rather than refused — which is the accurate statement about it.
     - tactical_events
     - asset_telemetry_windows
+    # Promoted the same day, after the completeness gate refused the halfway
+    # position: both now HAVE the columns and have ZERO unlabelled rows
+    # (asset_registry 14/0 by backfill, inventory_items 0/0 because empty),
+    # so refusing them was "a lie about the data" in the gate's words.
+    #
+    # "Label first, enforce second" is about not enforcing over UNLABELLED
+    # rows. There are none here, so holding these back was a misreading of
+    # the rule rather than an application of it.
+    #
+    # The residual gap is real and is a follow-up, not a reason to refuse a
+    # table: the asset-registry-service does not stamp its own writes, so
+    # rows it adds after the backfill arrive unlabelled and deny-unlabeled
+    # hides them. That is the safe direction, and the gate counts them.
+    - asset_registry
+    - inventory_items
 
   # --- CLASS 2: role-served. Nothing to partition BY. ---
   #
@@ -969,15 +984,10 @@ releasability:
   # assets needs a composition rule, which is the regional node's §4
   # decision and deliberately not defaulted.
   pendingLabelTables:
-    # inventory_items: columns added, no producer emitting (topic
-    # high-watermark 0, table empty). Nothing to stamp until something
-    # writes it, and the frontend does not read it.
-    - inventory_items
-    # asset_registry: columns added and existing rows backfilled, but the
-    # asset-registry-service does not stamp its writes yet, so new rows
-    # would arrive unlabelled. Stays refused until the service is taught —
-    # label first, enforce second.
-    - asset_registry
+    # Only the rollups remain. Each is an aggregate over many assets of
+    # possibly mixed nationality, which needs a composition rule rather than
+    # propagation — the regional node's §4 decision, with the intersection
+    # floor already recorded so nobody defaults to union.
     - region_fleet_summary
     - region_top_factors
     - region_wear_trends
