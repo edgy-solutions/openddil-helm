@@ -40,8 +40,19 @@
 {{- if .Values.tierNode.enabled }}
 {{- $root := . -}}
 {{- $tn := .Values.tierNode -}}
-{{- range .Values.edges }}
-{{- $tier := . }}
+{{- /* RANGES OVER TIERS, NOT EDGES.
+
+     This loop read `.Values.edges`, which made a REGION structurally
+     incapable of being a tier node — regions live in `.Values.regions` and
+     never entered it. The fourth-tier render check passed by injecting a
+     synthetic entry into `edges`, so it validated shape resolution and was
+     later cited for deployability it never tested.
+
+     `openddil.tierList` composes edges and regions into one list with an
+     explicit `kind` and `parent`. Nothing else in the chart changes; this is
+     a third view over declarations that already existed. */ -}}
+{{- $tiers := include "openddil.tierList" . | fromYamlArray }}
+{{- range $tier := $tiers }}
 {{- if or (not $tn.tiers) (has $tier.id $tn.tiers) }}
 {{- /*
 SCHEME MUST MATCH THE ROOT, and this fails the render rather than the login.
@@ -728,11 +739,20 @@ data:
         "label": {{ $tier.label | default $tier.id | quote }},
         "scope": null,
         "has_children": {{ $tier.hasChildren | default false }},
-        {{- /* An edge's parent IS its region, and `edges[].region` already
-               says so — so the existing topology list describes the tree
-               and no new configuration is needed for the common case.
-               `parent` overrides it for a tier that is not an edge. */}}
-        "parent": {{ with (or $tier.parent $tier.region) }}{{ . | quote }}{{ else }}null{{ end }}
+        {{- /* PARENT COMES FROM THE TIER LIST, WHICH ALREADY RESOLVED IT.
+
+               This used to read `or $tier.parent $tier.region`, because an
+               edge's parent IS its region and `edges[].region` said so. Once
+               regions became tiers that fallback made a REGION ITS OWN
+               PARENT: the list carries `region: <own id>` for a region, so
+               an empty `parent` fell through to itself. A self-parenting
+               tier is an intermediate whose uplink is itself, and the shape
+               resolution would have been wrong in a way no panel could show.
+
+               `openddil.tierList` resolves parent for every kind — an edge
+               gets its region, a region gets "" meaning the root — so the
+               fallback is not merely redundant now, it is the bug. */}}
+        "parent": {{ with $tier.parent }}{{ . | quote }}{{ else }}null{{ end }}
       }
     }
 {{- if $root.Values.releasability.enabled }}

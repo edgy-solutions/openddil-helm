@@ -114,8 +114,20 @@ spec:
 # Each edge is its own Kafka cluster (ADR-0023 Phase 6a), not partitions of a
 # shared one. Single broker is fine for the demo; scale via NumReplicas on
 # the StatefulSet would require multi-broker redpanda config.
-{{- range .Values.edges }}
-{{- $edge := . }}
+{{- /* A BROKER PER TIER THAT NEEDS ONE.
+
+     ADR-0032 §a: a severance-tolerant tier owns its broker. A region reading
+     HQ's broker, or its edges', is reachback by construction — its uplink
+     drops and it has nothing local to serve from, so the two-dimension
+     severance the regional package requires is unsatisfiable.
+
+     Edges get one unconditionally: they are the ingest point whether or not
+     a tier node runs there. Regions get one only when tier-managed, because
+     a region with no tier node has nothing to put in it. */ -}}
+{{- $tiers := include "openddil.tierList" . | fromYamlArray }}
+{{- range $tier := $tiers }}
+{{- if or (eq $tier.kind "edge") (include "openddil.isTierManaged" (dict "id" $tier.id "root" $)) }}
+{{- $edge := $tier }}
 {{- $name := printf "%s-redpanda-%s" $.Release.Name $edge.id }}
 {{- $component := printf "redpanda-%s" $edge.id }}
 apiVersion: apps/v1
@@ -268,6 +280,7 @@ spec:
       port: {{ $.Values.redpandaEdge.adminPort }}
       targetPort: admin
 ---
+{{- end }}
 {{- end }}
 # =============================================================================
 # Redpanda-HQ — advertises via toxiproxy

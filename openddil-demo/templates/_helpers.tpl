@@ -239,6 +239,83 @@ Usage: include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)
        -> "true" or ""
 */}}
 {{/*
+openddil.tierList — ONE list of tiers, derived from the topology already declared.
+
+WHY THIS EXISTS. `tier-node.yaml` ranged over `.Values.edges`, so a REGION
+could not be a tier node at all: regions live in `.Values.regions` and never
+entered the loop. That is the framework-vs-instantiation split showing up in
+the chart — a two-level hardcode in values, sibling of GD-01's two-level
+schema — and it is why "a second tier is configuration" was false for a
+region (regional package §1, Finding B).
+
+ADDITIVE ON PURPOSE. Nothing here changes `.Values.edges` or
+`.Values.regions`; the nine other range sites keep working untouched. This
+composes a THIRD view over the same declarations so the tier machinery can
+range over tiers instead of over edges, and a fourth level becomes a values
+entry rather than a template change.
+
+SHAPE. Each entry carries what tier-node.yaml consumes, plus `kind`:
+
+    id            the tier's id
+    kind          "edge" | "region"  — what it IS, not what it does
+    parent        the tier above it; empty means the root is its parent
+    hasChildren   does it roll anything up? Derived from kind, overridable.
+    label/publicOrigin/region  passed through from the source entry
+
+`kind` and `hasChildren` are kept SEPARATE deliberately. Kind is identity;
+hasChildren is shape, and the presentation resolves by shape (ADR-0033). An
+edge that one day aggregates something would set hasChildren true and still
+be an edge — collapsing them would make the fourth tier unanswerable again.
+
+An explicit `.Values.tiers` wins entirely, so a deployment whose topology is
+not "edges under regions" can state it directly rather than being derived
+into a shape it does not have.
+
+Usage:
+  {{- $tiers := include "openddil.tierList" . | fromYamlArray }}
+*/}}
+{{- define "openddil.tierList" -}}
+{{- if .Values.tiers }}
+{{- toYaml .Values.tiers }}
+{{- else }}
+{{- $out := list -}}
+{{- range .Values.edges }}
+{{- $out = append $out (dict
+      "id" .id
+      "kind" "edge"
+      "parent" (default .region .parent)
+      "hasChildren" (default false .hasChildren)
+      "label" (default .id .label)
+      "publicOrigin" (default "" .publicOrigin)
+      "region" (default "" .region)) -}}
+{{- end }}
+{{- range .Values.regions }}
+{{- /* A region's parent is the ROOT NODE, not nothing.
+
+       `parent: ""` renders as null, and the presentation resolves
+       `has_children && !parent` as ROOT — so a region would have rendered
+       the HQ instance instead of an intermediate one. The root is a real
+       tier with a real id; "no parent" belongs to the root alone, which is
+       the one node genuinely above everything.
+
+       Caught by reading the rendered shape against `instanceForShape`, not
+       by the render failing: it produced a well-formed config for the
+       wrong instance. */ -}}
+{{- $rootId := default "root" $.Values.tierNode.rootId -}}
+{{- $out = append $out (dict
+      "id" .id
+      "kind" "region"
+      "parent" (default $rootId .parent)
+      "hasChildren" (default true .hasChildren)
+      "label" (default .id .label)
+      "publicOrigin" (default "" .publicOrigin)
+      "region" .id) -}}
+{{- end }}
+{{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
 openddil.tierClientId — the OIDC client id for a tier.
 
 ONE DEFINITION, READ BY BOTH SIDES OF THE BOUNDARY. The chart configures
