@@ -998,9 +998,27 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       initContainers:
+        {{- /*
+          THE OVERLAY ONTOLOGY BELONGS HERE TOO, and its absence was a
+          TIER/ROOT ASYMMETRY IN REFERENCE DATA — the same computation at two
+          tiers reading different inputs.
+
+          The root's fusion (hub.yaml) layers `demo/ontology` over
+          `contracts/ontology`; this one did not, so a tier fusion had five
+          files where the root had eight. It surfaced when the wear-component
+          manifest landed: the root could gate wear axes by platform and the
+          tiers could not, so every axis on every tier-managed asset read
+          UNDECLARED and no wear factor was emitted at all — a silent
+          divergence in what two nodes believe about the same fleet.
+
+          Overlay-supplied reference data is not root-tier data. Any file the
+          root reads to decide something, a tier reading the same store must
+          read too.
+        */ -}}
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
           ) "root" $root) | nindent 8 }}
       containers:
         - name: logistics-fusion
