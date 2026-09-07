@@ -372,12 +372,41 @@ faustEdge:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
-  # Demo-visibility overrides (see docker-compose.override.yml for rationale).
+  # WAS "demo-visibility overrides", and the visibility lasted about an hour.
+  #
+  # ENGINE_LIFE_TOTAL_HOURS was "1". Engine hours are wall-clock since the
+  # asset was first observed (ADR-0020: DIS carries no engine-on signal, so
+  # observed time stands in), so every asset passed one hour of "total life"
+  # in its first hour and stayed pegged. Measured 2026-09-06: 647.3 observed
+  # hours against a 1-hour life, consumed/total clamped to 1.0, 0% remaining,
+  # wear reported at exactly 100.0% — for all 14 assets, on both axes.
+  #
+  # A fleet reading 14/14 CRITICAL is what a demo audience reads as broken,
+  # and the tuning that produced it was chosen to make degradation VISIBLE.
+  # It made the first hour visible and every hour after it identical.
+  #
+  # These are now the values coefficients.py itself declares. That is a
+  # deliberate choice of DECLARED defaults over invented ones: per ADR-0020
+  # and the coefficients file's own header, real calibration is the
+  # AFSim/VR-Forces phase, and a number picked here to produce a pleasing
+  # spread would be authored fiction wearing a physical unit.
+  #
+  # ⚠ WHAT THIS DOES NOT FIX, because numbers cannot:
+  #   * Engine hours are IDENTICAL for every asset by construction, so that
+  #     axis can show no distribution at any coefficient. A real fleet has
+  #     assets at different points in their life; this model starts every
+  #     asset at zero the moment OpenDDIL first sees it. Prior service life
+  #     is a SOURCE fact and has no home yet.
+  #   * The wear models are platform-agnostic. Track km spans 1,282 to
+  #     32,334 across this fleet because aircraft accrue "track" wear from
+  #     distance flown. One global track life cannot be right for both a
+  #     tank and an MQ-9, so the spread below is arithmetic rather than
+  #     engineering until the coefficients are per-platform.
   prognosticsEnv:
-    TRACK_LIFE_TOTAL_KM:     "10"
-    ENGINE_LIFE_TOTAL_HOURS: "1"
-    TERRAIN_TOTAL_DEG_KM:    "50"
-    BARREL_LIFE_TOTAL_ROUNDS: "100"
+    TRACK_LIFE_TOTAL_KM:      "5000"
+    ENGINE_LIFE_TOTAL_HOURS:  "5000"
+    TERRAIN_TOTAL_DEG_KM:     "100000"
+    BARREL_LIFE_TOTAL_ROUNDS: "1000"
 
 projector:
   image:
