@@ -568,6 +568,24 @@ output:
              subtree and stays correct. See openddil.bridgeTarget. */}}
       - {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) }}
     topic: "${! meta(\"kafka_topic\") }"
+    # PRESERVE THE KEY. Without this the relay produces NULL-keyed records,
+    # and two things downstream treat the key as the row's identity:
+    #
+    #   * the destination topics are COMPACTED, so null-keyed records cannot
+    #     be compacted and the log grows without bound; and
+    #   * the projector COALESCES each drained batch by key, latest wins. Its
+    #     own comment states the invariant it relies on -- "only messages
+    #     sharing a key are dropped, so dedup never risks skipping another
+    #     key's message". A relay that nulls every key makes every message
+    #     share one, and the batch collapses to its last record.
+    #
+    # Latent until distinct rows started sharing a topic. Measured the day the
+    # rollups were partitioned by releasability class: the aggregator emitted
+    # all three partials every heartbeat, all three reached HQ intact, and
+    # Postgres held TWO -- wear_trends holding three and top_factors one,
+    # because which partial survived depended on where the batch boundary
+    # fell. Nothing errored anywhere.
+    key: "${! meta(\"kafka_key\") }"
     max_retries: 0
 {{- end }}
 
@@ -707,5 +725,23 @@ output:
     addresses:
       - {{ include "openddil.bridgeTarget" (dict "tier" $tier "root" $root) }}
     topic: "${! meta(\"kafka_topic\") }"
+    # PRESERVE THE KEY. Without this the relay produces NULL-keyed records,
+    # and two things downstream treat the key as the row's identity:
+    #
+    #   * the destination topics are COMPACTED, so null-keyed records cannot
+    #     be compacted and the log grows without bound; and
+    #   * the projector COALESCES each drained batch by key, latest wins. Its
+    #     own comment states the invariant it relies on -- "only messages
+    #     sharing a key are dropped, so dedup never risks skipping another
+    #     key's message". A relay that nulls every key makes every message
+    #     share one, and the batch collapses to its last record.
+    #
+    # Latent until distinct rows started sharing a topic. Measured the day the
+    # rollups were partitioned by releasability class: the aggregator emitted
+    # all three partials every heartbeat, all three reached HQ intact, and
+    # Postgres held TWO -- wear_trends holding three and top_factors one,
+    # because which partial survived depended on where the batch boundary
+    # fell. Nothing errored anywhere.
+    key: "${! meta(\"kafka_key\") }"
     max_retries: 0
 {{- end }}
