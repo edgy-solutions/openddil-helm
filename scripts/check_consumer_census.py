@@ -191,7 +191,8 @@ def require_cluster(ctx: str) -> None:
         err("  This script reads a cluster, and which cluster is not")
         err("  something it will infer from current-context.")
         err("  Declare it once:")
-        err("      echo edgy-lab > " + str(root / ".expected-context"))
+        err("      kubectl config current-context > "
+            + str(root / ".expected-context"))
         err("  or per-invocation: OPENDDIL_EXPECT_CONTEXT=<ctx> ...")
         raise SystemExit(78)
 

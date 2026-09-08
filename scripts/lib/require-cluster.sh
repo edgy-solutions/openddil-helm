@@ -54,7 +54,7 @@ openddil_require_cluster() {
         echo "  This script touches a cluster, and which cluster is not" >&2
         echo "  something it will infer from current-context." >&2
         echo "  Declare it once:" >&2
-        echo "      echo edgy-lab > $root/.expected-context" >&2
+        echo "      kubectl config current-context > $root/.expected-context" >&2
         echo "  or per-invocation: OPENDDIL_EXPECT_CONTEXT=<ctx> $0 ..." >&2
         exit 78   # EX_CONFIG
     fi

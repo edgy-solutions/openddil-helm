@@ -85,7 +85,8 @@ def require_cluster(ctx: str) -> None:
     if not expect:
         print("REFUSING TO RUN: no expected kube-context is declared.",
               file=sys.stderr)
-        print("  echo edgy-lab > " + str(root / ".expected-context"),
+        print("  kubectl config current-context > "
+              + str(root / ".expected-context"),
               file=sys.stderr)
         raise SystemExit(78)
     if ctx != expect:
