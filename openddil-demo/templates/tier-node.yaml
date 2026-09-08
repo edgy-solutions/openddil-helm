@@ -1229,6 +1229,23 @@ spec:
               value: {{ printf "http://%s-tier-cm-%s%s:9080" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
             - name: TIER_FUSION_ENDPOINT
               value: {{ printf "http://%s-tier-fusion-%s%s:9081" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            {{- /* DETECTION BINDS TO DIRECT INGEST ONLY (ADR-0032 §a).
+
+                   A tier derives state only for assets it ingests itself; for
+                   assets below it, it consumes their DERIVED state and never
+                   re-derives. Region-east arrived with cm-service-silver and
+                   fusion-service-silver reading `raw-sensor-stream` AT THE
+                   REGION, because the tier node renders the full leaf topology
+                   and the relayed raw stream gave them something to read —
+                   the reachback inverted, with the topic delivered rather than
+                   fetched.
+
+                   The bootstrap treats its returned set as COMPLETE and prunes
+                   the rest, so passing this false RETIRES those subscriptions
+                   on a region that already has them, rather than only
+                   declining to create them. */}}
+            - name: TIER_DIRECT_INGEST
+              value: {{ $tier.directIngest | default false | quote }}
             - name: PYTHONPATH
               value: "/app"
             - name: LOG_LEVEL

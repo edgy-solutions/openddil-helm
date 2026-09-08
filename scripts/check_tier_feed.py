@@ -51,6 +51,24 @@ TIER_SUBSCRIPTIONS = [
     ("asset-cm-state",            "fusion-service-cm-state"),
 ]
 
+# Topics a tier RECEIVES RAW rather than derives.
+#
+# FED IS NECESSARY AND NOT SUFFICIENT. A relayed raw topic is present on a
+# parent's broker for PRESENTATION -- the leaf-under-region view, HQ's fleet
+# picture -- and a detection consumer there would be deriving state for an
+# asset it does not ingest. ADR-0032 §a: a tier derives only for assets it
+# ingests directly; below it, it consumes derived state and never re-derives.
+#
+# So relayed raw topics are TERMINAL FOR DETECTION, and "does this consumer
+# have a topic" becomes "does this consumer have a topic it is ENTITLED to
+# derive from".
+RAW_INGEST_TOPICS = {"raw-sensor-stream", "cm-events"}
+
+# Group prefixes that constitute DETECTION. Projectors are excluded on
+# purpose: projecting a relayed row into a read model is presentation, which
+# is the one thing relayed raw topics are for.
+DETECTION_PREFIXES = ("cm-service-", "fusion-service-")
+
 
 def kubectl(*args: str) -> str:
     return subprocess.run(["kubectl", *args], capture_output=True, text=True).stdout
@@ -123,6 +141,76 @@ def projector_mappings(ns: str, tier: str) -> list[tuple[str, str]] | None:
     return out or None
 
 
+def direct_ingest(ns: str, tier: str) -> bool | None:
+    """Does this tier ingest directly? Read from what is DEPLOYED.
+
+    Taken from the tier's restate-bootstrap Job rather than from chart values,
+    because entitlement is a property of the running deployment and this check
+    exists to catch a deployment that disagrees with intent.
+
+    None means the Job could not be read. Not False -- defaulting an
+    unreadable answer to "no direct ingest" would report every edge's silver
+    consumers as unentitled, which is a false positive big enough to get the
+    check switched off.
+    """
+    raw = kubectl("get", "job", "openddil-tier-restate-bootstrap-" + tier,
+                  "-n", ns, "-o",
+                  "jsonpath={.spec.template.spec.containers[*].env[?(@.name=='TIER_DIRECT_INGEST')].value}")
+    v = raw.strip().strip('"').lower()
+    if not v:
+        return None
+    return v in ("1", "true", "yes", "on")
+
+
+def group_topics(ns: str, tier: str, group: str) -> set[str]:
+    pod = "openddil-redpanda-" + tier + "-0"
+    out = subprocess.run(
+        ["kubectl", "exec", "-n", ns, pod, "--", "rpk", "group", "describe",
+         group, "--brokers", "localhost:9092"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return set()
+    topics, seen = set(), False
+    for line in out.stdout.splitlines():
+        if line.startswith("TOPIC"):
+            seen = True
+            continue
+        if seen and line.split():
+            topics.add(line.split()[0])
+    return topics
+
+
+def unentitled_detection(ns: str, tier: str, topics: set[str]) -> list[tuple[str, str]]:
+    """Detection groups ATTACHED to a relayed raw topic at a non-ingesting tier.
+
+    Checked against the BROKER, not against the rendered set, because the
+    rendered set is what should happen and this is what did. The subscription
+    gate stops these being created; this is what notices if one exists anyway
+    -- a hand-made subscription, a stale one the pruner missed, or a bootstrap
+    that ran with the env absent before the gate landed.
+    """
+    if not (RAW_INGEST_TOPICS & topics):
+        return []
+    pod = "openddil-redpanda-" + tier + "-0"
+    out = subprocess.run(
+        ["kubectl", "exec", "-n", ns, pod, "--", "rpk", "group", "list",
+         "--brokers", "localhost:9092"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return []
+    bad = []
+    for line in out.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        g = parts[1]
+        if not g.startswith(DETECTION_PREFIXES):
+            continue
+        for t in sorted(group_topics(ns, tier, g) & RAW_INGEST_TOPICS):
+            bad.append((g, t))
+    return bad
+
+
 def main() -> int:
     ns = sys.argv[1] if len(sys.argv) > 1 else "openddil"
     ctx = kubectl("config", "current-context").strip()
@@ -141,6 +229,7 @@ def main() -> int:
         return 1
 
     unfed: list[tuple[str, str, str]] = []
+    unentitled: list[tuple[str, str, str]] = []
     checked = 0
     for tier in ts:
         topics = broker_topics(ns, tier)
@@ -156,23 +245,54 @@ def main() -> int:
                   file=sys.stderr)
             return 1
 
-        consumers = proj + [(t, g + "-" + tier) for t, g in TIER_SUBSCRIPTIONS]
+        di = direct_ingest(ns, tier)
+        if di is None:
+            print("tier " + tier + ": TIER_DIRECT_INGEST unreadable -- refusing",
+                  file=sys.stderr)
+            print("      to judge entitlement from a default", file=sys.stderr)
+            return 1
+
+        # The rendered set is gated the same way the bootstrap gates it, so
+        # "rendered" here means what the tier actually registers -- not the
+        # full leaf topology it would register if it ingested.
+        subs = [(t, g) for t, g in TIER_SUBSCRIPTIONS
+                if di or t not in RAW_INGEST_TOPICS]
+        consumers = proj + [(t, g + "-" + tier) for t, g in subs]
         fed = [(t, g) for t, g in consumers if t in topics]
         gap = [(t, g) for t, g in consumers if t not in topics]
         checked += len(consumers)
 
         print("tier " + tier + "  (" + str(len(fed)) + " fed of "
               + str(len(consumers)) + " rendered, " + str(len(topics))
-              + " topics on its broker)")
+              + " topics on its broker, direct-ingest="
+              + ("yes" if di else "no") + ")")
         for t, g in sorted(gap):
             print("  UNFED      " + g + "   <- " + t)
             unfed.append((tier, g, t))
+        if not di:
+            for g, t in unentitled_detection(ns, tier, topics):
+                print("  UNENTITLED " + g + "   <- " + t + " (relayed raw)")
+                unentitled.append((tier, g, t))
+        print()
+
+    if not unfed and not unentitled:
+        print("tier feed: clean -- all " + str(checked) + " rendered consumers"
+              " have a topic they are entitled to derive from")
+        return 0
+
+    if unentitled:
+        print("tier feed: " + str(len(unentitled)) + " UNENTITLED DETECTION"
+              " CONSUMER(S)")
+        print("  A detection consumer at a tier with no direct ingest, bound")
+        print("  to a RELAYED RAW topic. It derives state for an asset it does")
+        print("  not observe, competing with the tier that does, and nothing")
+        print("  chooses between the two answers. This is the reachback")
+        print("  inverted -- the raw data came UP rather than the consumer")
+        print("  reaching DOWN -- so the consumer census calls it correct.")
         print()
 
     if not unfed:
-        print("tier feed: clean -- all " + str(checked)
-              + " rendered consumers have a fed topic")
-        return 0
+        return 1
 
     print("tier feed: " + str(len(unfed)) + " UNFED CONSUMER(S) of "
           + str(checked) + " rendered")
@@ -188,6 +308,9 @@ def main() -> int:
     print("    the same.")
     print("  * That the subscription mirror above matches what the bootstrap")
     print("    registers. A drift hides a consumer from this check entirely.")
+    print("  * That a projector on a relayed raw topic is right. Projection is")
+    print("    presentation and is allowed here by design; whether a given")
+    print("    read model belongs at a given tier is a separate question.")
     return 1
 
 

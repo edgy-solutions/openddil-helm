@@ -280,6 +280,30 @@ Usage:
 {{- else }}
 {{- $out := list -}}
 {{- range .Values.edges }}
+{{- /* DIRECT INGEST -- does this tier observe assets itself?
+
+       ADR-0032 a, as an actionable rule: A TIER DERIVES STATE ONLY FOR
+       ASSETS IT INGESTS DIRECTLY. For assets below it, it consumes their
+       DERIVED state and never re-derives.
+
+       Region-east arrived with cm-service-silver and fusion-service-silver
+       attached to `raw-sensor-stream` -- at the REGION. The tier node
+       renders the full leaf topology, and the relayed raw stream gave those
+       consumers something to read. That is the reachback inverted: instead
+       of a parent reaching DOWN to a child's broker, the child's raw data
+       came UP, and a consumer above the edge derived from it anyway. Same
+       violation, topic delivered rather than fetched, and invisible to a
+       census that looks for consumers on the wrong broker.
+
+       So detection binds to DIRECT ingest only. Relayed raw topics are
+       terminal for detection: they exist on a parent's broker for
+       PRESENTATION -- the leaf-under-region view, HQ's fleet picture -- and
+       no detection consumer at a parent attaches to them.
+
+       Defaults to true for an edge and false for a region, which is what
+       the deployed topology means today, and is overridable because a
+       region with its own sensors is a real thing and should be declarable
+       rather than assumed away. */ -}}
 {{- $out = append $out (dict
       "id" .id
       "kind" "edge"
@@ -287,6 +311,7 @@ Usage:
       "hasChildren" (default false .hasChildren)
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
+      "directIngest" (default true .directIngest)
       "region" (default "" .region)) -}}
 {{- end }}
 {{- range .Values.regions }}
@@ -309,6 +334,7 @@ Usage:
       "hasChildren" (default true .hasChildren)
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
+      "directIngest" (default false .directIngest)
       "region" .id) -}}
 {{- end }}
 {{- toYaml $out }}
