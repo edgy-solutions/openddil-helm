@@ -69,6 +69,24 @@ RAW_INGEST_TOPICS = {"raw-sensor-stream", "cm-events"}
 # is the one thing relayed raw topics are for.
 DETECTION_PREFIXES = ("cm-service-", "fusion-service-")
 
+# Topics that arrive at a tier BY RELAY and are keyed at their source. A
+# relay must preserve the key (see the relay invariant in _helpers.tpl); a
+# null key on one of these is a finding, not a curiosity.
+#
+# WHY THIS DIMENSION EXISTS. The relays produced null-keyed records, and the
+# projector coalesces each drained batch by key with latest-wins -- so every
+# message sharing one null key collapsed a batch to its last record. Neither
+# component was wrong alone. It self-healed by re-emission, so in steady
+# state every screen was correct and every batch was lossy; it only surfaced
+# when three distinct rows shared a topic in one batch and could not repair
+# each other.
+#
+# A property that has to hold across a boundary gets checked at the boundary.
+RELAYED_KEYED_TOPICS = (
+    "telemetry-latest-state", "asset-cm-state", "asset-logistics-status",
+    "region-fleet-summary", "region-top-factors", "region-wear-trends",
+)
+
 # Topics known to be empty, and why. See declared-idle-topics.yaml -- the
 # reasoning for why this is a classification rather than a caveat lives there.
 IDLE_DECL = pathlib.Path(__file__).resolve().parent / "declared-idle-topics.yaml"
@@ -280,6 +298,50 @@ def unentitled_detection(ns: str, tier: str,
     return bad, residue
 
 
+def null_keyed_relayed(ns: str, tier: str, topics: set[str]) -> list[tuple[str, int, int]]:
+    """(topic, null_keyed, sampled) for relayed topics carrying null keys.
+
+    Samples the tail of each relayed topic present on this broker. A sample
+    rather than a scan: one null key in a hundred is the same defect as all
+    of them, because the coalescing that consumes them is per batch.
+
+    A topic that cannot be sampled is SKIPPED rather than reported clean --
+    an unreadable topic and a well-keyed one must not look alike here.
+    """
+    out: list[tuple[str, int, int]] = []
+    pod = "openddil-redpanda-" + tier + "-0"
+    for t in RELAYED_KEYED_TOPICS:
+        if t not in topics:
+            continue
+        # `rpk topic consume -n N` BLOCKS waiting for the Nth message when
+        # the topic holds fewer, so the timeout is not a safety net here --
+        # it is the normal exit for a quiet topic. An uncaught TimeoutExpired
+        # killed the whole check after its first tier, which is worse than
+        # the defect it was added to find: a check that dies partway reports
+        # nothing about the tiers it never reached.
+        try:
+            r = subprocess.run(
+                ["kubectl", "exec", "-n", ns, pod, "--", "rpk", "topic",
+                 "consume", t, "--brokers", "localhost:9092",
+                 "-o", "-4", "-n", "4", "-f", "%k" + chr(10)],
+                capture_output=True, text=True, timeout=25)
+            out_text = r.stdout
+        except subprocess.TimeoutExpired as exc:
+            # Partial output is still evidence: whatever it did read is a
+            # valid sample of that topic's keys.
+            out_text = (exc.stdout or b"").decode("utf-8", "replace")                 if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        else:
+            if r.returncode != 0:
+                continue
+        lines = out_text.splitlines()
+        if not lines:
+            continue
+        nulls = sum(1 for l in lines if not l.strip())
+        if nulls:
+            out.append((t, nulls, len(lines)))
+    return out
+
+
 def main() -> int:
     ns = sys.argv[1] if len(sys.argv) > 1 else "openddil"
     ctx = kubectl("config", "current-context").strip()
@@ -301,6 +363,7 @@ def main() -> int:
     unfed: list[tuple[str, str, str]] = []
     unentitled: list[tuple[str, str, str]] = []
     undeclared: list[tuple[str, str, str]] = []
+    null_keyed: list[tuple[str, str]] = []
     known_idle: list[tuple[str, str, str, str]] = []
     checked = 0
     for tier in ts:
@@ -339,6 +402,24 @@ def main() -> int:
               + " topics on its broker, direct-ingest="
               + ("yes" if di else "no") + ")")
         for t, g in sorted(gap):
+            # A DECLARATION IS ABOUT THE PIPELINE, NOT THE BROKER, so it
+            # travels with the topic name across tiers. At an edge a
+            # declared-idle topic EXISTS at watermark 0 and reads
+            # idle/declared; at a tier that only receives it by relay the
+            # topic was never produced, so it does not exist at all and read
+            # UNFED -- the same fact wearing two verdicts, and the harsher
+            # one on the tier further from the cause.
+            #
+            # Inherit the declaration. The tier still cannot serve the
+            # consumer, which is why this prints rather than passing
+            # silently, but "nobody upstream produces this, here is why" is
+            # the accurate statement at BOTH tiers.
+            d = idle_decl.get(t)
+            if d:
+                print("  idle/" + d["status"][:11].ljust(12) + g + "   <- "
+                      + t + " (absent here, declared upstream)")
+                known_idle.append((tier, g, t, d["status"]))
+                continue
             print("  UNFED      " + g + "   <- " + t)
             unfed.append((tier, g, t))
 
@@ -363,6 +444,11 @@ def main() -> int:
                 print("  NOT FLOWING " + g + "   <- " + t
                       + " (hw 0, UNDECLARED)")
                 undeclared.append((tier, g, t))
+        for t, nulls, sampled in null_keyed_relayed(ns, tier, topics):
+            print("  NULL-KEYED " + t + "   (" + str(nulls) + " of "
+                  + str(sampled) + " sampled) -- relay dropped the key")
+            null_keyed.append((tier, t))
+
         if not di:
             bad, residue = unentitled_detection(ns, tier, topics)
             for g, t in bad:
@@ -384,7 +470,18 @@ def main() -> int:
                   + ", ".join(sorted(by["investigate"])))
         print()
 
-    if not unfed and not unentitled and not undeclared:
+    if null_keyed:
+        print("tier feed: " + str(len(null_keyed))
+              + " relayed topic(s) carrying NULL KEYS")
+        print("  A relay must preserve key, headers and timestamp; it appends")
+        print("  its relay_chain hop and changes nothing else. The projector")
+        print("  coalesces each drained batch by key, latest wins, so records")
+        print("  sharing a null key collapse the batch to its last one. It")
+        print("  self-heals by re-emission, which is why it can run for weeks")
+        print("  with every screen correct and every batch lossy.")
+        print()
+
+    if not unfed and not unentitled and not undeclared and not null_keyed:
         print("tier feed: clean -- all " + str(checked) + " rendered consumers"
               " have a topic they are entitled to derive from, and every")
         print("  empty one is declared")
@@ -412,7 +509,7 @@ def main() -> int:
         print()
 
     if not unfed:
-        return 1
+        return 1 if (unentitled or undeclared or null_keyed) else 0
 
     print("tier feed: " + str(len(unfed)) + " UNFED CONSUMER(S) of "
           + str(checked) + " rendered")

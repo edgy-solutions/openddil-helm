@@ -454,6 +454,48 @@ adds covered automatically rather than covered if they remember.
 
 Usage: include "openddil.edgeBridgeConnectYaml" (dict "edge" $edge "root" $root "edgeBroker" $edgeBroker)
 */}}
+{{/*
+=============================================================================
+THE RELAY INVARIANT — binding on every relay in this chart
+=============================================================================
+
+    A RELAY PRESERVES KEY, HEADERS AND TIMESTAMP.
+    IT APPENDS ITS OWN relay_chain HOP.
+    IT CHANGES NOTHING ELSE.
+
+Stated here, at the boundary, because the failure it prevents is not visible
+from either side of that boundary.
+
+WHAT HAPPENED. The relays produced with no `key`, so every relayed record
+arrived null-keyed. The projector coalesces each drained batch by key,
+latest-wins, under a comment stating precisely the invariant that makes that
+safe: "only messages sharing a key are dropped, so dedup never risks skipping
+another key's message." A relay that nulls every key makes every message
+share one, and the batch collapses to its last record.
+
+NEITHER COMPONENT WAS WRONG ON ITS OWN TERMS. The invariant one relied on was
+the one the other could violate, and nothing declared it at the boundary
+between them. An invariant one component relies on and another can break must
+be DECLARED WHERE THEY MEET, or it is a coincidence that has not ended yet.
+
+AND IT SELF-HEALED, WHICH IS WHY IT SURVIVED. `telemetry-latest-state` had
+been losing all but one asset's update per drained batch since the relays
+existed — invisible in steady state because every asset re-emits seconds
+later. A defect that repairs itself by re-emission looks exactly like a
+working system: every screen correct, every batch lossy. It surfaced only
+when three distinct rows shared one topic in one batch and could not repair
+each other, and the first trace was three tables disagreeing about how many
+partials existed.
+
+The second consequence had not surfaced at all: null-keyed records cannot be
+compacted, so every compacted destination log grows without bound. That is a
+disk-pressure incident with a long fuse, found before it lit.
+
+ENFORCED, NOT TRUSTED. check_tier_feed's `keyed` dimension reads the relayed
+topics on each tier broker and reports any null key on a keyed topic as a
+finding — so the next relay added to this chart cannot quietly lack what
+these four now have.
+*/}}
 {{- define "openddil.edgeBridgeConnectYaml" -}}
 {{- $edge := .edge -}}
 {{- $root := .root -}}
