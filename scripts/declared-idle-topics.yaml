@@ -1,0 +1,88 @@
+# =============================================================================
+# Declared-idle topics — why a fed consumer has nothing to read
+# =============================================================================
+# "FED IS NOT FLOWING." check_tier_feed asks whether a consumer's topic EXISTS
+# on its broker. A topic sitting at high-watermark 0 answers yes and starves
+# the consumer just the same. The check printed that as a caveat about itself
+# one run before it mattered, which is the tell that it belonged in a
+# classification rather than in prose.
+#
+# So the ladder is now four rungs, not three:
+#
+#     configured -> created -> subscribed -> FLOWING
+#
+# and a topic that is created but not flowing must say WHY. An undeclared
+# empty topic is a finding; a declared one is a known state with a name.
+# This is the same move as the releasability gate's declared-empty tables:
+# absence of data and absence of an explanation are different absences, and
+# only the second is a defect in the system rather than a fact about it.
+#
+# STATUSES
+#   declared    Expected for this deployment. Not a defect; the declaration
+#               is what stops it reading as one.
+#   held        A KNOWN DEFECT, deliberately deferred by decision. Named so it
+#               cannot quietly become "expected" through familiarity.
+#   investigate Nobody knows yet. This is the honest status and it is meant to
+#               be uncomfortable — it should not survive many runs.
+#
+# `held` and `investigate` are NOT passes. They keep the check green-with-a-
+# reason rather than green, and the summary counts them separately so a
+# growing pile is visible.
+# =============================================================================
+version: 1
+
+topics:
+
+  asset-capability-snapshot:
+    status: declared
+    reason: >-
+      DIS EntityStatePDU carries no loadout or stores information, so nothing
+      in this deployment can author a capability snapshot. ADR-0038 already
+      states it. Watermark 0 on every broker is the correct value, not a gap.
+    revisit: >-
+      A feed that does carry loadout — AFSim/VR-Forces, or a customer source —
+      changes this from declared to expected-flowing, and this entry should be
+      removed rather than amended.
+
+  asset-element-telemetry:
+    status: held
+    reason: >-
+      Logistics-sim's element profile keys on a `_Sensor`-suffixed variant
+      name that DIS-sourced asset ids never match, so no element telemetry is
+      synthesised. SENSOR-class hygiene item, deferred by decision rather than
+      unknown.
+    revisit: When the SENSOR-class profile matching is fixed.
+
+  asset-element-inventory:
+    status: held
+    reason: >-
+      Same root cause as asset-element-telemetry — the element profile never
+      matches, so neither inventory nor telemetry is produced.
+    revisit: When the SENSOR-class profile matching is fixed.
+
+  asset-telemetry-windows:
+    status: investigate
+    reason: >-
+      Watermark 0 on EVERY broker, and it was zero before the cutover as well
+      — which means faust-regional's reachback was fetching a topic that had
+      never carried anything. Two candidate explanations and no evidence yet
+      for either: faust-edge's windowing is not producing (a defect), or the
+      windows are published under a different name and the expectation is
+      misnamed (a naming error). One question for the edge.
+    revisit: Immediately. `investigate` is not a resting state.
+
+  cm-events:
+    status: declared
+    reason: >-
+      This deployment has NO CM event source. Verified rather than assumed:
+      no cm-ingest workload exists in the namespace, and `cm-items` — the
+      other topic on that path — is also at watermark 0. Configuration
+      baselines are seeded statically (coverage measured at 3 of 14 assets),
+      so there is no stream of configuration CHANGES for cm-service to apply.
+      Found by the flowing rung on its first run, on a tier the three-rung
+      check had been reporting as 15 of 15.
+    revisit: >-
+      A deployment with a real CM/PDM feed makes this expected-flowing, and
+      the entry should be removed rather than amended. Note the asymmetry:
+      cm-service-cm-events is gated OFF at a tier without direct ingest, so
+      this topic is only ever consumed where it is ingested.

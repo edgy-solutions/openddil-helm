@@ -69,6 +69,60 @@ RAW_INGEST_TOPICS = {"raw-sensor-stream", "cm-events"}
 # is the one thing relayed raw topics are for.
 DETECTION_PREFIXES = ("cm-service-", "fusion-service-")
 
+# Topics known to be empty, and why. See declared-idle-topics.yaml -- the
+# reasoning for why this is a classification rather than a caveat lives there.
+IDLE_DECL = pathlib.Path(__file__).resolve().parent / "declared-idle-topics.yaml"
+
+
+def load_idle_declarations() -> dict:
+    """topic -> {status, reason}. Missing file is a REFUSAL, not an empty dict.
+
+    An empty declaration set would silently reclassify every known-idle topic
+    as an undeclared finding, burying the real ones. The check would still
+    run, still print, and still be wrong in the direction that gets checks
+    switched off.
+    """
+    if not IDLE_DECL.is_file():
+        print("REFUSING TO RUN: " + str(IDLE_DECL) + " is missing.",
+              file=sys.stderr)
+        print("  Without it every idle topic reads as undeclared and the",
+              file=sys.stderr)
+        print("  real findings are buried in the known ones.", file=sys.stderr)
+        raise SystemExit(78)
+    body = IDLE_DECL.read_text(encoding="utf-8")
+    out, cur = {}, None
+    for line in body.splitlines():
+        if line.startswith("  ") and line.rstrip().endswith(":") and                 not line.startswith("    "):
+            cur = line.strip().rstrip(":")
+            out[cur] = {"status": "?"}
+        elif cur and line.strip().startswith("status:"):
+            out[cur]["status"] = line.split(":", 1)[1].strip()
+    return {k: v for k, v in out.items() if v.get("status") in
+            ("declared", "held", "investigate")}
+
+
+def watermark(ns: str, tier: str, topic: str) -> int | None:
+    """Total high-watermark across partitions, or None if unreadable.
+
+    COLUMN 6, NOT 5. `rpk topic describe -p` puts LOG-START-OFFSET at 5 and
+    HIGH-WATERMARK at 6, and reading 5 once produced a confident 'all zeros'
+    that was cited as evidence in a commit message. Named here because the
+    two columns are adjacent, plausible, and differ only when it matters.
+    """
+    out = subprocess.run(
+        ["kubectl", "exec", "-n", ns, "openddil-redpanda-" + tier + "-0", "--",
+         "rpk", "topic", "describe", topic, "-p", "--brokers", "localhost:9092"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    total, rows = 0, 0
+    for line in out.stdout.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 6 and f[5].lstrip("-").isdigit():
+            total += int(f[5])
+            rows += 1
+    return total if rows else None
+
 
 def kubectl(*args: str) -> str:
     return subprocess.run(["kubectl", *args], capture_output=True, text=True).stdout
@@ -243,8 +297,11 @@ def main() -> int:
         print("      consumer is fed' over zero consumers.", file=sys.stderr)
         return 1
 
+    idle_decl = load_idle_declarations()
     unfed: list[tuple[str, str, str]] = []
     unentitled: list[tuple[str, str, str]] = []
+    undeclared: list[tuple[str, str, str]] = []
+    known_idle: list[tuple[str, str, str, str]] = []
     checked = 0
     for tier in ts:
         topics = broker_topics(ns, tier)
@@ -284,6 +341,28 @@ def main() -> int:
         for t, g in sorted(gap):
             print("  UNFED      " + g + "   <- " + t)
             unfed.append((tier, g, t))
+
+        # THE FOURTH RUNG. `fed` says the topic exists; this says whether it
+        # has ever carried anything. A topic created and empty answers the
+        # third question yes and the fourth no, and the consumer starves
+        # either way -- so an empty topic must be DECLARED or it is a finding.
+        for t, g in sorted(fed):
+            hw = watermark(ns, tier, t)
+            if hw is None:
+                print("  PROBE FAIL " + t + " -- watermark unreadable",
+                      file=sys.stderr)
+                return 1
+            if hw > 0:
+                continue
+            d = idle_decl.get(t)
+            if d:
+                print("  idle/" + d["status"][:11].ljust(12) + g + "   <- "
+                      + t + " (hw 0, declared)")
+                known_idle.append((tier, g, t, d["status"]))
+            else:
+                print("  NOT FLOWING " + g + "   <- " + t
+                      + " (hw 0, UNDECLARED)")
+                undeclared.append((tier, g, t))
         if not di:
             bad, residue = unentitled_detection(ns, tier, topics)
             for g, t in bad:
@@ -294,10 +373,32 @@ def main() -> int:
                       + " (no members -- retired)")
         print()
 
-    if not unfed and not unentitled:
+    if known_idle:
+        by = {}
+        for _, _, t, st in known_idle:
+            by.setdefault(st, set()).add(t)
+        print("declared-idle topics: "
+              + ", ".join(k + "=" + str(len(v)) for k, v in sorted(by.items())))
+        if "investigate" in by:
+            print("  'investigate' is NOT a resting state: "
+                  + ", ".join(sorted(by["investigate"])))
+        print()
+
+    if not unfed and not unentitled and not undeclared:
         print("tier feed: clean -- all " + str(checked) + " rendered consumers"
-              " have a topic they are entitled to derive from")
+              " have a topic they are entitled to derive from, and every")
+        print("  empty one is declared")
         return 0
+
+    if undeclared:
+        print("tier feed: " + str(len(undeclared))
+              + " consumer(s) fed by an UNDECLARED EMPTY topic")
+        print("  The topic exists, so the consumer is 'fed'; it has never")
+        print("  carried a message, so the consumer is starved. Fed is not")
+        print("  flowing. Declare why it is idle in declared-idle-topics.yaml")
+        print("  -- absence of data and absence of an explanation are")
+        print("  different absences, and only the second is a defect.")
+        print()
 
     if unentitled:
         print("tier feed: " + str(len(unentitled)) + " UNENTITLED DETECTION"

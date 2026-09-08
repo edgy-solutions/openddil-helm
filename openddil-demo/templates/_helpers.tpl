@@ -466,7 +466,27 @@ input:
     addresses:
       - {{ $edgeBroker }}
     topics:
+      {{- if not (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) }}
+      # RAW CROSSES A LINK ONLY TO WHERE DERIVATION HAPPENS, OR TO A DECLARED
+      # CONSUMER. This edge has no tier node, so the ROOT derives its state
+      # directly and needs the raw stream. That is the derivation happening at
+      # the other end, and it is why raw belongs on this link.
+      #
+      # A TIER-MANAGED EDGE SENDS NONE. It derives its own state and publishes
+      # the result; its parent consumes that and, under the detection gate, is
+      # forbidden from re-deriving from relayed raw. So after the gate landed
+      # the only groups touching `raw-sensor-stream` on region-east were the
+      # two EMPTY retired ones, and zero groups on the HQ broker read it at
+      # all (all 16 enumerated and described). 3.78M messages on edge-01 alone
+      # were crossing a DDIL link to feed nobody.
+      #
+      # This is the rule, not an optimisation: carrying a topic no consumer
+      # reads is the same defect as rendering a consumer no topic feeds,
+      # pointed the other way. If a declared consumer appears at a parent —
+      # archival, replay, an ADR-0034 training unit — it is DECLARED, and this
+      # condition changes to name it rather than being quietly relaxed.
       - raw-sensor-stream
+      {{- end }}
       - tactical-events
       {{- if include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) }}
       # THE TIER'S DERIVED STATE, carried up because the root no longer
@@ -513,14 +533,22 @@ input:
       - asset-element-inventory     # tier-projector-element-inventory
       - derived-sustainment         # fusion-service-derived
       #
-      # And one for the aggregator being relocated INTO the region. Measured
-      # rather than assumed: faust-regional reads asset-cm-state,
-      # asset-logistics-status and asset-registry-events from HQ, and
-      # asset-telemetry-windows plus derived-sustainment FROM EACH EDGE BROKER
-      # DIRECTLY. Those last two ARE the reachback — it reaches down for
-      # exactly what nothing carried up — so retiring the reachback and
-      # feeding the relocated aggregator are one act, not two.
-      - asset-registry-events       # faust-regional, after relocation
+      # Measured rather than assumed: faust-regional reads
+      # asset-telemetry-windows and derived-sustainment FROM EACH EDGE BROKER
+      # DIRECTLY. Those two ARE the reachback — it reached down for exactly
+      # what nothing carried up — so retiring the reachback and feeding the
+      # relocated aggregator are one act, not two. Both are above.
+      #
+      # `asset-registry-events` WAS listed here and has been removed: it runs
+      # the WRONG DIRECTION. The asset registry is root-owned, and its events
+      # are distributed DOWN to tiers rather than gathered UP from them —
+      # putting it on this bridge asked edges to supply reference data they
+      # never author, which is why it sat at watermark 0 on every edge broker.
+      #
+      # A tier's inputs have TWO directions: derived state UP from children,
+      # reference data DOWN from the root (registry, CM baselines, policy).
+      # This list is the upward half only. The downward half is the
+      # distribution seam, and faust-regional's registry source waits on it.
       #
       # NOT ADDED, and deliberately: `cm-events`. It is a RAW INGEST topic,
       # and detection binds to direct ingest only — the region's
