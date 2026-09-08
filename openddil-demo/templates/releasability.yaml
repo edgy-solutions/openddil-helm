@@ -443,12 +443,24 @@ data:
   # a tier without one is in-cluster only and its PEP runs in header mode,
   # so it has no redirect URI and needs no client.
   tier-clients.json: |
-{{- range $root.Values.edges }}
-{{- if and (include "openddil.isTierManaged" (dict "id" .id "root" $root)) .publicOrigin }}
+{{- /* THE TIER LIST, not `.Values.edges`. A realm client is needed by any
+       tier that terminates a browser session, and a REGION does that as
+       surely as an edge: it renders a PEP, a frontend and an Ingress from
+       the same tier list. Iterating edges here meant region-east came up
+       with a PEP configured for OIDC, an Ingress host, and NO CLIENT to
+       authenticate against -- login would reach Keycloak and fail on an
+       unknown client, which is the "hand-add one client" trap that this
+       whole derivation exists to avoid, arriving from the other direction.
+
+       Derived from the SAME list that decides a tier node exists, so a
+       fourth tier gets its client by being declared rather than by someone
+       remembering this file. */ -}}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if and (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) $tier.publicOrigin }}
 {{- if $root.Values.releasability.oidc.enabled }}
     {
-      "clientId": {{ include "openddil.tierClientId" (dict "id" .id "root" $root) | quote }},
-      "name": {{ printf "OpenDDIL tier PEP (%s)" .id | quote }},
+      "clientId": {{ include "openddil.tierClientId" (dict "id" $tier.id "root" $root) | quote }},
+      "name": {{ printf "OpenDDIL tier PEP (%s)" $tier.id | quote }},
       "description": "Backend-for-frontend for one tier. Confidential: the browser never holds a token.",
       "enabled": true,
       "protocol": "openid-connect",
@@ -460,7 +472,7 @@ data:
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        {{ printf "%s/auth/callback" (.publicOrigin | trimSuffix "/") | quote }}
+        {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
       ],
       "webOrigins": [],
       "attributes": {
