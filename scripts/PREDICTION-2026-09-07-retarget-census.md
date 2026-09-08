@@ -92,3 +92,69 @@ later.
 at the bridges, HQ cannot tell a quiet edge from a downed region uplink. That
 is the gap DESIGN-2026-09-07-two-hop-freshness.md exists to close, and this
 deploy is the step that opens it.
+
+---
+
+# CONFIRMED 2026-09-07 — nine of ten lines, and one instructive miss
+
+| prediction | measured | |
+|---|---|---|
+| 6 reachbacks, unchanged | **6** | correct |
+| edge-01: 3 reachback / 20 stable | 3 / 20 | correct |
+| edge-02: 3 reachback / 20 stable | 3 / 20 | correct |
+| edge-03: unchanged, 23 stable, 14 root-correct | 23 / 14 | correct |
+| residue 4 (edge-01) + 1 (edge-02) | 4 + 1 | correct |
+| region-east: **0 reachback** | **0** | correct |
+| no `connect-dis-mapper`, no `bridge-group-` on region-east | absent | correct |
+| 4 brokers enumerated | 4 | correct |
+| region-east: **16 groups** | **8 (7 stable)** | **WRONG** |
+
+## The miss, and what it actually shows
+
+Predicted by structural parallel with a leaf tier: 8 projectors + 7 restate
+subscriptions + 1 uplink. Measured 8 groups, of which the four projectors are
+exactly `cm-state`, `logistics-status`, `tactical-events`, `telemetry-latest`.
+
+Those are exactly the four topics the bridge carries upward. The region's
+broker holds five topics; a leaf holds twenty-seven. The missing consumers —
+`capability`, `element-inventory`, `element-telemetry`, `windows`, and most
+of the restate subscriptions — are subscribed to topics that do not exist on
+this broker, so they never form a group.
+
+**The finding is not the number, it is what the number means.** A region's
+tier node renders the FULL leaf topology and only the subset whose inputs
+the bridge carries can attach. The rest are running processes with nothing to
+read. That is survivable now — the region relays and projects rather than
+computing — but it is a standing mismatch between what the tier node deploys
+and what a tier at this depth is fed, and the cutover has to face it: moving
+`faust-regional` into the region means the region will need inputs it is not
+currently sent.
+
+## Two corrections to the record
+
+**The high-watermark numbers cited while diagnosing the checksum bug were
+read from the wrong column.** `rpk topic describe -p` puts LOG-START-OFFSET
+at `$5` and HIGH-WATERMARK at `$6`; the "high-watermark 0 on all four topics"
+in the checksum-fix commit message was `$5`. The conclusion was independently
+established and stands — the bridge pods were 2d8h old, the active ReplicaSet
+predated the upgrade, and both renders produced byte-identical checksums —
+but that one line of corroboration was misread and should not be cited.
+Correct figures after the fix: region-east advancing on all five topics
+(raw-sensor-stream 387->425, telemetry-latest-state 389->425, asset-cm-state
+750->844, asset-logistics-status 69->75 over 14 seconds), uplink consuming
+with lag 2-3.
+
+**Group counts fluctuate between runs.** Three consecutive censuses gave
+region-east 6, then 8 groups, and edge-01 briefly showed a
+`fusion-service-cm-state-edge-01` that was gone on the next run. Consumers
+attach and rebalance. The REACHBACK count was stable at 6 across every run;
+the totals were not. So a count is a weaker assertion than a classification,
+and predictions should be stated about classifications where possible.
+
+## One-time rollout note
+
+All three bridges rolled, including edge-03, which was predicted not to.
+Switching the checksum from a hand-listed tuple to a hash of the rendered
+config changes every checksum once. The prediction that edge-03 must not roll
+is about before/after under the SAME scheme, and it was verified that way at
+render time. The one-time roll is the cost of the fix, not a regression.
