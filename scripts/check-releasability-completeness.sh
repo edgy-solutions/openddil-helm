@@ -360,7 +360,31 @@ fi
 # --- step 3: report ---------------------------------------------------------
 printf '%-28s %8s %12s %16s\n' TABLE ROWS NULL_NATION NULL_RELEASABLE
 populated=0
+# ---------------------------------------------------------------------------
+# AGGREGATE TABLES: labelled by COMPOSITION, and a NULL nation is the answer
+# ---------------------------------------------------------------------------
+# Everywhere else "labelled" means both columns are non-null, because an
+# asset-bearing row carries an authorship claim and a release list. A rollup
+# carries no authorship: it is a number over many assets of possibly mixed
+# nationality, and ADR-0029's addendum makes originator_nation an AUTHORSHIP
+# CLAIM that a derived row inherits only when derivation preserves single
+# authorship.
+#
+# It is not a formality. The §4 predicate is a disjunction, so a non-null
+# originator_nation ALONE grants access — stamping a rollup with the nation
+# most contributors share would bypass the composed intersection for everyone
+# in that nation while looking like a perfectly ordinary label. The NULL is
+# what makes the floor hold.
+#
+# So for these tables the test inverts: releasable_to must be non-null (the
+# composition happened), and originator_nation must be NULL (nothing was
+# claimed). A rollup WITH a nation is the finding here, not one without.
+AGGREGATE_TABLES=" region_fleet_summary region_top_factors region_wear_trends "
+
+is_aggregate() { case "$AGGREGATE_TABLES" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 unlabelled=0
+aggregate_ok=0
 empty_tables=""
 declared_tables=""
 undeclared_tables=""
@@ -379,7 +403,19 @@ while IFS='|' read -r t n nn nr; do
   fi
   populated=$((populated + 1))
   mark=""
-  if [ "$nn" -gt 0 ] || [ "$nr" -gt 0 ]; then
+  if is_aggregate "$t"; then
+    if [ "$nr" -gt 0 ]; then
+      mark="   <-- NOT COMPOSED"
+      unlabelled=$((unlabelled + nr))
+    elif [ "$nn" -lt "$n" ]; then
+      # A rollup that DID claim an authorship it cannot have.
+      mark="   <-- AGGREGATE CLAIMS AN ORIGINATOR"
+      unlabelled=$((unlabelled + (n - nn)))
+    else
+      mark="   (aggregate - composed, claims no originator)"
+      aggregate_ok=$((aggregate_ok + 1))
+    fi
+  elif [ "$nn" -gt 0 ] || [ "$nr" -gt 0 ]; then
     mark="   <-- UNLABELLED"
     unlabelled=$((unlabelled + nn + nr))
   fi
@@ -399,6 +435,13 @@ if [ "$unlabelled" -gt 0 ]; then
   echo
   echo "Assets missing a declaration (deduplicated across tables):"
   for t in $TABLES; do
+    # NOT EVERY LABELLED TABLE IS ASSET-KEYED. The rollups key on region_id
+    # and tactical_events on `subject`, so this query errored on three tables
+    # and printed the raw psql error into the findings section — noise in
+    # exactly the place an operator is meant to read a list of asset ids.
+    # Skip tables without the column rather than asking and apologising.
+    has_asset_id="$(q "SELECT count(*) FROM information_schema.columns WHERE table_name='$t' AND column_name='asset_id';")"
+    [ "${has_asset_id:-0}" = "1" ] || continue
     q "SELECT DISTINCT asset_id FROM \"$t\" WHERE originator_nation IS NULL OR releasable_to IS NULL;"
   done | sort -u | sed '/^$/d' | sed 's/^/    /'
   echo
