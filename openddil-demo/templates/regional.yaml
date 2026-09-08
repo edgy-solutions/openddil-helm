@@ -8,6 +8,7 @@
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.redpandaHq.kafkaPort) }}
 {{- range .Values.regions }}
 {{- $region := . }}
+{{- $regionBroker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $region.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
 {{- $edgesInRegion := list }}
 {{- range $root.Values.edges }}
 {{- if eq .region $region.id }}
@@ -51,11 +52,49 @@ spec:
               value: "/app"
             - name: OPENDDIL_REGION_ID
               value: {{ $region.id | quote }}
+            {{- /* THE CUTOVER, AS RELOCATION.
+
+                   The process does not move host or change shape; its WIRING
+                   moves. While the region has no tier node, the aggregator
+                   reads each edge's broker directly and HQ's broker for the
+                   rest — which is UD-10's condition exactly, and was six of
+                   the six reachbacks the census reported: it reached DOWN
+                   into edge-01 and edge-02 for `asset-telemetry-windows` and
+                   `derived-sustainment`, the two topics nothing carried up.
+
+                   Once the region is tier-managed, both source addresses
+                   become the REGION'S OWN BROKER. The edge bridges now carry
+                   those topics upward (see the input contract), so the
+                   aggregator consumes what its children published instead of
+                   reaching into their clusters — which is the same act as
+                   retiring the reachback, not a second one.
+
+                   Its outputs land on the region broker too, and the uplink
+                   carries region-fleet-summary / -top-factors / -wear-trends
+                   to HQ, where the root's projectors read them unchanged.
+                   Only the producer moved. */ -}}
+            {{- $tierManaged := include "openddil.isTierManaged" (dict "id" $region.id "root" $root) }}
             - name: REGIONAL_EDGES
+              {{- if $tierManaged }}
+              # ONE ENTRY, and it is this region's own broker. Not a list of
+              # children: a tier consumes its subtree's state from what was
+              # bridged to it, and an entry per child here would be the
+              # reachback rebuilt from the same values that used to build it.
+              value: {{ printf "%s=%s" $region.id $regionBroker | quote }}
+              {{- else }}
               # Comma-separated edge=broker pairs for THIS region only.
               value: {{ join "," $edgesInRegion | quote }}
+              {{- end }}
             - name: REGIONAL_HQ_BROKERS
+              {{- if $tierManaged }}
+              # The tier's own broker. The name still says HQ because the app
+              # calls this source "hq"; what it means is "the cluster holding
+              # the state this tier aggregates over", and for a tier-managed
+              # region that is the region.
+              value: {{ $regionBroker | quote }}
+              {{- else }}
               value: {{ $hqBroker | quote }}
+              {{- end }}
             - name: REGIONAL_FAN_IN_TOPIC
               value: {{ printf "%s-fan-in" $region.id | quote }}
             - name: REGIONAL_HEARTBEAT_INTERVAL_S

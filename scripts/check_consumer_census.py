@@ -124,8 +124,24 @@ def tier_managed(ns: str) -> set[str]:
     return out
 
 
-def owner_of(group: str) -> str:
-    """'ROOT' when a component above the tier owns it, else 'local'."""
+def owner_of(group: str, tier: str = "") -> str:
+    """'ROOT' when a component ABOVE this tier owns it, else 'local'.
+
+    OWNERSHIP IS RELATIVE TO THE BROKER, which the `region-` prefix makes
+    unavoidable. `region-region-east-source-edge-01` sitting on edge-01 is a
+    reachback: the region's aggregator reaching down into a child. The very
+    same aggregator, relocated into region-east and reading region-east's own
+    broker, is that tier's OWN component and reads as
+    `region-region-east-source-region-east`.
+
+    A prefix test alone would call the relocated one a reachback and report
+    the cutover as having made things worse. So a group that NAMES THE TIER IT
+    SITS ON belongs to that tier. Caught by predicting the post-cutover census
+    by classification before deploying it, which is the only reason it was
+    caught before it produced two confident false positives.
+    """
+    if tier and group.startswith("region-" + tier + "-"):
+        return "local"
     for p in LOCAL_PREFIXES:
         if group.startswith(p):
             return "local"
@@ -248,7 +264,7 @@ def main() -> int:
         # discard the only on-broker trace that a retirement happened, so it
         # is printed — as corroboration, never as a pass.
         residue = [g for g, state in gs
-                   if state != "Stable" and owner_of(g) == "ROOT"]
+                   if state != "Stable" and owner_of(g, tier) == "ROOT"]
         scope = "tier-managed" if tier in managed else "untier-ed — rule N/A"
         print(f"broker {tier}  ({len(stable)} stable of {len(gs)} groups)  [{scope}]")
         if not gs:
@@ -256,10 +272,10 @@ def main() -> int:
                   "NOT proof of a clean census.")
             continue
         for g in sorted(stable):
-            if owner_of(g) == "ROOT" and tier in managed:
+            if owner_of(g, tier) == "ROOT" and tier in managed:
                 print(f"  REACHBACK  {g}")
                 reachbacks.append((tier, g))
-            elif owner_of(g) == "ROOT":
+            elif owner_of(g, tier) == "ROOT":
                 print(f"  root       {g}   (correct — no tier node here)")
             else:
                 print(f"  ok         {g}")

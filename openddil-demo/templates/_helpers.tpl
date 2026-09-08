@@ -498,6 +498,35 @@ input:
       # has simply been sitting on an empty partition; bridging it is what
       # gives that subscription something to read.
       - telemetry-latest-state
+      #
+      # THE REGION'S INPUT CONTRACT (DESIGN-2026-09-07-region-input-contract).
+      # The rule these satisfy: EVERY CONSUMER A TIER RENDERS MUST HAVE A FED
+      # TOPIC, OR MUST NOT BE RENDERED. region-east came up rendering 16
+      # consumers and attaching 8; the other eight were processes at 1/1
+      # Running subscribed to topics their broker did not hold, which no probe
+      # distinguishes from working.
+      #
+      # Six for the tier's own rendered consumers:
+      - asset-capability-snapshot   # tier-projector-capability, fusion-service-capability
+      - asset-telemetry-windows     # tier-projector-windows, fusion-service-windows
+      - asset-element-telemetry     # tier-projector-element-telemetry
+      - asset-element-inventory     # tier-projector-element-inventory
+      - derived-sustainment         # fusion-service-derived
+      #
+      # And one for the aggregator being relocated INTO the region. Measured
+      # rather than assumed: faust-regional reads asset-cm-state,
+      # asset-logistics-status and asset-registry-events from HQ, and
+      # asset-telemetry-windows plus derived-sustainment FROM EACH EDGE BROKER
+      # DIRECTLY. Those last two ARE the reachback — it reaches down for
+      # exactly what nothing carried up — so retiring the reachback and
+      # feeding the relocated aggregator are one act, not two.
+      - asset-registry-events       # faust-regional, after relocation
+      #
+      # NOT ADDED, and deliberately: `cm-events`. It is a RAW INGEST topic,
+      # and detection binds to direct ingest only — the region's
+      # cm-service-cm-events subscription is gated off, so nothing there would
+      # read it. Carrying a topic no rendered consumer reads is the same
+      # defect as rendering a consumer no topic feeds, pointed the other way.
       {{- end }}
     consumer_group: "bridge-group-{{ $edge.id }}"
 
@@ -632,6 +661,17 @@ input:
       - asset-cm-state
       - telemetry-latest-state
       - tactical-events
+      #
+      # AND WHAT THIS TIER ITSELF PRODUCES. HQ runs projector-region-fleet-
+      # summary, -top-factors and -wear-trends against these topics. Before
+      # the cutover faust-regional produced them onto the HQ broker directly;
+      # once it lives in the region it produces them here, and if the uplink
+      # does not carry them HQ's regional views go EMPTY on cutover day —
+      # which is not the degraded mode ADR-0036 clause 4 specifies, and looks
+      # like a region with no assets rather than a relay with a gap.
+      - region-fleet-summary
+      - region-top-factors
+      - region-wear-trends
     consumer_group: "uplink-group-{{ $tier.id }}"
 
 output:
