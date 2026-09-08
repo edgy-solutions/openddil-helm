@@ -349,6 +349,42 @@ data:
         consumer_group: tier-projector-element-inventory-{{ $tier.id }}
         decode_as: json
         mode: upsert
+{{- if $tier.hasChildren }}
+      #
+      # AN INTERMEDIATE PROJECTS ITS OWN ROLLUPS. The eight mappings above
+      # are the LEAF shape: what a tier receives about assets. A tier with
+      # children also PRODUCES a regional picture, and after the cutover the
+      # aggregator lives here — so its outputs land on this broker and this
+      # store is where they belong.
+      #
+      # Without these the region's own screen read "awaiting first emission"
+      # while HQ held three class partials of the very numbers this tier
+      # computed. The aggregator's home was the one place its work did not
+      # appear.
+      #
+      # Rendered only for a tier with children, because a leaf produces no
+      # rollups and a projector subscribed to topics its broker never carries
+      # is an unfed consumer at 1/1 — the shape check_tier_feed exists to
+      # find.
+      - topic: region-fleet-summary
+        handler: region_fleet_summary
+        table: region_fleet_summary
+        consumer_group: tier-projector-region-fleet-{{ $tier.id }}
+        decode_as: openddil.regional.v1.RegionFleetSummary
+        mode: upsert
+      - topic: region-top-factors
+        handler: region_top_factors
+        table: region_top_factors
+        consumer_group: tier-projector-region-factors-{{ $tier.id }}
+        decode_as: openddil.regional.v1.RegionTopFactors
+        mode: upsert
+      - topic: region-wear-trends
+        handler: region_wear_trends
+        table: region_wear_trends
+        consumer_group: tier-projector-region-wear-{{ $tier.id }}
+        decode_as: openddil.regional.v1.RegionWearTrends
+        mode: upsert
+{{- end }}
 
 ---
 # ===========================================================================
@@ -533,8 +569,32 @@ spec:
             # Per-tier group name — see the identical fix in edge.yaml for why
             # the bare "bridge-group" default is a silent zero rather than an
             # error. This line previously carried that default verbatim.
+            #
+            # AND THE NAME FOLLOWS THE RELAY KIND, not the tier id alone. A
+            # LEAF's outbound relay is a bridge and commits under
+            # `bridge-group-<id>`; an INTERMEDIATE's is an uplink and commits
+            # under `uplink-group-<id>`. Rendering "bridge-group-region-east"
+            # named a group that has never existed, so the probe raised
+            # BridgeGroupAbsent and the region's link indicator read
+            # PROBE DOWN on a fully connected region.
+            #
+            # The honest sentinel worked exactly as ADR-0036 clause 1 intends
+            # — it showed the probe unhealthy rather than a confident zero —
+            # which is why this was a visible defect and not a silent one.
+            # It is UD-10's naming class arriving at the first tier that is
+            # neither leaf nor root: the id was parameterised and the KIND
+            # was not.
+            #
+            # A severance test on a tier whose link probe is already down
+            # proves nothing, so this blocks the cut rather than following it.
             - name: BRIDGE_CONSUMER_GROUP
-              value: "bridge-group-{{ $tier.id }}"
+              value: {{ if $tier.hasChildren }}{{ printf "uplink-group-%s" $tier.id | quote }}{{ else }}{{ printf "bridge-group-%s" $tier.id | quote }}{{ end }}
+            # The link this tier owns, named for what it is. A leaf's is the
+            # edge->HQ bridge; an intermediate's is its own uplink, and its
+            # screen should not say EDGE->HQ BUFFER while showing a region's
+            # link.
+            - name: BUFFER_ROW_ID
+              value: {{ $tier.id | quote }}
             - name: TOXIPROXY_API_URL
               value: {{ printf "http://%s-toxiproxy%s:8475" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
             - name: HQ_LINK_PROXY
