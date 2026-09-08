@@ -58,3 +58,82 @@ not, which is why the assertions below are about what each consumer IS.
 * **An unfed consumer at region-east** — a topic in the input set is not
   actually arriving; a topic that exists at high-watermark 0 passes the feed
   check and starves the consumer just the same.
+
+---
+
+# CONFIRMED 2026-09-08 — census exact, feed check short, and the reason matters
+
+## Consumer census: every classification as predicted
+
+    edge-01     REACHBACK asset-registry-edge-01, logistics-sim-edge-01
+                residue   region-region-east-source-edge-01  (retired)
+    edge-02     REACHBACK asset-registry-edge-02, logistics-sim-edge-02
+                residue   region-region-east-source-edge-02  (retired)
+    edge-03     untier-ed, rule N/A, unchanged
+    region-east ZERO reachbacks
+
+    consumer census: 4 REACHBACK(S)          six became four, as predicted
+
+The reachbacks the cutover targeted did not merely disappear — they appear as
+**residue**, Empty groups holding their last committed offsets. That is the
+on-broker trace that a retirement happened rather than a consumer that was
+never there, and it is why the residue distinction was worth restoring.
+
+And the three aggregator groups now on region-east's own broker —
+`region-region-east-aggregator`, `-hq-source`, `-source-region-east` — all
+classify **local**. Under the old bare-prefix rule every one of them would
+have read as a reachback and the cutover would have scored as a regression on
+the tier it just cleaned. Predicting by classification is what caught that;
+a prediction by count would have said "fewer than six" and passed.
+
+The relocated aggregator's outputs reach HQ: `region-fleet-summary` at
+79031 with `projector-region-fleet-summary` at **lag 0**.
+
+## Feed check: predicted 12 of 12, measured 8 of 12
+
+Wrong, and the cause is upstream rather than in this step.
+
+    UNFED  fusion-service-capability-region-east      <- asset-capability-snapshot
+    UNFED  tier-projector-capability-region-east      <- asset-capability-snapshot
+    UNFED  tier-projector-element-inventory-region-east <- asset-element-inventory
+    UNFED  tier-projector-element-telemetry-region-east <- asset-element-telemetry
+
+Those three topics were added to the bridge and the bridge IS subscribed to
+them — they appear in `bridge-group-edge-01` with lag `-`. They are **empty at
+edge-01 itself**: `asset-capability-snapshot`, `asset-element-telemetry`,
+`asset-element-inventory` all sit at high-watermark **0** on the edge broker.
+A bridge cannot carry what was never produced, and a topic nothing produced to
+is never created at the destination.
+
+**So the input contract is satisfied by configuration and not by data.** Four
+pipelines are idle FLEET-WIDE, not merely at the region — and the feed check
+reports edge-01 as 15 of 15 because the topics EXIST there at watermark 0.
+That is precisely the caveat the check prints about itself: *a topic that
+exists at high-watermark 0 passes here and starves the consumer just the
+same.* The caveat was written before it was needed and then it was needed.
+
+Two of the six new topics did materialise empty at the region
+(`asset-telemetry-windows`, `asset-registry-events`, both hw 0), so their
+consumers count as fed while being equally starved. **Fed is not flowing**,
+and the gap between those two words is now the honest description of four
+consumers this check calls green.
+
+`derived-sustainment` is the one that flowed: 587,950 messages at the region
+within a minute of the cutover — which is the topic the reachback existed to
+fetch.
+
+## What this leaves
+
+* **Four reachbacks remain** — `asset-registry-edge-0N` and
+  `logistics-sim-edge-0N`, root-side components that retire on their own
+  terms. Predicting zero would have claimed work this step does not do.
+* **Four consumers unfed, upstream** — whether an idle
+  `asset-capability-snapshot` is expected for this scenario or a defect in
+  what the edge produces is a question for the edge, not the bridge. Named
+  here rather than absorbed into "the cutover is done".
+* **`raw-sensor-stream` is now carried to the region for no consumer.** After
+  the detection gate, the only groups touching it there are the two Empty
+  retired ones. It is the highest-volume topic on the wire (3.78M at edge-01)
+  crossing a DDIL link for nobody. Removing it is a separate change with its
+  own verification — the same topic list feeds edge-03 -> HQ — and is
+  recorded rather than folded in here.
