@@ -360,7 +360,12 @@ data:
     output:
       kafka:
         addresses:
-          - {{ printf "%s-toxiproxy%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.toxiproxy.apiPort) }}
+          {{- /* PUBLISHES TO ITS PARENT, not unconditionally to HQ. An edge
+                 under a tier-managed region bridges to the REGION; the region
+                 bridges to HQ. Falls back to HQ via toxiproxy when the parent
+                 has no tier node, which is today's topology for an untier-ed
+                 subtree and stays correct. See openddil.bridgeTarget. */}}
+          - {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) }}
         topic: "${! meta(\"kafka_topic\") }"
         max_retries: 0
 ---

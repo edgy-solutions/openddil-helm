@@ -316,6 +316,51 @@ Usage:
 {{- end }}
 
 {{/*
+openddil.bridgeTarget — where a tier's bridge publishes.
+
+A tier publishes its derived state to ITS PARENT, not to HQ. That is what
+makes the tree recursive rather than two-level: an edge under a
+tier-managed region bridges to the REGION, and the region bridges to HQ.
+
+Falls back to HQ (via toxiproxy, which is the severable link) when the
+parent has no tier node — an edge whose region is not tier-managed still
+reaches HQ directly, which is today's topology and stays correct.
+
+⚠ THE FALLBACK IS THE COMPATIBILITY PATH, NOT THE MODEL. If every tier in a
+subtree is managed, nothing should be addressing HQ but the top of that
+subtree. A bridge still pointing at toxiproxy under a managed region means
+the retarget did not reach it.
+
+Usage: include "openddil.bridgeTarget" (dict "tier" $tier "root" $root)
+*/}}
+{{- define "openddil.bridgeTarget" -}}
+{{- $root := .root -}}
+{{- /* Accepts an entry from EITHER source. A tier-list entry carries an
+       explicit `parent`; a raw `.Values.edges` entry carries `region`,
+       which for an edge IS its parent. edge.yaml still ranges over
+       `.Values.edges` for its udpPort and friends, so both spellings
+       arrive here.
+
+       SELF-PARENT IS REFUSED, not resolved. `region: <own id>` is how a
+       region is shaped, and treating that as a parent would have a tier
+       bridge to itself — the same violation the tier config hit an hour
+       ago, wearing a different value. No parent belongs to the root
+       alone, so anything that resolves to itself is treated as having
+       none and falls back to HQ. */ -}}
+{{- $parent := .tier.parent | default .tier.region | default "" -}}
+{{- if eq $parent (.tier.id | toString) }}{{- $parent = "" -}}{{- end -}}
+{{- $parentManaged := "" -}}
+{{- if $parent }}
+{{- $parentManaged = include "openddil.isTierManaged" (dict "id" $parent "root" $root) -}}
+{{- end }}
+{{- if $parentManaged -}}
+{{- printf "%s-redpanda-%s%s:%d" $root.Release.Name $parent (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) -}}
+{{- else -}}
+{{- printf "%s-toxiproxy%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.toxiproxy.apiPort) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.tierClientId — the OIDC client id for a tier.
 
 ONE DEFINITION, READ BY BOTH SIDES OF THE BOUNDARY. The chart configures
