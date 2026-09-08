@@ -181,7 +181,8 @@ def group_topics(ns: str, tier: str, group: str) -> set[str]:
     return topics
 
 
-def unentitled_detection(ns: str, tier: str, topics: set[str]) -> list[tuple[str, str]]:
+def unentitled_detection(ns: str, tier: str,
+                         topics: set[str]) -> tuple[list, list]:
     """Detection groups ATTACHED to a relayed raw topic at a non-ingesting tier.
 
     Checked against the BROKER, not against the rendered set, because the
@@ -191,25 +192,38 @@ def unentitled_detection(ns: str, tier: str, topics: set[str]) -> list[tuple[str
     that ran with the env absent before the gate landed.
     """
     if not (RAW_INGEST_TOPICS & topics):
-        return []
+        return [], []
     pod = "openddil-redpanda-" + tier + "-0"
     out = subprocess.run(
         ["kubectl", "exec", "-n", ns, pod, "--", "rpk", "group", "list",
          "--brokers", "localhost:9092"],
         capture_output=True, text=True)
     if out.returncode != 0:
-        return []
-    bad = []
+        return [], []
+    bad, residue = [], []
     for line in out.stdout.splitlines()[1:]:
         parts = line.split()
         if len(parts) < 3:
             continue
-        g = parts[1]
+        g, state = parts[1], parts[2]
         if not g.startswith(DETECTION_PREFIXES):
             continue
-        for t in sorted(group_topics(ns, tier, g) & RAW_INGEST_TOPICS):
-            bad.append((g, t))
-    return bad
+        hits = sorted(group_topics(ns, tier, g) & RAW_INGEST_TOPICS)
+        if not hits:
+            continue
+        # STATE DECIDES. A group with no members survives its consumer,
+        # holding committed offsets until the broker expires it. After the
+        # subscription is pruned that is a RETIREMENT TRACE, not a live
+        # violation -- and reporting it as one is the false positive this
+        # function's docstring warns about, committed by this function.
+        #
+        # Measured 2026-09-08: the prune deleted three subscriptions and the
+        # check still called cm-service-silver-region-east UNENTITLED,
+        # because it read a name and not a state. Same correction the
+        # consumer census needed, one check later.
+        for t in hits:
+            (bad if state == "Stable" else residue).append((g, t))
+    return bad, residue
 
 
 def main() -> int:
@@ -271,9 +285,13 @@ def main() -> int:
             print("  UNFED      " + g + "   <- " + t)
             unfed.append((tier, g, t))
         if not di:
-            for g, t in unentitled_detection(ns, tier, topics):
+            bad, residue = unentitled_detection(ns, tier, topics)
+            for g, t in bad:
                 print("  UNENTITLED " + g + "   <- " + t + " (relayed raw)")
                 unentitled.append((tier, g, t))
+            for g, t in residue:
+                print("  residue    " + g + "   <- " + t
+                      + " (no members -- retired)")
         print()
 
     if not unfed and not unentitled:
