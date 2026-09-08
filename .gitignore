@@ -1,0 +1,7 @@
+# The operator's declared kube-context for scripts/lib/require-cluster.sh.
+# LOCAL ON PURPOSE, NOT COMMITTED. Baking one lab's context name into a chart
+# other people deploy would make the guard wrong for every one of them, and a
+# guard that is wrong by default is a guard they delete. A fresh clone has no
+# declaration and every cluster-touching script refuses until someone states
+# which cluster they mean -- which is the safe direction, and the point.
+.expected-context

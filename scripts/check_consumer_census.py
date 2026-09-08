@@ -57,6 +57,8 @@ observable.
 """
 from __future__ import annotations
 
+import os
+import pathlib
 import subprocess
 import sys
 
@@ -163,8 +165,56 @@ def which_cluster() -> tuple[str, str]:
     return ctx, server or "(unknown)"
 
 
+def require_cluster(ctx: str) -> None:
+    """Refuse to run against a cluster nobody named.
+
+    The bash counterpart is lib/require-cluster.sh and the reasoning lives
+    there. Duplicated rather than shelled out to, because a Python script
+    that invokes a bash guard to decide whether Python may proceed has two
+    ways to fail open instead of one.
+
+    UNSET IS A REFUSAL, not a default. Falling back to "whatever is current"
+    would restore the exact behaviour this exists to remove, while looking
+    like a guard.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    expect = os.environ.get("OPENDDIL_EXPECT_CONTEXT", "").strip()
+    if not expect:
+        f = root / ".expected-context"
+        if f.is_file():
+            expect = f.read_text(encoding="utf-8").strip()
+
+    err = lambda m: print(m, file=sys.stderr)
+
+    if not expect:
+        err("REFUSING TO RUN: no expected kube-context is declared.")
+        err("  This script reads a cluster, and which cluster is not")
+        err("  something it will infer from current-context.")
+        err("  Declare it once:")
+        err("      echo edgy-lab > " + str(root / ".expected-context"))
+        err("  or per-invocation: OPENDDIL_EXPECT_CONTEXT=<ctx> ...")
+        raise SystemExit(78)
+
+    if not ctx or ctx == "(none)":
+        err("REFUSING TO RUN: kubectl reports no current-context.")
+        err("  Expected " + expect + ". An empty context matches nothing;")
+        err("  it is a kubeconfig that cannot answer.")
+        raise SystemExit(78)
+
+    if ctx != expect:
+        err("REFUSING TO RUN: wrong cluster.")
+        err("    expected context : " + expect)
+        err("    current context  : " + ctx)
+        err("  Nothing has been read. This census once ran against a")
+        err("  cluster with no openddil namespace and reported 'no")
+        err("  per-tier brokers found' -- a sentence indistinguishable")
+        err("  from a torn-down deployment. That is what this prevents.")
+        raise SystemExit(78)
+
+
 def main() -> int:
     ctx, server = which_cluster()
+    require_cluster(ctx)
     ns = sys.argv[1] if len(sys.argv) > 1 else "openddil"
     print(f"consumer census — namespace {ns}")
     print(f"  cluster: {ctx}  ({server})")

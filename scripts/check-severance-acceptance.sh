@@ -36,6 +36,18 @@
 # ===========================================================================
 set -uo pipefail
 
+# ---------------------------------------------------------------------------
+# WHICH CLUSTER. Asserted, never inherited. See lib/require-cluster.sh for
+# why this is a mechanism rather than a line in the README.
+#
+# The `|| exit 1` is load-bearing: these scripts run under `set -u` without
+# `-e`, so a missing or unreadable helper would otherwise print a warning and
+# let the script continue UNGUARDED -- a guard that fails open is worse than
+# none, because it is also reassuring.
+# ---------------------------------------------------------------------------
+. "$(dirname "$0")/lib/require-cluster.sh" || exit 1
+
+
 TIER="${1:-}"
 NS="${2:-openddil}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
