@@ -958,6 +958,15 @@ releasability:
     # empty rather than refused — which is the accurate statement about it.
     - tactical_events
     - asset_telemetry_windows
+    # Joined 2026-09-08. The rollups, labelled by COMPOSITION: the aggregator
+    # intersects its contributors' releasable_to over the same snapshot the
+    # counts come from, so an aggregate is no more visible than its least
+    # visible input. Their originator_nation stays NULL on purpose — the §4
+    # predicate is a disjunction, so a nation stamped on a rollup would ALONE
+    # grant access and bypass the intersection while looking like a label.
+    - region_fleet_summary
+    - region_top_factors
+    - region_wear_trends
     # Promoted the same day, after the completeness gate refused the halfway
     # position: both now HAVE the columns and have ZERO unlabelled rows
     # (asset_registry 14/0 by backfill, inventory_items 0/0 because empty),
@@ -1013,13 +1022,22 @@ releasability:
   # assets needs a composition rule, which is the regional node's §4
   # decision and deliberately not defaulted.
   pendingLabelTables:
-    # Only the rollups remain. Each is an aggregate over many assets of
-    # possibly mixed nationality, which needs a composition rule rather than
-    # propagation — the regional node's §4 decision, with the intersection
-    # floor already recorded so nobody defaults to union.
-    - region_fleet_summary
-    - region_top_factors
-    - region_wear_trends
+    # EMPTY, as of 2026-09-08. The three rollups were the last entries and
+    # they are labelled now — by COMPOSITION rather than propagation, which
+    # is why they were held back while every other table was promoted.
+    #
+    # The rule is intersection, applied in the aggregator over the same
+    # snapshot the counts come from: a rollup is no more visible than its
+    # least visible input. One ATL-only asset makes every rollup in that
+    # region ATL-only; one UNLABELLED asset makes it releasable to nobody,
+    # because under deny-unlabeled an unlabelled row is releasable to no one
+    # and intersecting with no-one gives no-one.
+    #
+    # AN EMPTY LIST HERE IS A CLAIM, not an oversight, and the completeness
+    # gate is what keeps it honest: it enumerates every PEP-served table and
+    # reports anything unlabelable as a finding, so this list going empty is
+    # checkable rather than asserted.
+    []
 
   # A DEMO identity provider: start-dev, in-memory H2, published passwords,
   # no TLS. Correct for a lab and disqualifying anywhere else. A real
