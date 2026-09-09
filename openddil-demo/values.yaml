@@ -332,6 +332,24 @@ restateHub:
     limits:   { cpu: 500m, memory: 512Mi }
 
 # --- Per-edge services ------------------------------------------------------
+# ---------------------------------------------------------------------------
+# relayStallProbe — liveness for the Benthos relays (bridge, uplink, mapper)
+# ---------------------------------------------------------------------------
+# Fires only when input advanced AND confirmed output did not AND (for a relay
+# with a remote destination) that destination is reachable. The third term is
+# what keeps a severance from becoming a crash loop: under a cut the relay's
+# output legitimately stops, because buffering IS the designed degraded mode.
+#
+# GENEROUS ON PURPOSE. periodSeconds x failureThreshold is the budget:
+# 60s x 3 = three minutes of confirmed stall. A flapping liveness probe on a
+# relay is an outage of this system's own making, and a wedge lasting three
+# minutes is still caught long before a person notices it.
+relayStallProbe:
+  enabled: true
+  initialDelaySeconds: 180
+  periodSeconds: 60
+  failureThreshold: 3
+
 sensorIngest:
   # Stall detection -> LIVENESS. The endpoint reports 503 only when input
   # advanced over its window and output did not; see openddil-sensor-ingest's

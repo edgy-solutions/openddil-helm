@@ -1,0 +1,24 @@
+{{- if .Values.relayStallProbe.enabled }}
+# ===========================================================================
+# relay-stall-probe — liveness for the Benthos relays
+# ===========================================================================
+# The Python services hold their own progress state in memory, so their stall
+# detector lives in-process. A relay is a third-party binary with no hook —
+# but the Connect image has a shell, wget and awk (checked 2026-09-09), so the
+# state lives in a file beside it in the SAME container. The sidecar that was
+# the fallback for a distroless image is not needed, and would have added a
+# component that can itself be wrong: the failure class this whole mechanism
+# exists to reduce.
+#
+# Shipped as a ConfigMap rather than baked into the image because the image is
+# upstream's. Same reasoning as the generated connect configs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-relay-stall-probe
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  relay-stall-probe.sh: |
+{{ .Files.Get "files/relay-stall-probe.sh" | indent 4 }}
+{{- end }}

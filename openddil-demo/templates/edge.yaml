@@ -406,13 +406,44 @@ spec:
           # THROUGH toxiproxy, which is why the output address is toxiproxy
           # rather than redpanda-hq — that is the severance-injection seam,
           # not an accident.
+          {{- if $root.Values.relayStallProbe.enabled }}
+          # STALL -> LIVENESS. Readiness stays Connect's own notion of
+          # connected; the remedy for a wedge is a restart, and restart is
+          # what liveness does. See files/relay-stall-probe.sh for why each
+          # term is required -- in particular why an UNREACHABLE DESTINATION
+          # IS NOT STALLED, which is what stops a severance becoming a crash
+          # loop: under a cut this relay's output legitimately stops, because
+          # buffering is the designed degraded mode.
+          env:
+            - name: DEST_HOST
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | first | quote }}
+            - name: DEST_PORT
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | last | quote }}
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "/probe/relay-stall-probe.sh"]
+            initialDelaySeconds: {{ $root.Values.relayStallProbe.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.relayStallProbe.periodSeconds }}
+            failureThreshold: {{ $root.Values.relayStallProbe.failureThreshold }}
+            timeoutSeconds: 10
+          {{- end }}
           volumeMounts:
             - name: connect-config
               mountPath: /connect.yaml
               subPath: connect.yaml
+            {{- if $root.Values.relayStallProbe.enabled }}
+            - name: stall-probe
+              mountPath: /probe
+            {{- end }}
           resources:
             {{- toYaml $root.Values.edgeHqBridge.resources | nindent 12 }}
       volumes:
+        {{- if $root.Values.relayStallProbe.enabled }}
+        - name: stall-probe
+          configMap:
+            name: {{ $root.Release.Name }}-relay-stall-probe
+            defaultMode: 0755
+        {{- end }}
         - name: connect-config
           configMap:
             name: {{ $root.Release.Name }}-edge-hq-bridge-config-{{ $edge.id }}
