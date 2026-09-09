@@ -90,8 +90,48 @@ ACTION="${2:-status}"
 NS="${3:-openddil}"
 POLICY="openddil-sever-${TIER}"
 
+# ---------------------------------------------------------------------------
+# TWO MODES, BECAUSE A LEAF AND AN INTERMEDIATE DIFFER
+# ---------------------------------------------------------------------------
+# For a LEAF, "cut from the parent" and "cut from everything above" are the
+# same policy, and this script only ever had one.
+#
+# For an INTERMEDIATE they are different, and the difference is not academic:
+# a region with its children also cut renders, ON ITS OWN SCREEN, exactly like
+# a region serving its own data with its children attached. Its rollups drift
+# down as edges stop arriving while the panel stays green and fresh. The
+# failure would be invisible at precisely the surface the test watches.
+#
+#   --from-parent  cut the tier's UPLINK; its subtree stays attached.
+#                  The default, because it is the scenario that names a
+#                  DDIL event: the link to higher echelon is lost and the
+#                  tier keeps serving the subtree it is responsible for.
+#   --isolate      cut everything, subtree included. A site-loss scenario.
+#
+# A leaf has no subtree, so the two modes render identically there — which is
+# correct, and is why the flag is not restricted to intermediates.
+MODE="from-parent"
+for arg in "$@"; do
+  case "$arg" in
+    --from-parent) MODE="from-parent" ;;
+    --isolate)     MODE="isolate" ;;
+    --dry-run)     DRY_RUN=1 ;;
+  esac
+done
+DRY_RUN="${DRY_RUN:-0}"
+
 if [ -z "$TIER" ]; then
-  echo "usage: $0 <tier-id> on|off|status [namespace]" >&2
+  echo "usage: $0 <tier-id> on|off|status [namespace] [--from-parent|--isolate] [--dry-run]" >&2
+  echo "" >&2
+  echo "  --from-parent  (default) cut the uplink; the subtree stays attached" >&2
+  echo "  --isolate      cut everything, subtree included" >&2
+  echo "  --dry-run      render the policy and print it; apply nothing" >&2
+  echo "" >&2
+  echo "  LOG IN BEFORE YOU CUT. Keycloak runs at the ROOT, so a severed tier" >&2
+  echo "  cannot mint new sessions -- an existing cookie keeps working for its" >&2
+  echo "  TTL, a fresh login does not. Open and authenticate every screen the" >&2
+  echo "  demonstration will use BEFORE the first cut, or the recording shows" >&2
+  echo "  an identity outage nobody intended to demonstrate." >&2
   exit 2
 fi
 
@@ -148,12 +188,54 @@ except Exception:
 ROOT_HOST="openddil-postgres-hq"; ROOT_PORT=5432
 SITE_HOST="openddil-tier-pg-${TIER}"; SITE_PORT=5432
 
+# ---------------------------------------------------------------------------
+# THE SUBTREE, discovered from what is deployed
+# ---------------------------------------------------------------------------
+# A child's bridge config names its parent's broker, so the set of tiers whose
+# bridge points at THIS tier is exactly this tier's children. Read from the
+# cluster rather than from a values file, for the same reason site membership
+# is: the question is what is running, not what was declared.
+#
+# Empty for a leaf, which is why --from-parent and --isolate render the same
+# policy there.
+CHILD_BRIDGES=()
+while IFS= read -r line; do
+  [ -n "$line" ] && CHILD_BRIDGES+=("$line")
+done < <(
+  kubectl get cm -n "$NS" -o name 2>/dev/null     | sed -n 's|.*/openddil-edge-hq-bridge-config-||p'     | while IFS= read -r child; do
+        [ -z "$child" ] && continue
+        # A TIER IS NOT ITS OWN CHILD. A bridge config names its own broker on
+        # the INPUT side and its parent's on the OUTPUT side, so a bare match
+        # finds the tier itself and calls it a child of itself. Same shape as
+        # the self-parent `bridgeTarget` refused when the tier list was built:
+        # a relation that must be irreflexive, discovered from a string that
+        # appears on both ends of it.
+        #
+        # Left in, edge-01 would have reported a one-member subtree and its
+        # two modes would have rendered differently -- a leaf pretending to
+        # have dependants.
+        [ "$child" = "$TIER" ] && continue
+        if kubectl get cm -n "$NS" "openddil-edge-hq-bridge-config-$child"              -o "jsonpath={.data.connect\.yaml}" 2>/dev/null              | grep -q -- "-redpanda-${TIER}:"; then
+          echo "edge-hq-bridge-$child"
+        fi
+      done
+)
+
 render_policy() {
   local sel=""
   local c
   for c in "${SITE[@]}"; do
     sel="${sel}                - ${c}"$'\n'
   done
+  # In from-parent mode the children stay reachable; in isolate mode they do
+  # not. Rendered into the SAME allow-list the simulators use, so there is one
+  # place a pod can be permitted and no second mechanism to forget.
+  if [ "$MODE" = "from-parent" ] && [ "${#CHILD_BRIDGES[@]}" -gt 0 ]; then
+    for c in "${CHILD_BRIDGES[@]}"; do
+      [ -n "$c" ] && sel="${sel}                - ${c}
+"
+    done
+  fi
   cat <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -200,6 +282,36 @@ ${sel}    - ports:
         - {protocol: TCP, port: 53}
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# DRY RUN. Render and print; apply nothing, restart nothing, probe nothing.
+# ---------------------------------------------------------------------------
+# This script deletes pods and applies a default-deny policy. An edit to it
+# that is wrong is wrong DURING a sever, when half the site is restarting --
+# which is how a previous attempt left `${child_sel}` referenced and
+# undefined, a failure that would have surfaced under `set -u` at apply time
+# and not before. So the render is inspectable without consequences, and the
+# operator can read the allow-list before trusting it.
+if [ "$DRY_RUN" = "1" ]; then
+  echo "DRY RUN — mode=$MODE, nothing will be applied"
+  printf '  site (%d): %s
+' "${#SITE[@]}" "${SITE[*]}"
+  if [ "${#CHILD_BRIDGES[@]}" -gt 0 ]; then
+    printf '  subtree (%d): %s
+' "${#CHILD_BRIDGES[@]}" "${CHILD_BRIDGES[*]}"
+    if [ "$MODE" = "from-parent" ]; then
+      echo "  -> subtree STAYS ATTACHED (--from-parent)"
+    else
+      echo "  -> subtree IS CUT (--isolate)"
+    fi
+  else
+    echo "  subtree: none — this tier is a leaf, so both modes are identical"
+  fi
+  echo
+  render_policy
+  exit 0
+fi
+
 
 case "$ACTION" in
   status)

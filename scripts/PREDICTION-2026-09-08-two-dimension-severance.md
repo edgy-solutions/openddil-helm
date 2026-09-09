@@ -3,7 +3,9 @@
 Written before anything is cut. **Nothing has been severed**; the cluster is
 in its connected state, verified by `sever-tier.sh region-east status`.
 
-## BLOCKER: the sever script assumes a LEAF
+## BLOCKER — CLEARED 2026-09-08. Kept for the record.
+
+### The sever script assumed a LEAF
 
 `sever-tier.sh` renders a default-deny NetworkPolicy over the tier's
 discovered site, allowing same-site traffic, DNS, and the central simulators
@@ -88,3 +90,45 @@ rehearsal passed while the link was still up.
 
 **A half-cut region is the ruled-out end state.** Each dimension heals before
 the next begins, and the run ends connected.
+
+
+---
+
+## Resolution 2026-09-08 — two modes, and the dry-run that proved them
+
+`sever-tier.sh` now takes `--from-parent` (default) and `--isolate`.
+
+* **`--from-parent`** cuts the tier's uplink and leaves its subtree attached.
+  It is the default because it is the scenario that names a DDIL event: the
+  link to higher echelon is lost and the tier keeps serving what it is
+  responsible for.
+* **`--isolate`** cuts everything, subtree included — a site-loss scenario.
+
+The subtree is discovered from what is DEPLOYED: a child's bridge config
+names its parent's broker, so the tiers whose bridge points at this one are
+exactly its children. A leaf finds none, which is why both modes render
+identically there — correct, and the reason the flag is not restricted to
+intermediates.
+
+**One bug the dry-run caught before any policy existed.** A bridge config
+names its own broker on the INPUT side and its parent's on the OUTPUT side,
+so a bare match found edge-01 as a child of itself. Left in, a leaf would have
+reported a one-member subtree and its two modes would have rendered
+differently — a leaf pretending to have dependants. Same shape as the
+self-parent `bridgeTarget` refused when the tier list was built: **a relation
+that must be irreflexive, discovered from a string that appears on both ends
+of it.**
+
+Verified by dry-run, four cases, nothing applied:
+
+| case | result |
+|---|---|
+| edge-01, either mode | `subtree: none — a leaf, both modes identical` |
+| region-east `--from-parent` | 6 child-bridge lines in the policy body |
+| region-east `--isolate` | 0 |
+
+**And the login preamble is in the usage text**, not only in a readback:
+Keycloak runs at the root, so a severed tier cannot mint new sessions. An
+existing cookie works for its TTL; a fresh login does not. Every screen the
+demonstration uses is opened and authenticated BEFORE the first cut, or the
+recording shows an identity outage nobody intended to demonstrate.
