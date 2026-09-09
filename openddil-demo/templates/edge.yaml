@@ -82,6 +82,35 @@ spec:
               containerPort: {{ $edge.udpPort }}
             - name: http
               containerPort: {{ $root.Values.sensorIngest.httpPort }}
+          {{- if $root.Values.sensorIngest.stallProbe.enabled }}
+          # STALL DETECTION GATES LIVENESS, NOT READINESS.
+          #
+          # Readiness removes a pod from Service endpoints, which means
+          # nothing for a Kafka client: nobody routes to it, and the pod that
+          # is stuck stays stuck. The remedy for a wedge is a RESTART, and
+          # restart is what liveness does. Wiring this to readiness would ship
+          # a probe that flips endpoints nobody reads while the wedged process
+          # runs forever — a check that appears to act and does not.
+          #
+          # The endpoint answers 503 only when INPUT ADVANCED AND OUTPUT DID
+          # NOT. Both terms are load-bearing: "output stopped" alone fires on
+          # a quiet fleet, and a liveness probe that restarts healthy pods
+          # every window is a worse outage than the wedge it was added to
+          # catch.
+          #
+          # THRESHOLDS ARE MINUTES. failureThreshold x periodSeconds is the
+          # real budget, and it is deliberately long — a wedge that persists
+          # for minutes is still caught far sooner than a person would notice
+          # it, while a flapping probe is an outage of its own making.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            initialDelaySeconds: {{ $root.Values.sensorIngest.stallProbe.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.sensorIngest.stallProbe.periodSeconds }}
+            failureThreshold: {{ $root.Values.sensorIngest.stallProbe.failureThreshold }}
+            timeoutSeconds: 5
+          {{- end }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /proto

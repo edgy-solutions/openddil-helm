@@ -333,6 +333,21 @@ restateHub:
 
 # --- Per-edge services ------------------------------------------------------
 sensorIngest:
+  # Stall detection -> LIVENESS. The endpoint reports 503 only when input
+  # advanced over its window and output did not; see openddil-sensor-ingest's
+  # stall.py for why both terms are required and why this is liveness rather
+  # than readiness.
+  #
+  # GENEROUS ON PURPOSE. periodSeconds x failureThreshold is the real budget:
+  # 30s x 4 = two minutes of confirmed stall before a restart, on top of the
+  # detector's own 3-minute window. A wedge lasting five minutes is still
+  # caught long before anyone notices; a probe that restarts a healthy pod is
+  # an outage this system inflicted on itself.
+  stallProbe:
+    enabled: true
+    initialDelaySeconds: 180
+    periodSeconds: 30
+    failureThreshold: 4
   image:
     name: sensor-ingest
     tag: ""
