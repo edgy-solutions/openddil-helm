@@ -589,6 +589,23 @@ spec:
             # proves nothing, so this blocks the cut rather than following it.
             - name: BRIDGE_CONSUMER_GROUP
               value: {{ if $tier.hasChildren }}{{ printf "uplink-group-%s" $tier.id | quote }}{{ else }}{{ printf "bridge-group-%s" $tier.id | quote }}{{ end }}
+            # THE SAME LIST THE RELAY ACTUALLY CARRIES. Unset until 2026-09-09,
+            # so the monitor used its code default
+            # "raw-sensor-stream,tactical-events" while a tier-managed edge's
+            # bridge had stopped carrying raw-sensor-stream entirely.
+            #
+            # A consumer group keeps its committed offset on a topic it no
+            # longer subscribes to, and that offset falls behind FOREVER. The
+            # monitor counted it: 106,409 messages of DDIL buffer reported on
+            # a link whose every real topic sat at lag 0 or 1 — on the exact
+            # indicator a severance test watches. A retired subscription's
+            # abandoned offset reading as a buffer is the migration rule at
+            # the consumer-group level.
+            #
+            # Derived from the helper the relay config itself renders from, so
+            # the thing measured and the thing measuring cannot disagree.
+            - name: BRIDGE_TOPICS
+              value: {{ if $tier.hasChildren }}{{ include "openddil.tierUplinkTopics" $root | quote }}{{ else }}{{ include "openddil.edgeBridgeTopics" (dict "edge" $tier "root" $root) | quote }}{{ end }}
             # The link this tier owns, named for what it is. A leaf's is the
             # edge->HQ bridge; an intermediate's is its own uplink, and its
             # screen should not say EDGE->HQ BUFFER while showing a region's

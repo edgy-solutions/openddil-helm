@@ -430,6 +430,42 @@ back at the login screen with no error to read.
 
 
 {{/*
+openddil.edgeBridgeTopics / openddil.tierUplinkTopics — the relay's topic
+list, as a comma-separated string, from ONE definition.
+
+WHY THESE EXIST. The bridge's topics were written out in the connect YAML,
+and the buffer monitor's BRIDGE_TOPICS was a separate hand-list that the
+chart never even set — so it kept the code default
+"raw-sensor-stream,tactical-events" while the bridge had moved on.
+
+The two could disagree, and did. Removing `raw-sensor-stream` from a
+tier-managed edge left the monitor still counting it, and because the
+consumer group keeps an offset on a topic it no longer consumes, that offset
+falls behind FOREVER. The result was a healthy link reporting 106,409
+messages of DDIL buffer — on the exact indicator a severance test watches.
+
+One definition, two consumers, no opportunity to disagree. Same shape as
+`openddil.publicOrigin`, and for the same reason: a value that must match in
+three places must be written in one.
+*/}}
+{{- define "openddil.edgeBridgeTopics" -}}
+{{- $edge := .edge -}}
+{{- $root := .root -}}
+{{- $managed := include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) -}}
+{{- $t := list -}}
+{{- if not $managed }}{{- $t = append $t "raw-sensor-stream" -}}{{- end -}}
+{{- $t = append $t "tactical-events" -}}
+{{- if $managed -}}
+{{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-telemetry" "asset-element-inventory" "derived-sustainment") -}}
+{{- end -}}
+{{- join "," $t -}}
+{{- end }}
+
+{{- define "openddil.tierUplinkTopics" -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "region-fleet-summary" "region-top-factors" "region-wear-trends") -}}
+{{- end }}
+
+{{/*
 openddil.edgeBridgeConnectYaml — the edge->parent bridge config, as content.
 
 EXTRACTED SO THE CHECKSUM CAN HASH THE THING ITSELF.
@@ -508,95 +544,15 @@ input:
     addresses:
       - {{ $edgeBroker }}
     topics:
-      {{- if not (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) }}
-      # RAW CROSSES A LINK ONLY TO WHERE DERIVATION HAPPENS, OR TO A DECLARED
-      # CONSUMER. This edge has no tier node, so the ROOT derives its state
-      # directly and needs the raw stream. That is the derivation happening at
-      # the other end, and it is why raw belongs on this link.
-      #
-      # A TIER-MANAGED EDGE SENDS NONE. It derives its own state and publishes
-      # the result; its parent consumes that and, under the detection gate, is
-      # forbidden from re-deriving from relayed raw. So after the gate landed
-      # the only groups touching `raw-sensor-stream` on region-east were the
-      # two EMPTY retired ones, and zero groups on the HQ broker read it at
-      # all (all 16 enumerated and described). 3.78M messages on edge-01 alone
-      # were crossing a DDIL link to feed nobody.
-      #
-      # This is the rule, not an optimisation: carrying a topic no consumer
-      # reads is the same defect as rendering a consumer no topic feeds,
-      # pointed the other way. If a declared consumer appears at a parent —
-      # archival, replay, an ADR-0034 training unit — it is DECLARED, and this
-      # condition changes to name it rather than being quietly relaxed.
-      - raw-sensor-stream
-      {{- end }}
-      - tactical-events
-      {{- if include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) }}
-      # THE TIER'S DERIVED STATE, carried up because the root no longer
-      # computes it for this edge (see hub.yaml, the detection cutover).
-      #
-      # The root's cm-service and fusion have retired their downward
-      # subscriptions here; this is what replaces them. Same topic names
-      # on the HQ broker as when the root produced them, so the HQ
-      # projector and fusion's HQ-cluster subscription are unchanged —
-      # only the producer moved, from the root reaching down to the tier
-      # publishing up.
-      #
-      # Labels are already stamped: the tier's own fusion and cm-service
-      # propagate releasability onto these rows before they leave the
-      # edge, so the completeness gate's question is answered at the tier
-      # and the answer travels with the data.
-      - asset-logistics-status
-      - asset-cm-state
-      #
-      # AND THE ONE THAT IS NOT DERIVED STATE, carried for a different
-      # reason: `telemetry-latest-state` is what HQ's `telemetry_latest_state`
-      # table is projected FROM, and on the HQ broker that topic had never
-      # been produced to at all (high-watermark 0, measured 2026-09-05).
-      # Every row HQ held for this edge was written by the downward
-      # per-edge projector below. Retire that projector without bridging
-      # this topic and HQ's view of the edge does not go stale — IT GOES
-      # EMPTY, and "no rows" is not the degraded mode ADR-0036 clause 4
-      # specifies. `projector-hq` is already subscribed to this topic and
-      # has simply been sitting on an empty partition; bridging it is what
-      # gives that subscription something to read.
-      - telemetry-latest-state
-      #
-      # THE REGION'S INPUT CONTRACT (DESIGN-2026-09-07-region-input-contract).
-      # The rule these satisfy: EVERY CONSUMER A TIER RENDERS MUST HAVE A FED
-      # TOPIC, OR MUST NOT BE RENDERED. region-east came up rendering 16
-      # consumers and attaching 8; the other eight were processes at 1/1
-      # Running subscribed to topics their broker did not hold, which no probe
-      # distinguishes from working.
-      #
-      # Six for the tier's own rendered consumers:
-      - asset-capability-snapshot   # tier-projector-capability, fusion-service-capability
-      - asset-telemetry-windows     # tier-projector-windows, fusion-service-windows
-      - asset-element-telemetry     # tier-projector-element-telemetry
-      - asset-element-inventory     # tier-projector-element-inventory
-      - derived-sustainment         # fusion-service-derived
-      #
-      # Measured rather than assumed: faust-regional reads
-      # asset-telemetry-windows and derived-sustainment FROM EACH EDGE BROKER
-      # DIRECTLY. Those two ARE the reachback — it reached down for exactly
-      # what nothing carried up — so retiring the reachback and feeding the
-      # relocated aggregator are one act, not two. Both are above.
-      #
-      # `asset-registry-events` WAS listed here and has been removed: it runs
-      # the WRONG DIRECTION. The asset registry is root-owned, and its events
-      # are distributed DOWN to tiers rather than gathered UP from them —
-      # putting it on this bridge asked edges to supply reference data they
-      # never author, which is why it sat at watermark 0 on every edge broker.
-      #
-      # A tier's inputs have TWO directions: derived state UP from children,
-      # reference data DOWN from the root (registry, CM baselines, policy).
-      # This list is the upward half only. The downward half is the
-      # distribution seam, and faust-regional's registry source waits on it.
-      #
-      # NOT ADDED, and deliberately: `cm-events`. It is a RAW INGEST topic,
-      # and detection binds to direct ingest only — the region's
-      # cm-service-cm-events subscription is gated off, so nothing there would
-      # read it. Carrying a topic no rendered consumer reads is the same
-      # defect as rendering a consumer no topic feeds, pointed the other way.
+      {{- /* FROM ONE DEFINITION. The buffer monitor reads the same helper
+             for BRIDGE_TOPICS, so the relay and the thing that measures it
+             cannot disagree about what it carries. They did: the monitor
+             kept counting raw-sensor-stream after the bridge stopped
+             consuming it, and the group offset on a retired topic falls
+             behind forever - 106,409 messages of phantom DDIL buffer on a
+             healthy link, on the indicator a severance test watches. */ -}}
+      {{- range splitList "," (include "openddil.edgeBridgeTopics" (dict "edge" $edge "root" $root)) }}
+      - {{ . }}
       {{- end }}
     consumer_group: "bridge-group-{{ $edge.id }}"
 
@@ -740,26 +696,10 @@ input:
     addresses:
       - {{ $broker }}
     topics:
-      # THE REGION'S OWN DERIVED STATE, which for an intermediate is a
-      # rollup of what its children sent plus whatever it ingests
-      # directly. Same topic names as an edge publishes, because the
-      # parent's projector does not care which tier produced them —
-      # only the producer moved.
-      - asset-logistics-status
-      - asset-cm-state
-      - telemetry-latest-state
-      - tactical-events
-      #
-      # AND WHAT THIS TIER ITSELF PRODUCES. HQ runs projector-region-fleet-
-      # summary, -top-factors and -wear-trends against these topics. Before
-      # the cutover faust-regional produced them onto the HQ broker directly;
-      # once it lives in the region it produces them here, and if the uplink
-      # does not carry them HQ's regional views go EMPTY on cutover day —
-      # which is not the degraded mode ADR-0036 clause 4 specifies, and looks
-      # like a region with no assets rather than a relay with a gap.
-      - region-fleet-summary
-      - region-top-factors
-      - region-wear-trends
+      {{- /* One definition, shared with the monitor. See the bridge above. */ -}}
+      {{- range splitList "," (include "openddil.tierUplinkTopics" .) }}
+      - {{ . }}
+      {{- end }}
     consumer_group: "uplink-group-{{ $tier.id }}"
 
 output:
