@@ -422,6 +422,44 @@ while IFS='|' read -r t n nn nr; do
   printf '%-28s %8s %12s %16s%s\n' "$t" "$n" "$nn" "$nr" "$mark"
 done <<< "$ROWS"
 
+# ---------------------------------------------------------------------------
+# PHANTOM PARTIALS - a legacy rollup replayed from before the partition
+# ---------------------------------------------------------------------------
+# A new consumer group starts at offset 0 and replays a topic history. A
+# rollup emitted BEFORE partitioning by releasability class carries no
+# releasable_to, decodes as the EMPTY class, and carries the WHOLE region
+# counts. It lands beside the real partials as a phantom.
+#
+# THE GATE MUST LOOK WHERE THE PEP DENIES. An empty releasable_to denies
+# every subject under the section 4 predicate, so this row renders on no
+# screen - the filter correctness is what hides it. Wrong data that no
+# subject can see is the most patient kind: nobody reports it, no panel
+# disagrees, and it surfaces the day entitlements widen. A check that
+# inspects only what is served has agreed not to look here.
+#
+# THIS IS A CORRELATE, NOT A DECLARATION. Neither half is suspicious alone -
+# an empty class is legitimate (contributors releasable to nobody), and a
+# partial holding every asset is legitimate (a single-class region). Their
+# CONJUNCTION indicates a pre-partition row. The declaration that would
+# settle it is a producer version stamped on the message (ADR-0034
+# addendum); until that exists this is the cheap detector, and it is honest
+# about being one.
+phantom_sql="SELECT f.region_id FROM region_fleet_summary f"
+phantom_sql="$phantom_sql WHERE length(f.releasability_class) = 0"
+phantom_sql="$phantom_sql AND f.asset_count >= (SELECT COALESCE(sum(g.asset_count),0)"
+phantom_sql="$phantom_sql FROM region_fleet_summary g WHERE g.region_id = f.region_id"
+phantom_sql="$phantom_sql AND length(g.releasability_class) > 0);"
+phantoms="$(q "$phantom_sql")"
+if [ -n "$phantoms" ]; then
+  echo "PHANTOM PARTIAL(S) - legacy rollups replayed from before the partition:" >&2
+  printf "%s
+" "$phantoms" | sed "s/^/    region /" >&2
+  echo "  Each is releasable to NOBODY, so it renders on no screen and no" >&2
+  echo "  operator will report it. It carries the whole region counts under" >&2
+  echo "  the empty class, which is what a pre-partition emission decodes to." >&2
+  echo "  Retire them; a key change is a migration, not an edit." >&2
+  unlabelled=$((unlabelled + 1))
+fi
 echo
 if [ "$populated" -eq 0 ]; then
   echo "every labelled table is EMPTY. The gate has nothing to check, which is" >&2
