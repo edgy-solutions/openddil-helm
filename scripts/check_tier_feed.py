@@ -342,6 +342,42 @@ def null_keyed_relayed(ns: str, tier: str, topics: set[str]) -> list[tuple[str, 
     return out
 
 
+def stale_keyed_rows(ns: str, tier: str, all_tiers: list) -> list:
+    """Rows keyed by a tier id that is not a deployed tier.
+
+    A KEY CHANGE IS A MIGRATION. When a row's key changes, the new key writes
+    BESIDE the old and nothing retires it. Two instances landed in one
+    afternoon: the buffer monitor's row id became the tier id and `id='edge'`
+    sat beside `id='edge-01'`, and the rollup key gained the releasability
+    class and a pre-partition row sat beside the real partials.
+
+    The first was visible on a screen; the second was not. Both were the same
+    omission, and BOTH WERE CLEANED BY HAND -- incompletely, by me, in the same
+    session the rule was written down. A rule that has to be remembered at
+    every key change is a rule that will be half-applied; this is the check
+    that replaces the reminder.
+
+    The predicate is deliberately narrow: a row whose key is not a DEPLOYED
+    TIER ID. It does not guess at what a key should be, only at what no longer
+    exists.
+    """
+    out = []
+    pod = "openddil-tier-pg-" + tier + "-0"
+    sql = ("SELECT id FROM edge_buffer_status WHERE id NOT IN ("
+           + ",".join("'" + t + "'" for t in all_tiers) + ");")
+    r = subprocess.run(
+        ["kubectl", "exec", "-n", ns, pod, "--", "psql", "-U", "openddil",
+         "-d", "openddil", "-tAc", sql],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        # UNREADABLE IS NOT CLEAN. A store this check cannot query is a store
+        # whose ghosts it cannot see, and saying nothing would read as saying
+        # there were none.
+        return ["<store unreadable: " + (r.stderr.strip().splitlines() or [""])[-1][:60] + ">"]
+    return [x.strip() for x in r.stdout.replace(chr(13), "").splitlines()
+            if x.strip()]
+
+
 def main() -> int:
     ns = sys.argv[1] if len(sys.argv) > 1 else "openddil"
     ctx = kubectl("config", "current-context").strip()
@@ -361,6 +397,7 @@ def main() -> int:
 
     idle_decl = load_idle_declarations()
     unfed: list[tuple[str, str, str]] = []
+    stale_keys: list[tuple[str, str]] = []
     unentitled: list[tuple[str, str, str]] = []
     undeclared: list[tuple[str, str, str]] = []
     null_keyed: list[tuple[str, str]] = []
@@ -444,6 +481,11 @@ def main() -> int:
                 print("  NOT FLOWING " + g + "   <- " + t
                       + " (hw 0, UNDECLARED)")
                 undeclared.append((tier, g, t))
+        for gid in stale_keyed_rows(ns, tier, ts):
+            print("  STALE KEY   " + gid + "   (row keyed by a tier that is "
+                  "not deployed)")
+            stale_keys.append((tier, gid))
+
         for t, nulls, sampled in null_keyed_relayed(ns, tier, topics):
             print("  NULL-KEYED " + t + "   (" + str(nulls) + " of "
                   + str(sampled) + " sampled) -- relay dropped the key")
@@ -481,7 +523,14 @@ def main() -> int:
         print("  with every screen correct and every batch lossy.")
         print()
 
-    if not unfed and not unentitled and not undeclared and not null_keyed:
+    if stale_keys:
+        print("tier feed: " + str(len(stale_keys)) + " STALE-KEYED ROW(S)")
+        print("  Each is keyed by a tier id that is not deployed - the row a")
+        print("  key change left behind when the new key wrote beside the old.")
+        print("  A key change is a migration, not an edit.")
+        print()
+
+    if not unfed and not unentitled and not undeclared and not null_keyed             and not stale_keys:
         print("tier feed: clean -- all " + str(checked) + " rendered consumers"
               " have a topic they are entitled to derive from, and every")
         print("  empty one is declared")
@@ -509,7 +558,7 @@ def main() -> int:
         print()
 
     if not unfed:
-        return 1 if (unentitled or undeclared or null_keyed) else 0
+        return 1 if (unentitled or undeclared or null_keyed or stale_keys) else 0
 
     print("tier feed: " + str(len(unfed)) + " UNFED CONSUMER(S) of "
           + str(checked) + " rendered")
