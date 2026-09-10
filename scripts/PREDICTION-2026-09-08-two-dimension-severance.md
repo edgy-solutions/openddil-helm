@@ -132,3 +132,53 @@ Keycloak runs at the root, so a severed tier cannot mint new sessions. An
 existing cookie works for its TTL; a fresh login does not. Every screen the
 demonstration uses is opened and authenticated BEFORE the first cut, or the
 recording shows an identity outage nobody intended to demonstrate.
+
+---
+
+# RESULT 2026-09-09 — both dimensions passed, run ended connected
+
+Predicted by classification before either cut. Every assertion below is a
+measurement taken during the cut, not after it.
+
+## Dimension 1 — region-east `--from-parent`
+
+| assertion | measured |
+|---|---|
+| region serves its own FRESH data | sample advanced **02:13:37 → 02:14:38** while severed |
+| edges still reach it | region inbound **+128** over 45s; `bridge-group-edge-01` lag 2 |
+| rollups keep composing | **3 partials, 14 assets**, updating 02:13:32 → 02:14:32 |
+| HQ stale WITH INDICATOR, not wrong | HQ rollup **frozen at 02:09:14**, 12m00s stale — the pre-cut value, never a wrong one and never empty |
+| heal converges NON-VACUOUSLY | HQ **moved** 02:09:14 → 02:23:02; stale 12m → **20s** |
+
+**And the relay probe's must-not-fire, proven live under a real policy cut:**
+11 minutes severed, `tier-uplink-region-east` **restarts=0**, the probe stating
+its own reasoning — *"destination openddil-toxiproxy:8474 unreachable —
+buffering, not stalled"*. Without the third term this would have restarted the
+uplink every three minutes for the length of the cut, rendering a demonstrated
+DDIL behaviour as a crash loop.
+
+The `--from-parent` mode is what the second row proves. Under `--isolate` the
+subtree would have been cut too, and **the region's own screen would have
+looked identical** — fresh local data either way — while its rollups quietly
+drifted down. That is why the modes exist.
+
+## Dimension 2 — edge-01
+
+| assertion | measured |
+|---|---|
+| edge serves locally | edge-01 store **0.31s** behind throughout |
+| region's edge-01 view goes stale | **4m46s** stale |
+| region's edge-02 view stays fresh | **0.6s** — the discriminating pair; both stale would mean the cut was wider than intended |
+| HQ attributes two-hop staleness correctly | edge-01 **4m47s** stale, edge-02 **0.8s** fresh, region rollup **updated 6s ago** |
+| heal converges NON-VACUOUSLY | region's edge-01 view **02:24:21 → 02:32:13**, now 0.6s |
+
+That third HQ row is the two-hop design paying out: *observed 4m ago · via
+region-east 6s ago* is **a quiet edge, not a downed uplink**, and HQ can tell
+which. Under a single fused age those two are the same number.
+
+`edge-hq-bridge-edge-01` restarts during the cut: **0**.
+
+## End state
+
+Zero severance policies remain; both tiers report `connected`; the advancing
+pre-flight is green across all nine stages. **The run ended connected.**
