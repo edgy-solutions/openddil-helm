@@ -747,3 +747,39 @@ output:
     key: "${! meta(\"kafka_key\") }"
     max_retries: 0
 {{- end }}
+
+{{/*
+openddil.halfMemoryBytes -- half of a Kubernetes memory quantity, in BYTES.
+
+Restate's `rocksdb-total-memory-size` defaults to 100% of the process memory
+limit and warns that it must be under 50%. This computes the 50% figure from
+the SAME value that sets the limit, so the two cannot drift: raising the limit
+raises the budget, and there is no second place to remember to edit.
+
+Emits plain bytes because the env override rejects unit strings that the TOML
+field accepts, and a rejected value is silently ignored -- which would leave
+the 100% default in place while every rendered artifact said otherwise.
+
+Accepts Gi / Mi / G / M and bare bytes. Anything else FAILS THE RENDER rather
+than guessing: a wrong memory budget is exactly the defect this exists to stop,
+and a helper that silently returns 0 on an unrecognised unit would reintroduce
+it with more steps.
+*/}}
+{{- define "openddil.halfMemoryBytes" -}}
+{{- $q := . | toString -}}
+{{- $bytes := 0 -}}
+{{- if hasSuffix "Gi" $q -}}
+{{-   $bytes = mulf (trimSuffix "Gi" $q | float64) 1073741824.0 -}}
+{{- else if hasSuffix "Mi" $q -}}
+{{-   $bytes = mulf (trimSuffix "Mi" $q | float64) 1048576.0 -}}
+{{- else if hasSuffix "G" $q -}}
+{{-   $bytes = mulf (trimSuffix "G" $q | float64) 1000000000.0 -}}
+{{- else if hasSuffix "M" $q -}}
+{{-   $bytes = mulf (trimSuffix "M" $q | float64) 1000000.0 -}}
+{{- else if regexMatch "^[0-9]+$" $q -}}
+{{-   $bytes = $q | float64 -}}
+{{- else -}}
+{{-   fail (printf "openddil.halfMemoryBytes: cannot parse memory quantity %q. Use Gi, Mi, G, M or plain bytes. Refusing to guess -- a wrong RocksDB budget is what this helper exists to prevent." $q) -}}
+{{- end -}}
+{{- divf $bytes 2.0 | float64 | printf "%.0f" -}}
+{{- end }}

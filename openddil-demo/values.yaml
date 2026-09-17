@@ -833,9 +833,56 @@ tierNode:
     defaultNumPartitions: 6
     storageSize: 2Gi
     useEmptyDir: false
+    # THE 1Gi LIMIT WAS OOM-KILLING TWO OF THREE TIERS. Measured 2026-09-17:
+    # tier-restate-edge-01 at 1600 restarts and region-east at 1124, both
+    # `OOMKilled` (exit 137) after catching up their partitions in ~16s; the
+    # one survivor, edge-02, sat at 975Mi against the 1Gi cap — next in line.
+    #
+    # THE CAUSE WAS NOT DATA GROWTH. An earlier version of this note guessed
+    # "the invocation journal grows with data" from a survivor sitting at
+    # 975Mi. That guess was wrong, and it would have sent the next person to
+    # tune retention.
+    #
+    # Restate reads the cgroup limit and sets `rocksdb-total-memory-size` to
+    # ALL OF IT, then prints an ERROR about itself at every startup asking for
+    # under 50%. At a 1Gi limit that is a 1 GiB budget inside a 1 GiB cap —
+    # arithmetic, not data. RAISING THE LIMIT DID NOT FIX IT: at 2Gi the
+    # budget became 2 GiB of a 2 GiB cap, and region-east peaked at 1656Mi of
+    # 2048 still walking toward the same wall. The restart counter stopping
+    # was mistaken for the memory plateauing; they are different measurements.
+    #
+    # Fixed by RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE at 50% of this limit (see
+    # tier-node.yaml). Proven by an accidental A/B: the fix went to
+    # region-east alone while a watch was running, and over the next 52
+    # minutes it was the ONLY node that went flat while the three unfixed
+    # ones climbed — edge-02 monotonically at ~6.5 MiB/min, on course for the
+    # cap in ~3.5 hours.
+    #
+    # SIZING RECORD, measured 2026-09-17 over 90 minutes with all four nodes
+    # under a 1 GiB RocksDB budget and the derive stage actually running —
+    # which no previous figure was:
+    #
+    #   node                  range        peak / 2Gi
+    #   root restate-server   265-407Mi       20%
+    #   tier edge-01          165-374Mi       18%
+    #   tier edge-02          148-375Mi       18%
+    #   tier region-east      989-1192Mi      58%
+    #
+    # All four sawtooth (RocksDB releasing on compaction, refilling) with no
+    # trend. 2Gi is now a SIZING ANSWER and not headroom: the budget is the
+    # thing that bounds RSS, and it is derived from this limit, so the two
+    # move together. region-east runs ~3x the edges because it consumes both
+    # children plus its own ingest; size the regional tier from that ratio
+    # rather than from an edge measurement.
+    #
+    # The 167 MiB figure is RETIRED as a sizing input. It measured an idle
+    # process, and it measured the PARTITION budget — a different number from
+    # the one that kills the process.
+    #
+    # Nodes have headroom for it: 18-47% of ~8Gi at the time of the change.
     resources:
-      requests: { cpu: 150m, memory: 256Mi }
-      limits:   { cpu: 500m, memory: 1Gi }
+      requests: { cpu: 150m, memory: 512Mi }
+      limits:   { cpu: 500m, memory: 2Gi }
 
   # Passive policy sidecar — Arc 2's seat. Deployed and healthy; no rules
   # loaded, no decisions made. See ADR-0029.

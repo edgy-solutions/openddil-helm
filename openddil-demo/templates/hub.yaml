@@ -239,6 +239,20 @@ spec:
           image: "{{ include "openddil.thirdPartyImage" .Values.restate.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.restate.image.pullPolicy "root" .) }}
           args: ["-c", "/config/restate-config.toml"]
+          env:
+            # SAME DEFECT AS THE TIER RESTATES, same fix -- see the long note
+            # on tier-node.yaml. Restate sets `rocksdb-total-memory-size` to
+            # 100% of the cgroup limit and prints an ERROR about it at every
+            # startup asking for under 50%. The root has been running at 2Gi
+            # with a 2 GiB budget and has not OOMed only because it carries
+            # less load than region-east, which peaked at 1656Mi of 2048.
+            #
+            # Fixed here TOO rather than only where it hurt, because "the
+            # mechanism covered one of N" is the other defect of this batch
+            # and applying its lesson selectively would be the same mistake
+            # with a shorter fuse.
+            - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
+              value: {{ include "openddil.halfMemoryBytes" .Values.restate.resources.limits.memory | quote }}
           ports:
             - name: ingress
               containerPort: {{ .Values.restate.ingressPort }}

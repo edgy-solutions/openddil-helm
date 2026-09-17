@@ -475,6 +475,38 @@ spec:
           env:
             - name: RESTATE_CONFIG
               value: /config/restate.toml
+            # -----------------------------------------------------------------
+            # ROCKSDB BUDGET, AND WHY THE MEMORY LIMIT ALONE NEVER FIXED IT
+            # -----------------------------------------------------------------
+            # Restate reads the cgroup limit and then sets
+            # `rocksdb-total-memory-size` to ALL OF IT, and says so at every
+            # startup, as an ERROR it prints about itself:
+            #
+            #   'rocksdb-total-memory-size' parameter is set to 2.0 GiB, more
+            #   than 90% of the process memory limit of 2.0 GiB. This risks an
+            #   OOM under load; keep it under 50% of process memory
+            #
+            # At the old 1Gi limit that budget was 1 GiB of a 1 GiB cap, which
+            # is not a tuning problem but an arithmetic one -- and it drove the
+            # ~1600 OOMKills on edge-01 and 1124 on region-east. RAISING THE
+            # LIMIT DID NOT FIX IT, it re-scaled it: at 2Gi the budget became
+            # 2 GiB of a 2 GiB cap and region-east still peaked at 1656Mi/2048.
+            #
+            # The diagnosis was in the logs at every one of those ~1600 starts.
+            # Nobody was reading that line, so the memory limit was treated as
+            # the variable when it was the multiplier.
+            #
+            # Set to 50% of the container limit, which is what the error asks
+            # for. Verified 2026-09-17 on region-east: error gone, partition
+            # budget 810.3 MiB -> 405.2 MiB, zero restarts.
+            #
+            # Bytes, not "1 GiB": the env override is parsed more strictly than
+            # the TOML field, and a unit string it rejects would be ignored --
+            # leaving the default in place and this comment describing a fix
+            # that is not applied. (That failure mode has its own entry in
+            # PRINCIPLES.md; it is not a hypothetical here.)
+            - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
+              value: {{ include "openddil.halfMemoryBytes" $tn.restate.resources.limits.memory | quote }}
           ports:
             - containerPort: 8080
             - containerPort: 9070
