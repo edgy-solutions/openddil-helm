@@ -63,6 +63,27 @@ worth one beat on camera if there is room.
 
 ## D. Pipeline liveness
 
+> **SUPERSEDED 2026-09-17 — DO NOT TRUST THIS SECTION AS WRITTEN.**
+>
+> Every measurement below was accurate and the pipeline was dead anyway.
+> `check-advancing` was green across all nine stages, `check_tier_feed` was
+> clean across 45 consumers, and at the same time `asset-cm-state` and
+> `asset-logistics-status` were both at **+0** and fusion had received **zero
+> invocations, ever**. Restate's tier node could neither create nor enumerate
+> an invocation (`node N1:1645 was shut down or removed`), and nothing in this
+> suite asks a question that state can fail.
+>
+> The nine stages measure that *topics advance*. The derive stage sits between
+> two of them and was never measured: a subscription can be registered, its
+> lag can fall, and nothing can complete. **Consumed is not completed.**
+>
+> Re-establish this section only after `RUNBOOK-2026-09-17-unwedge.md` step 4
+> shows a non-zero delta on `asset-cm-state` AND `asset-logistics-status`, and
+> only with the derive-stage check (follow-up 2) in the suite. Until then this
+> section documents what green looked like while the thing was broken, which
+> is worth keeping and worth not believing.
+
+
 * **`check-advancing.sh` green across all nine stages** — ingest, mapper,
   derived at both edges; region inbound; region rollups; HQ inbound.
 * **`check_tier_feed.py` clean** — 45 rendered consumers, zero unfed, zero
