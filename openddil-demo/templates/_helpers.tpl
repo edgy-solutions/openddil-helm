@@ -141,6 +141,26 @@ subPath-mounts /shared/<dst> at the target absolute path.
       mkdir -p "/shared/{{ .dst }}"
       cp -r "/bundle/{{ .src }}/." "/shared/{{ .dst }}/"
       {{- else }}
+      # IDEMPOTENT, because this init container runs more than once against
+      # the SAME emptyDir. The volume survives container restarts within a
+      # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+      # dst` on an existing directory copies INTO it, producing
+      # /shared/proto/proto/openddil/... instead of replacing the tree.
+      #
+      # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+      # CrashLoopBackOff with 949 restarts, failing to start on
+      #   symbol "openddil.common.v1.Quantity" already defined at
+      #   openddil/common/v1/quantity.proto
+      # -- the same file reachable under two import paths because the tree had
+      # been nested. Each retry nested it one level deeper, so the failure fed
+      # itself. A fresh pod (clean emptyDir) came up immediately with a single
+      # tree, which is what identified the cause.
+      #
+      # The OVERLAY branch below already guards this hazard with `/.` and an
+      # explicit mkdir, and its comment describes the exact failure -- for the
+      # ontology tree. This branch never got the same treatment, so the guard
+      # existed beside the hole it was written for.
+      rm -rf "/shared/{{ .dst }}"
       if [ -f "/bundle/{{ .src }}" ]; then
         cp "/bundle/{{ .src }}" "/shared/{{ .dst }}"
       else
