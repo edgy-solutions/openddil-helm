@@ -178,6 +178,58 @@ if unbounded:
 print(f"  ok   : {checked} data emptyDir volumes, all carry sizeLimit")
 ' || fail=1
 
+# --- guard 4: every inline shell script the chart renders actually PARSES ---
+# THE DEFECT MODELLED: a comment block placed INSIDE a line continuation.
+#
+#     for spec in \\
+#         # compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
+#         "raw-sensor-stream|-p 1 -r 1 ..." \\
+#
+# The backslash joins the next line, `#` eats the rest of it, the `for` loses
+# its word list, and the WHOLE SCRIPT is a parse error -- so the Job runs
+# nothing at all, not merely the loop.
+#
+# Every layer upstream said yes: valid YAML, clean `helm template`, clean
+# `helm lint`, manifest applied, Job created, image pulled, container started.
+# The only reader that ever objects is a shell asked to parse it, and nothing
+# in the pipeline was asking one.
+#
+# Cost, measured 2026-09-17: topic-init failed 7 times to BackoffLimitExceeded;
+# that failed the post-upgrade hook, wedging the release in `pending-upgrade`
+# for eight hours; which stopped the OTHER post-upgrade hook -- the bootstrap
+# registering Restate's deployments and Kafka subscriptions -- from running at
+# all. The comment described a compression fix. Because of where it sat, that
+# fix never applied: a comment explaining a fix prevented the fix.
+#
+# RED-CHECKED against the real pre-fix chart (git stash of the actual broken
+# template, not a convenient edit): FAIL naming Job/openddil-topic-init and
+# the offending line, then clean after the fix. 34 scripts checked either way.
+echo
+echo "guard 4: rendered shell scripts parse"
+# A VARIANT PER OPTIONAL BLOCK, same discipline as guards 1-3. `tierNode.
+# enabled` defaults to FALSE, so a plain render omits every script in
+# tier-node.yaml: the first version of this guard reported "34 scripts, 0
+# failures" having never parsed one of the 27 that live there. A guard that
+# only inspects the default render has agreed not to look at the optional
+# half of the chart -- which is where the per-tier machinery lives, i.e.
+# most of what this system now is.
+#
+# Status captured explicitly rather than through a `| sed` pipeline. pipefail
+# is set and would carry it, but a guard against "looked like it ran" should
+# not itself depend on a shell option someone could drop from line 15.
+for variant in "default:" "tiernode:--set tierNode.enabled=true" "releasability:--set releasability.enabled=true"; do
+  vname="${variant%%:*}"
+  vargs="${variant#*:}"
+  # shellcheck disable=SC2086
+  if guard4_out=$("$PY" "$(dirname "$0")/check_shell_syntax.py" "$CHART" $vargs 2>&1); then
+    printf '  [%s] %s\n' "$vname" "$(printf '%s' "$guard4_out" | tail -1)"
+  else
+    printf '  [%s] FAILED\n' "$vname"
+    printf '%s\n' "$guard4_out" | sed 's/^/    /'
+    fail=1
+  fi
+done
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

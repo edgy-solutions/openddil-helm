@@ -620,35 +620,46 @@ spec:
                   sleep 3
                 done
                 echo "INFO: Initializing topics on $B"
+                # ---------------------------------------------------------
+                # compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
+                # ---------------------------------------------------------
+                # Restate's Kafka ingress is built on a librdkafka WITHOUT
+                # zstd support. One zstd batch on a subscribed topic kills
+                # the consumer task with
+                #   Decompression (codec 0x4) ... Local: Not implemented
+                # Restate restarts the task from its stored position, hits
+                # the same batch, and dies again -- forever. Fusion then
+                # receives ZERO invocations while every pod reads Running:
+                # no severity, no transitions, no tactical events, and a
+                # completeness gate refusing an empty table downstream.
+                #
+                # `compression.type=producer` -- the default these topics
+                # carried -- means "store whatever codec the CLIENT chose",
+                # and one of the clients chooses zstd. The default is not
+                # neutral here: it delegates a correctness-critical choice
+                # to whichever library happens to write the batch.
+                #
+                # NOT the ingress-*-raw topics' explicit zstd below. Those
+                # are deliberate for volume and Restate subscribes to none
+                # of them. Stated because that setting is the obvious
+                # suspect and is NOT the cause -- HQ's asset-cm-state,
+                # never altered by hand, read `producer (DEFAULT_CONFIG)`.
+                #
+                # Measured 2026-09-17 on the lab. This reaches the work
+                # cluster on upgrade, so it is a P0.1 gate, not a lab
+                # curiosity.
+                # A COMMENT MAY NOT LIVE INSIDE A LINE CONTINUATION.
+                # These notes sat between `for spec in \` and the first
+                # item. The backslash joins the next line, `#` then eats
+                # the rest of it, and the `for` loses its word list: the
+                # WHOLE script becomes a parse error, so nothing in this
+                # Job runs -- including the fix the comment documents.
+                # Cost: 7 backoff retries, a Failed hook, a release stuck
+                # in pending-upgrade, and the post-upgrade bootstrap that
+                # re-registers Restate never firing. Verified with `sh -n`
+                # (2026-09-17) rather than by reading. Keep prose ABOVE the
+                # `for`, and syntax-check this script when it changes.
                 for spec in \
-                    # ---------------------------------------------------------
-                    # compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
-                    # ---------------------------------------------------------
-                    # Restate's Kafka ingress is built on a librdkafka WITHOUT
-                    # zstd support. One zstd batch on a subscribed topic kills
-                    # the consumer task with
-                    #   Decompression (codec 0x4) ... Local: Not implemented
-                    # Restate restarts the task from its stored position, hits
-                    # the same batch, and dies again -- forever. Fusion then
-                    # receives ZERO invocations while every pod reads Running:
-                    # no severity, no transitions, no tactical events, and a
-                    # completeness gate refusing an empty table downstream.
-                    #
-                    # `compression.type=producer` -- the default these topics
-                    # carried -- means "store whatever codec the CLIENT chose",
-                    # and one of the clients chooses zstd. The default is not
-                    # neutral here: it delegates a correctness-critical choice
-                    # to whichever library happens to write the batch.
-                    #
-                    # NOT the ingress-*-raw topics' explicit zstd below. Those
-                    # are deliberate for volume and Restate subscribes to none
-                    # of them. Stated because that setting is the obvious
-                    # suspect and is NOT the cause -- HQ's asset-cm-state,
-                    # never altered by hand, read `producer (DEFAULT_CONFIG)`.
-                    #
-                    # Measured 2026-09-17 on the lab. This reaches the work
-                    # cluster on upgrade, so it is a P0.1 gate, not a lab
-                    # curiosity.
                   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
                   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
                   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
