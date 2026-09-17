@@ -30,11 +30,65 @@ re-applies its updated spec, BEFORE bundle-init re-pulls, BEFORE any
 post-install bootstrap Job that depends on Restate being clean.
 
 Hook PVC delete: the PVC is created by volumeClaimTemplates on the
-StatefulSet; its deterministic name is data-<release>-restate-server-0.
-Helm doesn't manage volumeClaimTemplate PVCs (they survive helm uninstall
-intentionally), so the operator otherwise has to delete them by hand
-during redeploys. This hook closes that gap for the
-ephemeralOnUpgrade=true case.
+StatefulSet; its deterministic name is data-<sts>-0. Helm doesn't manage
+volumeClaimTemplate PVCs (they survive helm uninstall intentionally), so the
+operator otherwise has to delete them by hand during redeploys. This hook
+closes that gap for the ephemeralOnUpgrade=true case.
+
+EVERY RESTATE, NOT JUST THE ROOT'S (fixed 2026-09-17).
+------------------------------------------------------
+This hook wiped `data-<release>-restate-server-0` and nothing else. When the
+chart grew per-tier Restate StatefulSets, it was not extended -- so for
+`hub.yaml` the contract held and for `tier-node.yaml` it silently did not.
+`ephemeralOnUpgrade: true` meant "ephemeral" at the root and "durable
+forever" at every tier, with one flag, one name, and no warning.
+
+Found by the failure it was written to prevent. At edge-01, Restate had
+OOM-restarted roughly 1600 times; its cluster metadata still referenced node
+generations destroyed by those restarts, so `POST /query` answered
+
+    Datafusion error: External error: node N1:1645 was shut down or removed
+
+and no invocation could be created OR enumerated. Neither "invocations
+failing" nor "invocations absent" -- a third state, in which the substrate
+cannot answer questions about itself. Every upgrade since had carried that
+metadata forward, because the hook that exists precisely to discard it was
+looking at one StatefulSet out of four.
+
+THE SHAPE WORTH KEEPING: a mechanism that covers one instance of a thing the
+chart now renders N of is not a partial mechanism, it is an absent one with a
+reassuring name. The operator reads `ephemeralOnUpgrade` and believes the
+wipe happened. Recursion made the tiers uniform everywhere except here.
+
+WHAT MAKES THIS SAFE TODAY, AND WHAT ENDS IT (INTENT CUSTODY, ADR-0042)
+-----------------------------------------------------------------------
+Wiping a Restate is safe here for one reason only: NOTHING DURABLE LIVES
+THERE. Subscriptions re-register from the bootstrap Job, Virtual-Object state
+rebuilds from the stream, and every fact the tier serves is derivable from
+topics that survive the wipe. The tier's store class is `stateless /
+rebuildable`, so destroying it costs replay time and nothing else.
+
+ADR-0042 changes the class, not the mechanism. Once a tier's Restate holds
+INTENT CUSTODY, its journal IS the only record that a site acted -- not a
+cache of a fact held elsewhere, but the fact. Its class becomes `stateful /
+upstream, pending` (ADR-0054 four-field class), and at that moment this hook
+stops being a convenience and becomes the thing that silently destroys the
+audit trail, on every upgrade, under a flag named `ephemeralOnUpgrade` that
+the operator reads as already answered.
+
+THE REQUIRED CHANGE, to land WITH custody and not after it: `wipe_one` must
+read the tier's declared store class and REFUSE to wipe a Restate holding
+custody -- fail the hook loudly rather than proceed, because a wipe that is
+wrong is not recoverable by re-running anything. That is the ADR-0054 class
+getting its first enforcement point on our side, at precisely the mechanism
+that would otherwise violate it without a word.
+
+Recorded 2026-09-17, while the hook is still safe, so the constraint is
+written down before the change that makes it load-bearing. The failure this
+hook was built to fix was itself a mechanism that had quietly stopped
+covering what it named (see the tier note above); this is the same hazard
+arriving from the other direction -- the scope stays right and the DATA's
+class changes underneath it.
 */ -}}
 {{- if .Values.restate.ephemeralOnUpgrade }}
 ---
@@ -123,40 +177,69 @@ spec:
               # Neither supports pipefail, and any replacement image must
               # ship a shell at all -- the distroless kubectl images do not.
               set -eu
-              STS="{{ .Release.Name }}-restate-server"
-              PVC="data-${STS}-0"
+              NS="{{ .Release.Namespace }}"
+              wiped=0
+              absent=0
 
-              # On fresh install neither the StatefulSet nor the PVC
-              # exist yet -- the hook is a no-op. On upgrade both
-              # exist and we wipe.
-              if ! kubectl -n {{ .Release.Namespace }} get sts "$STS" \
-                   >/dev/null 2>&1; then
-                echo "First install: $STS not present, nothing to wipe."
-                exit 0
-              fi
+              # One function, applied to the root and to every tier, so the
+              # root is not a special case with its own copy of the logic.
+              # The previous version WAS that special case, and the tiers were
+              # the copy nobody wrote.
+              wipe_one() {
+                sts="$1"
+                comp="$2"
+                pvc="data-${sts}-0"
 
-              echo "Scaling $STS to 0 ..."
-              kubectl -n {{ .Release.Namespace }} scale sts "$STS" --replicas=0
+                # On fresh install neither the StatefulSet nor the PVC exist
+                # yet -- a no-op for that member, NOT an early exit for the
+                # whole hook. An `exit 0` here would have skipped every tier
+                # after the first absent one.
+                if ! kubectl -n "$NS" get sts "$sts" >/dev/null 2>&1; then
+                  echo "  $sts: not present, nothing to wipe"
+                  absent=$((absent + 1))
+                  return 0
+                fi
 
-              # Wait for pods to actually terminate. Without this the
-              # PVC delete can race with the kubelet's still-mounting
-              # the volume and hang.
-              echo "Waiting for restate pods to terminate ..."
-              kubectl -n {{ .Release.Namespace }} wait --for=delete pod \
-                  -l app.kubernetes.io/component=restate-server \
-                  --timeout=180s 2>/dev/null || true
+                echo "  $sts: scaling to 0 ..."
+                kubectl -n "$NS" scale sts "$sts" --replicas=0
 
-              if kubectl -n {{ .Release.Namespace }} get pvc "$PVC" \
-                   >/dev/null 2>&1; then
-                echo "Deleting PVC $PVC ..."
-                kubectl -n {{ .Release.Namespace }} delete pvc "$PVC"
-              else
-                echo "PVC $PVC not present (already gone?), skipping."
-              fi
+                # Wait for pods to actually terminate. Without this the PVC
+                # delete can race with the kubelet still mounting the volume
+                # and hang. Selector is per-member: waiting on a shared label
+                # would let one member's wipe return while another's pod is
+                # still up.
+                echo "  $sts: waiting for pods to terminate ..."
+                kubectl -n "$NS" wait --for=delete pod \
+                    -l app.kubernetes.io/component="$comp" \
+                    --timeout=180s 2>/dev/null || true
 
-              echo "Done. The StatefulSet apply that follows will recreate"
-              echo "the PVC empty; cm-service-bootstrap + logistics-fusion-"
-              echo "bootstrap (post-install hooks) re-register services."
+                if kubectl -n "$NS" get pvc "$pvc" >/dev/null 2>&1; then
+                  echo "  $sts: deleting PVC $pvc"
+                  kubectl -n "$NS" delete pvc "$pvc"
+                  wiped=$((wiped + 1))
+                else
+                  echo "  $sts: PVC $pvc not present (already gone?), skipping"
+                fi
+              }
+
+              echo "root:"
+              wipe_one "{{ .Release.Name }}-restate-server" "restate-server"
+              {{- range $tier := include "openddil.tierList" . | fromYamlArray }}
+
+              echo "tier {{ $tier.id }}:"
+              wipe_one "{{ $.Release.Name }}-tier-restate-{{ $tier.id }}" "tier-restate-{{ $tier.id }}"
+              {{- end }}
+
+              echo
+              echo "Restate wipe complete: ${wiped} PVC(s) deleted, ${absent} StatefulSet(s) absent."
+              echo "The StatefulSet apply that follows recreates each PVC empty;"
+              echo "the post-install/post-upgrade bootstrap Jobs (root: cm-service-"
+              echo "bootstrap + logistics-fusion-bootstrap; per tier: tier-restate-"
+              echo "bootstrap-<id>) re-register services and Kafka subscriptions."
+              echo
+              echo "IF A BOOTSTRAP JOB FAILS, RESTATE STAYS EMPTY AND EVERY POD STILL"
+              echo "READS Running -- registration is the step that makes a wiped"
+              echo "Restate usable, and its absence is invisible from the outside."
           resources:
             requests:
               cpu: 50m
