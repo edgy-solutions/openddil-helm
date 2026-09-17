@@ -471,16 +471,61 @@ fi
 if [ "$unlabelled" -gt 0 ]; then
   echo "GATE FAILS: $unlabelled unlabelled value(s) across $populated populated table(s)."
   echo
-  echo "Assets missing a declaration (deduplicated across tables):"
+  echo "Subjects missing a declaration (table-qualified):"
+  # NOT EVERY LABELLED TABLE IS ASSET-KEYED. The rollups key on region_id and
+  # tactical_events on `subject`. An earlier version asked every table for
+  # `asset_id`, so three of them answered with a raw psql error printed into
+  # the findings section, and the fix after that SKIPPED those tables --
+  # which is how this gate came to report "6 unlabelled value(s)" and then
+  # name nothing at all.
+  #
+  # A gate that fails without saying what failed sends the operator to find
+  # it by hand, and it is indistinguishable from a gate whose finding list is
+  # genuinely empty. Trading a loud wrong answer for a quiet empty one is not
+  # a fix. So: resolve the key column PER TABLE, and qualify each subject
+  # with the table it came from -- ids from different key spaces must not be
+  # silently merged into one list.
+  #
+  # Found 2026-09-17, the first time tactical_events was non-empty: the
+  # derive stage had never produced a row, so this branch had never run
+  # against the table whose key column it could not handle.
+  #
+  # ONE RULE, ONE PLACE. The predicate below MUST match the counting rule
+  # above, and the first version of it did not: it asked every table for
+  # `originator_nation IS NULL OR releasable_to IS NULL`, which is the
+  # NON-AGGREGATE rule, and so accused all three region_* rollups of missing
+  # a declaration while the count of 6 correctly excluded them. An aggregate
+  # with a NULL originator is CORRECT -- composed rows claim no authorship --
+  # and naming it as a finding sends the operator to "fix" the one thing that
+  # was right.
+  #
+  # A second implementation of a rule is a second rule. The offence predicate
+  # is therefore derived from the same is_aggregate() classification the
+  # counter uses, not re-stated from memory of what it does.
   for t in $TABLES; do
-    # NOT EVERY LABELLED TABLE IS ASSET-KEYED. The rollups key on region_id
-    # and tactical_events on `subject`, so this query errored on three tables
-    # and printed the raw psql error into the findings section — noise in
-    # exactly the place an operator is meant to read a list of asset ids.
-    # Skip tables without the column rather than asking and apologising.
-    has_asset_id="$(q "SELECT count(*) FROM information_schema.columns WHERE table_name='$t' AND column_name='asset_id';")"
-    [ "${has_asset_id:-0}" = "1" ] || continue
-    q "SELECT DISTINCT asset_id FROM \"$t\" WHERE originator_nation IS NULL OR releasable_to IS NULL;"
+    # Offence predicate, per class -- mirrors the counting rule exactly:
+    #   aggregate      : releasable_to IS NULL  (not composed)
+    #                 OR originator_nation IS NOT NULL  (claims authorship)
+    #   non-aggregate  : originator_nation IS NULL OR releasable_to IS NULL
+    if is_aggregate "$t"; then
+      pred="releasable_to IS NULL OR originator_nation IS NOT NULL"
+    else
+      pred="originator_nation IS NULL OR releasable_to IS NULL"
+    fi
+    key=""
+    for cand in asset_id subject region_id; do
+      n="$(q "SELECT count(*) FROM information_schema.columns WHERE table_name='$t' AND column_name='$cand';")"
+      if [ "${n:-0}" = "1" ]; then key="$cand"; break; fi
+    done
+    if [ -z "$key" ]; then
+      # Say so, rather than dropping the table silently. An unlabelled row in
+      # a table with no usable key is still a finding; it just cannot be
+      # named, and the operator needs to know which table to open.
+      bad="$(q "SELECT count(*) FROM \"$t\" WHERE $pred;")"
+      [ "${bad:-0}" = "0" ] || echo "$t: ${bad} unlabelled row(s), NO asset_id/subject/region_id column to name them by"
+      continue
+    fi
+    q "SELECT DISTINCT '$t' || ' [' || '$key' || '] ' || COALESCE($key::text,'<NULL>') FROM \"$t\" WHERE $pred;"
   done | sort -u | sed '/^$/d' | sed 's/^/    /'
   echo
   echo "Declare them in the deployment ontology overlay (releasability.yaml)"
