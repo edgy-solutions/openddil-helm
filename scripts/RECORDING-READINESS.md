@@ -47,6 +47,11 @@ worth one beat on camera if there is room.
 
 * **Completeness gate PASSES** — 8 populated tables, **zero unlabelled**, and
   the three rollups classified `aggregate — composed, claims no originator`.
+  Re-verified 2026-09-17 **with `tactical_events` non-empty for the first
+  time** (8 rows, all labelled). Its producer was stamping no labels at all;
+  the table had been empty for as long as the derive stage was dead, so the
+  gate had been green over zero rows. A table empty for the wrong reason is
+  not covered by the check that reads it.
 * **Rollups partitioned by releasability class**, and the arithmetic matches
   what each subject sees:
 
@@ -61,37 +66,52 @@ worth one beat on camera if there is room.
 * **Stale-key detector armed and red-checked** (inject `id='edge'` → `STALE
   KEY edge`, exit 1 → remove → clean).
 
-## D. Pipeline liveness
+## D. Pipeline liveness — re-established 2026-09-17 with the missing rung
 
-> **SUPERSEDED 2026-09-17 — DO NOT TRUST THIS SECTION AS WRITTEN.**
->
-> Every measurement below was accurate and the pipeline was dead anyway.
-> `check-advancing` was green across all nine stages, `check_tier_feed` was
-> clean across 45 consumers, and at the same time `asset-cm-state` and
-> `asset-logistics-status` were both at **+0** and fusion had received **zero
-> invocations, ever**. Restate's tier node could neither create nor enumerate
-> an invocation (`node N1:1645 was shut down or removed`), and nothing in this
-> suite asks a question that state can fail.
->
-> The nine stages measure that *topics advance*. The derive stage sits between
-> two of them and was never measured: a subscription can be registered, its
-> lag can fall, and nothing can complete. **Consumed is not completed.**
->
-> Re-establish this section only after `RUNBOOK-2026-09-17-unwedge.md` step 4
-> shows a non-zero delta on `asset-cm-state` AND `asset-logistics-status`, and
-> only with the derive-stage check (follow-up 2) in the suite. Until then this
-> section documents what green looked like while the thing was broken, which
-> is worth keeping and worth not believing.
+> **The 2026-09-09 version of this section was accurate and the pipeline was
+> dead anyway.** Nine advancing stages green, 45 consumers clean — while
+> `asset-cm-state` and `asset-logistics-status` sat at **+0** and fusion had
+> received zero invocations, ever. The nine stages measure that *topics
+> advance*. The derive stage sits between two of them and was never measured.
+> **Consumed is not completed.** That section is not restored; this one
+> replaces it, and it is not green until the derive stage is in it.
 
+* **`check-derive-stage.sh` — COMPLETING.** The measurement that had never
+  once been non-zero, over a real 60s window:
 
-* **`check-advancing.sh` green across all nine stages** — ingest, mapper,
-  derived at both edges; region inbound; region rollups; HQ inbound.
-* **`check_tier_feed.py` clean** — 45 rendered consumers, zero unfed, zero
-  unentitled, zero null-keyed, zero stale-keyed; declared-idle
-  `declared=2, held=2, investigate=1`.
-* **Consumer census: 4 reachbacks**, all root-side (`asset-registry-edge-0N`,
-  `logistics-sim-edge-0N`); **region-east zero**. Those four are correct by
-  design at this stage and retire with their own components.
+| tier | asset-cm-state | asset-logistics-status |
+|---|---|---|
+| edge-01 | +100 | +16 |
+| edge-02 | +75 | +12 |
+| region-east | +175 | +56 |
+
+  Three terms, all satisfied: consumed, completed, **and the registered
+  deployment reachable** — the third is what separates "the derive stage is
+  broken" from "the derive stage has nothing to do".
+
+* **`check-advancing.sh`** — every measured stage moved over 40s.
+* **`check_tier_feed.py`** — 45 rendered consumers, zero unfed, zero
+  unentitled, zero null-keyed, zero stale-keyed.
+* **`check-chart-render.sh`** — guards 1-4 clean, including guard 4 parsing
+  all rendered shell across three variants (35 / 62 / 38).
+* **Restate stable under a bounded RocksDB budget** — all four at
+  `RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE` = 50% of limit, **zero restarts**,
+  90-minute watch sawtoothing with no trend (root 265-407Mi, edges
+  148-375Mi, region 989-1192Mi; peak 58% of 2Gi). The ~1600-restart era is
+  over and its cause is fixed, not merely out-scaled.
+
+**RE-RUN BEFORE RECORDING — all four, in this order:**
+
+```
+bash scripts/check-advancing.sh openddil 40
+bash scripts/check-derive-stage.sh 60          # <-- the one that was missing
+python scripts/check_tier_feed.py openddil
+bash scripts/check-releasability-completeness.sh -n openddil
+```
+
+**If `check-derive-stage` says NOT COMPLETING, do not record**, whatever the
+other three say — that combination is precisely the eight-hour outage, and
+the other three cannot see it.
 
 ## E. Severance, both dimensions
 

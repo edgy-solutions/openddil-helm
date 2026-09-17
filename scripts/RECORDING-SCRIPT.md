@@ -14,13 +14,20 @@ Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 
 ```
 bash scripts/check-advancing.sh openddil 30      # must exit 0, nine stages
-py -3 scripts/check_tier_feed.py openddil        # must exit 0
+bash scripts/check-derive-stage.sh 60            # must say COMPLETING
+python scripts/check_tier_feed.py openddil       # must exit 0
 bash scripts/check-releasability-completeness.sh -n openddil   # GATE PASSES
 ```
 
 **If `check-advancing` reports any stage FROZEN, do not record.** That is the
 outage that ran invisible for 3½ hours; it is cheap to fix by restarting the
 named component and expensive to discover mid-take.
+
+**If `check-derive-stage` says NOT COMPLETING, do not record either — whatever
+the other three say.** On 2026-09-17 all nine advancing stages were green and
+45 consumers were clean while fusion had received zero invocations, ever. The
+other checks cannot see that: they measure whether topics advance, and the
+derive stage sits between two of them. Consumed is not completed.
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
