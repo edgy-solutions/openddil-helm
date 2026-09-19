@@ -125,25 +125,91 @@ green unless the derive stage and the shape sizes are in it.
 * **PEPs: streaming, bounded, measured.** Four at ~17 Mi, zero restarts, where
   they had been OOMKilled in a loop at a 256 Mi cap.
 
-## E. Severance, both dimensions
+## E. Severance, both dimensions — REHEARSED 2026-09-19 against revision 50
 
-Run 2026-09-09, predicted by classification before either cut, ended
-connected. Full table in `PREDICTION-2026-09-08-two-dimension-severance.md`.
+Predicted by classification **before either cut**
+(`PREDICTION-2026-09-19-severance-rehearsal.md`), run one dimension at a time,
+each healed and verified before the next, **ended connected** with pre-flight
+5 of 5. This replaces the 2026-09-09 measurements, which were taken against a
+substrate since wiped three times with every PEP replaced.
 
-> **NOT re-run on 2026-09-19.** The cluster underneath it has changed
-> substantially — Restate wiped and re-bootstrapped three times, retention
-> declared, PEPs replaced. These results stand as the last measurement and
-> **the severance beats should be rehearsed once before recording**, not
-> trusted from a week-old run on a different build.
+### Dimension 1 — region-east severed from HQ (`--from-parent`)
 
-* **Region from HQ:** region served fresh while severed, edges still reached
-  it, rollups kept composing, HQ went stale **with an indicator**, heal
-  converged non-vacuously (12m → 20s).
-* **edge-01:** edge served locally at 0.31s; at the region edge-01's rows went
-  **4m46s stale while edge-02's stayed 0.6s fresh**; HQ attributed the two-hop
-  staleness correctly.
-* **Relay probes did not fire under severance** — 11 minutes severed, uplink
-  restarts **0**.
+| # | prediction | measured | |
+|---|---|---|---|
+| 1.1 | region serves its own data | telemetry 0–1s old throughout | ✓ |
+| 1.2 | region keeps computing severity | `asset_logistics_status` 1–3s old | ✓ |
+| 1.3 | subtree stays attached | edge-01 **0s**, edge-02 **0s** at the region | ✓ |
+| 1.4 | rollup still composes | **3 partials / 14 assets** | ✓ |
+| 1.5 | **HQ stale, rows retained** | **14 rows, 403s stale**; rollups 3/14 at 422s | ✓ |
+| 1.6 | edges unaffected | both producing throughout | ✓ |
+| 1.7 | uplink restarts 0 | `tier-uplink-region-east` restarts **0** | ✓ |
+| 1.8 | heal converges non-vacuously | **420s → 0s within 45s** | ✓ |
+
+**1.5 is the discriminating one** — three outcomes, only one correct. *Fresh*
+would mean a path still crosses the boundary and the sever is a lie; *gone*
+would mean an absence rendered as a deletion. **Stale with rows** is what it
+did.
+
+### Dimension 2 — edge-01 severed (parent is region-east)
+
+| # | prediction | measured | |
+|---|---|---|---|
+| 2.1 | edge serves locally | telemetry 1s old throughout | ✓ |
+| 2.2 | region's edge-01 view stale, rows kept | **8 rows, 398s** | ✓ |
+| 2.3 | region's edge-02 view fresh | **6 rows, 0s** | ✓ |
+| 2.4 | **two ages on one screen** | **edge-01 398s beside edge-02 0s** | ✓ |
+| 2.5 | **two-hop at HQ** | **edge-01 418s while the region's own rollup is 14s** | ✓ |
+| 2.6 | bridge restarts 0 | **CrashLoopBackOff, 6 restarts — PREDICTION WRONG** | ✗ |
+| 2.7 | heal converges non-vacuously | **635s → 0s within 45s** | ✓ |
+
+**2.4 and 2.5 are the beat.** A single "last updated" collapses *a quiet edge*
+and *a downed region uplink* into one number, and they call for opposite
+responses.
+
+### 2.6 — the prediction that was wrong, and what it actually means
+
+Predicted 0 restarts on the reasoning that buffering is the designed degraded
+mode. The bridge instead **crash-looped, 6 restarts**, and the log says why:
+
+```
+service closing due to: failed to init output ... kafka: client has run out of
+available brokers to talk to: dial tcp ...:9092: connect: connection refused
+```
+
+redpanda-connect exits at **startup** because it cannot initialise its output.
+It never runs long enough to be probed, so the stall probe's
+destination-reachable clause is **not** falsified — it simply never ran. What
+is falsified is the assumption that this relay buffers in place. It cannot;
+it cannot start.
+
+**That cost nothing, and this was verified rather than assumed.** The backlog
+lives in the edge broker's own log, not in the relay: `bridge-group-edge-01`
+reached **TOTAL-LAG 3020** while severed and drained to **3** on heal, group
+Stable. *The Kafka topic is the buffer*, which is why a relay that cannot hold
+state is still safe to lose. A relay that buffered in memory would be the
+design worth worrying about.
+
+### A finding for the camera: `hq_link_severed` tracks a different mechanism
+
+edge-01's own `edge_buffer_status` row, updated every 2s throughout the cut,
+reported **`bridge_group_lag` climbing 2713 → 3020** and **`probe_healthy`
+false** — both true and both live. But **`hq_link_severed` stayed `false`**
+while the edge was demonstrably severed.
+
+It is not wrong so much as answering a different question:
+`edge_buffer_monitor._probe_hq_link_severed()` probes **toxiproxy's
+`hq-link`**, the frontend's WAN toggle. `sever-tier.sh` cuts with a
+NetworkPolicy, which toxiproxy knows nothing about.
+
+**On camera this matters:** the screens render a LINK UP / LINK DOWN indicator
+from that field, so during a `sever-tier.sh` beat it will read **LINK UP**
+while the data visibly stops. The buffer count and health flag beside it tell
+the true story. Either drive the beat from the toxiproxy toggle so the
+indicator agrees, or say plainly that the indicator tracks the WAN simulator
+and the buffer depth is the real reading. **Do not let it pass unremarked** —
+an indicator contradicting the story being told is the one thing this demo
+cannot afford, given what the demo is about.
 
 ## F. Known and declared, so nothing on screen is a surprise
 
@@ -165,6 +231,8 @@ connected. Full table in `PREDICTION-2026-09-08-two-dimension-severance.md`.
   leaves 72h. The gradient was inverted until 2026-09-19 (the archival tier
   kept the least), which is why the root's alert feed used to empty in a day.
 * **UD-14: rollout tested 2026-09-19, NOT reproduced.** See §G.
+* **`hq_link_severed` tracks toxiproxy, not the NetworkPolicy sever** — it
+  reads LINK UP during a `sever-tier.sh` cut. See §E.
 
 ## G. Things that will bite if forgotten
 
