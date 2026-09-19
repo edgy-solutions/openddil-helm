@@ -28,6 +28,31 @@
 # per response. That is the runtime half; this is the pre-flight half. They
 # are deliberately the same number, and if you change one, change both.
 #
+# ---------------------------------------------------------------------------
+# A CLEANUP CAN GROW THE SERVED SHAPE. Read this before bulk-correcting a
+# store in the field.
+# ---------------------------------------------------------------------------
+# Electric serves a shape from its OWN APPEND-ONLY LOG, not from the table.
+# Measured 2026-09-18: deleting 18,562 rows took the table from 11 MB to
+# 64 kB, and the served shape STAYED AT 10.00 MB -- because the deletes did
+# not remove the 18,562 inserts from the log, they APPENDED 18,565 more
+# operations to it.
+#
+# So the intuition that fixing the data fixes the payload is exactly
+# backwards for the duration: a bulk correction makes the shape bigger, and
+# the PEP that must carry it is under more pressure immediately after the
+# cleanup than before it. Restarting Electric rebuilt the log from the
+# corrected table and the shape fell to 21 KiB.
+#
+# THE OPERATIONAL RULE: after any bulk correction to a store, restart that
+# tier's Electric, then re-run this check. The tier's clients re-sync from
+# scratch, which is the cost, and it is small next to serving a log whose
+# operation count no longer resembles the data.
+#
+# This script is the only instrument that sees it. Row counts look right,
+# the completeness gate passes, the write-path suite is green, and the shape
+# a browser must download is two orders of magnitude off.
+#
 #   ./scripts/check-shape-sizes.sh [namespace] [ceiling-bytes]
 #
 # Exit 0 = every shape under the ceiling. Exit 1 = at least one over, named.
