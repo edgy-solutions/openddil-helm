@@ -200,12 +200,48 @@ q() { kubectl exec -n "$NS" "$POD" -- psql -U "$PGUSER" -d "$PGDB" -At -c "$1" 2
 # Declared-empty tables. Parsed with grep/sed rather than a YAML library so
 # this script keeps its only dependency being kubectl — the same reason the
 # rest of it composes SQL by hand.
+# A DECLARATION MAY BE SCOPED TO A CLASS OF STORE.
+#
+# `asset_registry` is populated at the ROOT (14 rows) and empty at every tier,
+# because the registry is a root-side component (ADR-0028) and no tier
+# projector has a mapping for it. Declaring it empty without a scope would
+# excuse it at the root too -- so the day the root's registry emptied, the
+# gate that exists to notice would be the thing explaining it away.
+#
+# An entry may therefore carry `stores: [tier]` or `stores: [root]`, or name
+# tiers explicitly. NO `stores:` KEY MEANS EVERY STORE, so every existing
+# declaration keeps its current meaning.
+#
+# Found 2026-09-18 on the first --all-tiers run that got far enough to reach
+# this branch: the edge stores were failing earlier on unlabelled rows, so
+# nothing had ever asked the question at a tier.
+THIS_STORE="root"
+[ -n "$TIER" ] && THIS_STORE="tier"
+
 DECLARED_EMPTY=""
 if [ -f "$EXPECTED_EMPTY" ]; then
-  DECLARED_EMPTY="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" \
-    | sed -n 's/^  \([a-z_][a-z_0-9]*\):[[:space:]]*$/\1/p')"
+  # Emit "table<TAB>scope-list" then filter to the entries in scope here. The
+  # awk keeps the grep/sed-only dependency rule: kubectl and nothing else.
+  DECLARED_EMPTY="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" | awk -v store="$THIS_STORE" -v tier="$TIER" '
+    /^  [a-z_][a-z_0-9]*:[[:space:]]*$/ {
+      if (tbl != "") emit()
+      tbl = $1; sub(":", "", tbl); scopes = ""
+      next
+    }
+    /^    stores:[[:space:]]*\[/ {
+      scopes = $0
+      sub(/^[^[]*\[/, "", scopes); sub(/\].*$/, "", scopes); gsub(/[ \t"]/, "", scopes)
+      next
+    }
+    END { if (tbl != "") emit() }
+    function emit(   n, a, i) {
+      if (scopes == "") { print tbl; return }          # unscoped = every store
+      n = split(scopes, a, ",")
+      for (i = 1; i <= n; i++)
+        if (a[i] == store || (tier != "" && a[i] == tier)) { print tbl; return }
+    }')"
   echo "  declared-empty: $(printf '%s' "$DECLARED_EMPTY" | tr '\n' ' ')"
-  echo "                  (from $EXPECTED_EMPTY)"
+  echo "                  (from $EXPECTED_EMPTY, in scope for: $THIS_STORE${TIER:+ $TIER})"
 else
   echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
   echo "                  every empty labelled table will be reported as"
