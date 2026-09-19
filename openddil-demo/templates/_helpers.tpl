@@ -783,3 +783,130 @@ it with more steps.
 {{- end -}}
 {{- divf $bytes 2.0 | float64 | printf "%.0f" -}}
 {{- end }}
+
+{{/*
+openddil.tierProjectorConfig -- a tier projector's mapping set, as content.
+
+HASHED BY THE DEPLOYMENT THAT MOUNTS IT, for the reason recorded on
+openddil.edgeBridgeConnectYaml and openddil.tierRestateToml: a checksum over a
+hand-listed tuple of values misses the first change to anything outside the
+tuple, and a config with NO checksum at all misses every change.
+
+THE SECOND CASE IS THE ONE THAT BIT. This document had no checksum annotation,
+so adding `retention_hours` to it on 2026-09-18 rendered correctly, applied
+correctly, updated the live ConfigMap correctly -- and never reached the
+running process. Nothing in the pod template changed, Kubernetes correctly
+rolled nothing, helm reported success, and the projector kept the mapping set
+it had loaded at startup.
+
+Same shape as the bridge retarget: every rendered artifact said the new thing
+while the process held the old one. Extracted here so the document IS the
+hash input, and the next field anyone adds is covered by construction rather
+than by remembering.
+*/}}
+{{- define "openddil.tierProjectorConfig" -}}
+{{- $tier := .tier -}}
+{{- $root := .root -}}
+{{- $tn := $root.Values.tierNode -}}
+# Tier-scoped projector mapping for {{ $tier.id }}.
+# Root-only rollup topics (region-fleet-summary, region-top-factors,
+# region-wear-trends) are deliberately ABSENT: they are produced by the
+# aggregator to the root broker and would never arrive here.
+settings:
+  rate_limit_per_sec: 10
+mappings:
+  - topic: telemetry-latest-state
+    handler: telemetry_latest
+    table: telemetry_latest_state
+    consumer_group: tier-projector-telemetry-latest-{{ $tier.id }}
+    decode_as: openddil.telemetry.v1.EntityTelemetryEvent
+    mode: upsert
+    asset_ttl_hours: 24
+  - topic: asset-cm-state
+    handler: cm_state
+    table: asset_cm_state
+    consumer_group: tier-projector-cm-state-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: asset-logistics-status
+    handler: logistics_status
+    table: asset_logistics_status
+    consumer_group: tier-projector-logistics-status-{{ $tier.id }}
+    decode_as: openddil.logistics.v1.AssetLogisticsStatusUpdate
+    mode: upsert
+    asset_ttl_hours: 24
+  - topic: asset-capability-snapshot
+    handler: capability_state
+    table: asset_capability_state
+    consumer_group: tier-projector-capability-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: asset-telemetry-windows
+    handler: telemetry_windows
+    table: asset_telemetry_windows
+    consumer_group: tier-projector-windows-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: tactical-events
+    handler: tactical_events
+    table: tactical_events
+    consumer_group: tier-projector-tactical-events-{{ $tier.id }}
+    decode_as: cloudevents.json
+    mode: append
+    # DECLARED RETENTION, per tier kind (values.yaml eventRetention).
+    # Absent, this is None and the pruner skips the table entirely -- which
+    # is how one region store reached 18,573 rows with the oldest ten days
+    # old while the handler's docstring promised pruning. An intermediate
+    # accumulates its whole subtree's events plus its own, so it keeps a
+    # SHORTER window than a leaf, not a longer one: the region is where the
+    # volume lands and where the shape is read from.
+    retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
+  - topic: asset-element-telemetry
+    handler: asset_element_telemetry
+    table: asset_element_telemetry
+    consumer_group: tier-projector-element-telemetry-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: asset-element-inventory
+    handler: asset_element_inventory
+    table: inventory_items
+    consumer_group: tier-projector-element-inventory-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+{{- if $tier.hasChildren }}
+  #
+  # AN INTERMEDIATE PROJECTS ITS OWN ROLLUPS. The eight mappings above
+  # are the LEAF shape: what a tier receives about assets. A tier with
+  # children also PRODUCES a regional picture, and after the cutover the
+  # aggregator lives here — so its outputs land on this broker and this
+  # store is where they belong.
+  #
+  # Without these the region's own screen read "awaiting first emission"
+  # while HQ held three class partials of the very numbers this tier
+  # computed. The aggregator's home was the one place its work did not
+  # appear.
+  #
+  # Rendered only for a tier with children, because a leaf produces no
+  # rollups and a projector subscribed to topics its broker never carries
+  # is an unfed consumer at 1/1 — the shape check_tier_feed exists to
+  # find.
+  - topic: region-fleet-summary
+    handler: region_fleet_summary
+    table: region_fleet_summary
+    consumer_group: tier-projector-region-fleet-{{ $tier.id }}
+    decode_as: openddil.regional.v1.RegionFleetSummary
+    mode: upsert
+  - topic: region-top-factors
+    handler: region_top_factors
+    table: region_top_factors
+    consumer_group: tier-projector-region-factors-{{ $tier.id }}
+    decode_as: openddil.regional.v1.RegionTopFactors
+    mode: upsert
+  - topic: region-wear-trends
+    handler: region_wear_trends
+    table: region_wear_trends
+    consumer_group: tier-projector-region-wear-{{ $tier.id }}
+    decode_as: openddil.regional.v1.RegionWearTrends
+    mode: upsert
+{{- end }}
+{{- end }}
