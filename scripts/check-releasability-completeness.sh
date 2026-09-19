@@ -114,16 +114,32 @@ EXPECTED_EMPTY="${OPENDDIL_EXPECTED_EMPTY:-$(cd "$(dirname "$0")/../.." 2>/dev/n
 # level up: a result about one cluster restated as a claim about another.
 # Tiers make it available one level down, inside a single cluster.
 #
-#   --tier <id>   gate the tier's own store (tier-pg-<id>, user `openddil`)
-#   --all-tiers   gate the root and every tier that has a store, and FAIL if
-#                 any of them does, rather than reporting the first
+#   --tier <id>   gate ONE tier's own store (tier-pg-<id>, user `openddil`)
+#   --root-only   gate ONLY the root store
+#   --all-tiers   accepted, and now the default; kept so existing invocations
+#                 and runbooks keep working unchanged
+#
+# EVERY STORE IS THE DEFAULT, BY CONSTRUCTION.
+#
+# This used to default to the root alone and require `--all-tiers` to do the
+# whole deployment. The flag existed and worked; the readiness checklist
+# invoked the single-store form, and on 2026-09-17 that run was recorded as
+# readiness while two tier stores held unlabelled rows. The gate's own footer
+# said what it was -- "a statement about the root store AND NOTHING ELSE" --
+# and it was read as a pass anyway.
+#
+# That is the covers-one-of-N shape one level up from the code: the mechanism
+# existed, the procedure did not use it. A correct default fixes it where
+# remembering a flag does not, so the narrow answer is now the one you have
+# to ask for by name.
 TIER=""
-ALL_TIERS=0
+ALL_TIERS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) NS="$2"; shift 2 ;;
     -p) POD="$2"; shift 2 ;;
-    --tier) TIER="$2"; shift 2 ;;
+    --tier) TIER="$2"; ALL_TIERS=0; shift 2 ;;
+    --root-only) ALL_TIERS=0; shift ;;
     --all-tiers) ALL_TIERS=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -150,7 +166,9 @@ if [ "$ALL_TIERS" -eq 1 ]; then
   echo "gating the root store and $(printf '%s' "$tiers" | grep -c .) tier store(s)"
   echo
   rc=0
-  "$self" -n "$NS" || rc=1
+  # --root-only is REQUIRED here: the default is now every store, so a bare
+  # self-call would recurse until something ran out.
+  "$self" -n "$NS" --root-only || rc=1
   for t in $tiers; do
     echo
     echo "=============================================================="
@@ -216,18 +234,49 @@ q() { kubectl exec -n "$NS" "$POD" -- psql -U "$PGUSER" -d "$PGDB" -At -c "$1" 2
 # this branch: the edge stores were failing earlier on unlabelled rows, so
 # nothing had ever asked the question at a tier.
 THIS_STORE="root"
-[ -n "$TIER" ] && THIS_STORE="tier"
+TIER_KIND=""
+if [ -n "$TIER" ]; then
+  THIS_STORE="tier"
+  # LEAF OR INTERMEDIATE, derived rather than listed.
+  #
+  # Some tables are empty at a LEAF and populated at an INTERMEDIATE: the
+  # region_* rollups are produced by a tier with children, so an edge store
+  # has nothing that could write them, while the region's copies must keep
+  # being checked. Declaring them `stores: [tier]` would excuse both.
+  #
+  # The distinction is taken from the RELAY KIND the chart already derives
+  # from hasChildren: an intermediate runs `tier-uplink-<id>`, a leaf runs
+  # `edge-hq-bridge-<id>`. Asked of the running deployment rather than read
+  # from a list, same rule as the tier enumeration -- a hardcoded roster in
+  # an ontology file answers a question about a topology instead of about
+  # this one.
+  if kubectl get deploy -n "$NS" -o name 2>/dev/null \
+       | grep -q -- "-tier-uplink-${TIER}\$"; then
+    TIER_KIND="intermediate"
+  else
+    TIER_KIND="leaf"
+  fi
+fi
 
 DECLARED_EMPTY=""
 if [ -f "$EXPECTED_EMPTY" ]; then
   # Emit "table<TAB>scope-list" then filter to the entries in scope here. The
   # awk keeps the grep/sed-only dependency rule: kubectl and nothing else.
-  DECLARED_EMPTY="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" | awk -v store="$THIS_STORE" -v tier="$TIER" '
+  # A SPARSE ENTRY IS NOT AN EXPECTED-EMPTY ENTRY and must never be read as
+  # one. Found 2026-09-18 by red-checking the sparse branch: this awk emitted
+  # every entry lacking a `stores:` key, so `tactical_events` -- which carries
+  # `sparse: true` and no scope -- landed in BOTH lists. is_declared_empty is
+  # tested first, so it won, and the conditional producer check never ran.
+  # A conditional declaration silently became an unconditional one: precisely
+  # the "explains away a stopped producer" failure the sparse category was
+  # added to prevent, arriving inside the parser for it.
+  DECLARED_EMPTY="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" | awk -v store="$THIS_STORE" -v tier="$TIER" -v kind="$TIER_KIND" '
     /^  [a-z_][a-z_0-9]*:[[:space:]]*$/ {
       if (tbl != "") emit()
-      tbl = $1; sub(":", "", tbl); scopes = ""
+      tbl = $1; sub(":", "", tbl); scopes = ""; sparse = 0
       next
     }
+    /^    sparse:[[:space:]]*true[[:space:]]*$/ { sparse = 1; next }
     /^    stores:[[:space:]]*\[/ {
       scopes = $0
       sub(/^[^[]*\[/, "", scopes); sub(/\].*$/, "", scopes); gsub(/[ \t"]/, "", scopes)
@@ -235,13 +284,23 @@ if [ -f "$EXPECTED_EMPTY" ]; then
     }
     END { if (tbl != "") emit() }
     function emit(   n, a, i) {
+      if (sparse) return                               # conditional: handled elsewhere
       if (scopes == "") { print tbl; return }          # unscoped = every store
       n = split(scopes, a, ",")
       for (i = 1; i <= n; i++)
-        if (a[i] == store || (tier != "" && a[i] == tier)) { print tbl; return }
+        if (a[i] == store || (tier != "" && a[i] == tier) \
+            || (kind != "" && a[i] == kind)) { print tbl; return }
     }')"
+  # SPARSE tables: empty is expected only WHILE THE PRODUCER IS ALIVE.
+  # Parsed separately from declared-empty because it is a different claim --
+  # "nothing produces this here" versus "this producer speaks rarely".
+  DECLARED_SPARSE="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" | awk '
+    /^  [a-z_][a-z_0-9]*:[[:space:]]*$/ { tbl = $1; sub(":", "", tbl); next }
+    /^    sparse:[[:space:]]*true[[:space:]]*$/ { if (tbl != "") print tbl }')"
   echo "  declared-empty: $(printf '%s' "$DECLARED_EMPTY" | tr '\n' ' ')"
-  echo "                  (from $EXPECTED_EMPTY, in scope for: $THIS_STORE${TIER:+ $TIER})"
+  echo "                  (from $EXPECTED_EMPTY, in scope for: $THIS_STORE${TIER:+ $TIER}${TIER_KIND:+ [$TIER_KIND]})"
+  [ -n "$DECLARED_SPARSE" ] && \
+    echo "  declared-sparse: $(printf '%s' "$DECLARED_SPARSE" | tr '\n' ' ') (empty OK only while the producer is completing)"
 else
   echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
   echo "                  every empty labelled table will be reported as"
@@ -251,6 +310,61 @@ echo
 
 is_declared_empty() {
   grep -qx "$1" <<<"$DECLARED_EMPTY"
+}
+
+# ---------------------------------------------------------------------------
+# THE THIRD TERM: is the producer alive?
+# ---------------------------------------------------------------------------
+# `tactical_events` at the root is empty most of the time and that is CORRECT:
+# events fire on TRANSITIONS, a stable fleet emits none, and the root prunes
+# at 24h. Declaring it expected-empty would have been wrong -- the declaration
+# would equally explain away a producer that had genuinely stopped, which is
+# the move expected-empty.yaml's own header exists to make visible.
+#
+# The table cannot be its own evidence. If it is empty there is no newest row
+# to age against retention, so the checkable condition is not "past retention"
+# but "the producer is demonstrably completing" -- measured by
+# check-derive-stage.sh, which asks whether fusion completes invocations.
+#
+#   empty AND producer completing      -> sparse   (green, with the reason)
+#   empty AND producer not completing  -> stopped  (a finding)
+#   empty AND no fresh measurement     -> unexplained (a finding)
+#
+# THE THIRD BRANCH IS THE LOAD-BEARING ONE. Absence of evidence buys nothing:
+# a gate that treats "nobody measured" as "probably fine" is the reassuring
+# zero this whole file was written to refuse. So this FAILS CLOSED to the
+# behaviour it had before the category existed.
+#
+# Same shape as the relay stall probe's `destination reachable` clause: an
+# absence is benign only when something else proves the source is alive.
+DERIVE_RESULT="${OPENDDIL_DERIVE_RESULT:-${TMPDIR:-/tmp}/openddil-derive-stage.result}"
+# A measurement older than this is not evidence about now. Deliberately short:
+# the derive stage wedged for eight hours once while every other instrument
+# stayed green, so a verdict from that long ago says nothing about this run.
+DERIVE_MAX_AGE_S="${OPENDDIL_DERIVE_MAX_AGE_S:-1800}"
+
+producer_state() {
+  # -> "completing" | "not_completing" | "unmeasured:<why>"
+  [ -f "$DERIVE_RESULT" ] || { echo "unmeasured:no result file at $DERIVE_RESULT"; return; }
+  local epoch verdict age now
+  epoch="$(sed -n 's/^epoch=//p' "$DERIVE_RESULT" | head -1)"
+  verdict="$(sed -n 's/^verdict=//p' "$DERIVE_RESULT" | head -1)"
+  case "$epoch" in ''|*[!0-9]*) echo "unmeasured:unreadable timestamp"; return ;; esac
+  now="$(date -u +%s)"
+  age=$(( now - epoch ))
+  if [ "$age" -gt "$DERIVE_MAX_AGE_S" ]; then
+    echo "unmeasured:result is ${age}s old, older than ${DERIVE_MAX_AGE_S}s"
+    return
+  fi
+  case "$verdict" in
+    COMPLETING)     echo "completing" ;;
+    NOT_COMPLETING) echo "not_completing" ;;
+    *)              echo "unmeasured:verdict=${verdict:-<empty>}" ;;
+  esac
+}
+
+is_declared_sparse() {
+  grep -qx "$1" <<<"${DECLARED_SPARSE:-}"
 }
 
 reason_for() {
@@ -424,12 +538,36 @@ aggregate_ok=0
 empty_tables=""
 declared_tables=""
 undeclared_tables=""
+sparse_tables=""
+stopped_tables=""
+unmeasured_tables=""
 while IFS='|' read -r t n nn nr; do
   [ -n "$t" ] || continue
   if [ "$n" -eq 0 ]; then
     if is_declared_empty "$t"; then
       printf '%-28s %8s %12s %16s   (empty - DECLARED)\n' "$t" "$n" "$nn" "$nr"
       declared_tables="$declared_tables $t"
+    elif is_declared_sparse "$t"; then
+      # SPARSE: empty is expected only WHILE THE PRODUCER IS ALIVE. The third
+      # term comes from check-derive-stage.sh, and an unmeasured or stale
+      # verdict buys nothing -- see producer_state() for why that branch is
+      # the load-bearing one.
+      case "$(producer_state)" in
+        completing)
+          printf '%-28s %8s %12s %16s   (empty - SPARSE, producer completing)\n' "$t" "$n" "$nn" "$nr"
+          sparse_tables="$sparse_tables $t"
+          ;;
+        not_completing)
+          printf '%-28s %8s %12s %16s   <-- EMPTY and PRODUCER STOPPED\n' "$t" "$n" "$nn" "$nr"
+          stopped_tables="$stopped_tables $t"
+          ;;
+        unmeasured:*)
+          why="$(producer_state)"; why="${why#unmeasured:}"
+          printf '%-28s %8s %12s %16s   <-- EMPTY, PRODUCER UNMEASURED\n' "$t" "$n" "$nn" "$nr"
+          printf '%28s   (%s)\n' "" "$why"
+          unmeasured_tables="$unmeasured_tables $t"
+          ;;
+      esac
     else
       printf '%-28s %8s %12s %16s   <-- EMPTY, UNDECLARED\n' "$t" "$n" "$nn" "$nr"
       undeclared_tables="$undeclared_tables $t"
@@ -569,6 +707,29 @@ if [ "$unlabelled" -gt 0 ]; then
   echo "here until this reads zero: enforcing against a partially-labelled"
   echo "dataset blanks legitimate data, and an operator cannot tell that from"
   echo "correct enforcement."
+  exit 1
+fi
+
+if [ -n "$stopped_tables" ]; then
+  echo "GATE FAILS: sparse table(s) empty AND their producer is not completing:$stopped_tables"
+  echo
+  echo "These tables are declared sparse, which permits an empty table ONLY"
+  echo "while the producer is demonstrably alive. check-derive-stage.sh says"
+  echo "it is not completing, so the emptiness is the downstream half of that"
+  echo "outage -- not the rare-event case the declaration describes."
+  exit 1
+fi
+
+if [ -n "$unmeasured_tables" ]; then
+  echo "GATE FAILS: sparse table(s) empty with NO FRESH producer measurement:$unmeasured_tables"
+  echo
+  echo "A sparse declaration is conditional on the producer being alive, and"
+  echo "nothing has measured that recently. Absence of evidence buys nothing:"
+  echo "treating 'nobody looked' as 'probably fine' is the reassuring zero"
+  echo "this gate exists to refuse."
+  echo
+  echo "Run:  bash scripts/check-derive-stage.sh 60"
+  echo "then re-run this gate. It publishes the verdict this reads."
   exit 1
 fi
 

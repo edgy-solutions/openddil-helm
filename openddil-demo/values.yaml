@@ -795,22 +795,48 @@ ingress:
 # The read path cares about this directly: every retained row is bytes in an
 # Electric shape that a PEP must carry. Retention here and the shape ceiling
 # in the PEP are two ends of the same budget.
-# THE ROOT IS NOT SET HERE, and that is the finding this row came from.
-# openddil-projector/src/config/projector_config.yaml declares
-# `retention_hours: 24` for the root's tactical_events mapping -- so the ROOT
-# has always pruned and the TIERS never did. The asymmetry was invisible
-# because both read the same field name from configs that live in different
-# repos, and only one of them filled it in.
+# THE GRADIENT WAS INVERTED, and correcting it is the point of this row.
 #
-# The root's value is deliberately NOT mirrored here: a knob in values.yaml
-# that nothing reads is the same trap as a pruner whose input is never set.
-# Change the root's where the root's config lives.
+# First cut had leaves 168h, intermediates 72h and the root 24h -- the tier
+# with the most storage and the ARCHIVAL role retaining the least, and the
+# leaves with the least storage retaining the most. That was not a decision:
+# the root's 24h was a pre-existing default in a different repo, the tiers had
+# no value at all, and nothing anywhere disagreed because nothing compared
+# them.
+#
+# Sized by ROLE and by what each tier can hold:
+#
+#   root         longest   it is the record; a theatre-level alert history is
+#                          the thing an after-action review reads
+#   intermediate medium    aggregates its subtree, serves the regional screen
+#   leaf         shortest  least storage, and its events have already been
+#                          relayed upward -- a short local window is a cache,
+#                          not an archive
+#
+# Every retained row is also bytes in an Electric shape a PEP must carry, so
+# this and the shape ceiling are two ends of one budget. The gradient puts the
+# volume where the storage is and keeps the read-heavy tiers narrow.
+#
+# A SECOND EFFECT WORTH NAMING: with the root at 24h its tactical_events
+# emptied within a day, so `sparse` was the steady state there rather than the
+# exception -- and a category that fires constantly stops carrying
+# information. At 30 days the root holds its alert history and sparse becomes
+# rare, which is what it should be.
+#
+# THE ROOT'S NUMBER STILL LIVES IN ANOTHER REPO
+# (openddil-projector/src/config/projector_config.yaml). It is set there, to
+# the value below, and NOT mirrored here as a knob -- a values.yaml entry that
+# nothing reads is the same trap as a pruner whose input is never set. Making
+# one place declare all three needs a retention override on the root
+# projector; recorded as a follow-up row rather than half-built here.
+#
+#   root: 720h (30 days) -- projector_config.yaml, matches the tactical-events
+#         topic's own retention.ms of 30 days, so the store and the log agree
 eventRetention:
-  # A leaf sees only its own assets' events.
-  edgeHours: 168        # 7 days
-  # An intermediate sees its whole subtree's. Sized DOWN rather than up: the
-  # region is where the volume lands and where the shape is read from.
-  regionHours: 72       # 3 days
+  # A leaf: least storage, already relayed upward. A short local window.
+  edgeHours: 72         # 3 days
+  # An intermediate: aggregates its subtree and serves the regional screen.
+  regionHours: 168      # 7 days
 
 tierNode:
   # Additive and off by default. Enabling changes nothing about the existing

@@ -48,6 +48,24 @@ openddil_require_cluster
 NS="${NS:-openddil}"
 WINDOW="${1:-90}"
 
+# WHERE THIS CHECK PUBLISHES ITS VERDICT.
+#
+# The completeness gate needs a third term to tell a SPARSE table from a
+# STOPPED one: `tactical_events` is empty at the root most of the time,
+# because events fire on TRANSITIONS and a stable fleet emits none. Empty is
+# benign only while the producer is demonstrably alive -- and the producer's
+# liveness is exactly what this script measures.
+#
+# Same shape as the relay stall probe's `destination reachable` clause: an
+# absence is benign only when something else proves the source is alive.
+#
+# Written as a file rather than passed as a flag ON PURPOSE. A `--derive-ok`
+# flag is a claim the operator makes; a file with a timestamp is a
+# measurement someone took, and the gate can refuse one that is too old. A
+# flag that can be passed without running the check is the wrong-accessor
+# trap with a command line.
+DERIVE_RESULT="${OPENDDIL_DERIVE_RESULT:-${TMPDIR:-/tmp}/openddil-derive-stage.result}"
+
 # tier | broker pod | restate svc | derive-stage OUTPUT topics
 ROWS=(
   "edge-01|openddil-redpanda-edge-01-0|openddil-tier-restate-edge-01|asset-cm-state asset-logistics-status"
@@ -161,6 +179,22 @@ done
 
 echo
 echo "over ${elapsed}s: ${moved} advancing, ${frozen} frozen"
+
+# PUBLISH THE VERDICT, both ways. A file that only appears on success would
+# let a stale success outlive a failure -- the gate must be able to read
+# "measured, and it was not completing" as distinctly as it reads the good
+# case. epoch first so a reader can age it without parsing a date format.
+{
+  printf 'epoch=%s\n' "$(date -u +%s)"
+  printf 'verdict=%s\n' "$([ "$fail" -eq 0 ] && echo COMPLETING || echo NOT_COMPLETING)"
+  printf 'window_s=%s\n' "$elapsed"
+  printf 'advancing=%s\nfrozen=%s\n' "$moved" "$frozen"
+  printf 'namespace=%s\n' "$NS"
+} > "$DERIVE_RESULT" 2>/dev/null \
+  && echo "verdict published: $DERIVE_RESULT" \
+  || echo "WARNING: could not publish verdict to $DERIVE_RESULT -- the" \
+          "completeness gate will treat sparse tables as unexplained" >&2
+
 if [ "$fail" -eq 0 ]; then
   echo "derive stage: COMPLETING"
 else
