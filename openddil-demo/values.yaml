@@ -767,6 +767,51 @@ ingress:
 #   topaz         — deployed, healthy, DECIDING NOTHING. Arc 2's landing zone
 #                   (ADR-0029); shipping the seat now means Arc 2 adds rules
 #                   to a deployed component rather than adding a component.
+# ---------------------------------------------------------------------------
+# EVENT RETENTION, DECLARED PER TIER KIND
+# ---------------------------------------------------------------------------
+# The projector has always had a retention pruner and a `retention_hours`
+# field. NOTHING EVER SET IT. It defaults to None, the pruner skips any table
+# without it, and `tactical_events` was therefore append-forever -- while its
+# handler docstring says "a background pruner deletes rows older than
+# retention_hours", which was true and vacuous at the same time.
+#
+# Found 2026-09-18 with 18,573 rows in one region store, the oldest ten days
+# old. Most of those were residue from a separate defect, but the unbounded
+# growth is its own problem and would have arrived on its own schedule.
+#
+# WHY PER KIND AND NOT ONE NUMBER. An intermediate accumulates events from its
+# WHOLE SUBTREE plus its own ingest; a leaf accumulates only its own. The
+# region is not "a bigger edge" -- it is an edge times its children. Same
+# scaling argument as the Restate subtree row: the ratio is arithmetic about
+# subtree size that merely coincides with tier kind in a topology with one
+# region and two edges.
+#
+# These are DEPLOYMENT CHOICES, not constants. A fleet that must retain events
+# for a post-exercise review sets them higher and sizes the store for it; the
+# point is that the number is declared somewhere an operator can find rather
+# than implied by the absence of a setting.
+#
+# The read path cares about this directly: every retained row is bytes in an
+# Electric shape that a PEP must carry. Retention here and the shape ceiling
+# in the PEP are two ends of the same budget.
+# THE ROOT IS NOT SET HERE, and that is the finding this row came from.
+# openddil-projector/src/config/projector_config.yaml declares
+# `retention_hours: 24` for the root's tactical_events mapping -- so the ROOT
+# has always pruned and the TIERS never did. The asymmetry was invisible
+# because both read the same field name from configs that live in different
+# repos, and only one of them filled it in.
+#
+# The root's value is deliberately NOT mirrored here: a knob in values.yaml
+# that nothing reads is the same trap as a pruner whose input is never set.
+# Change the root's where the root's config lives.
+eventRetention:
+  # A leaf sees only its own assets' events.
+  edgeHours: 168        # 7 days
+  # An intermediate sees its whole subtree's. Sized DOWN rather than up: the
+  # region is where the volume lands and where the shape is read from.
+  regionHours: 72       # 3 days
+
 tierNode:
   # Additive and off by default. Enabling changes nothing about the existing
   # root-tier stack — this phase ADDS, it does not modify.

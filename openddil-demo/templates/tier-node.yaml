@@ -337,6 +337,14 @@ data:
         consumer_group: tier-projector-tactical-events-{{ $tier.id }}
         decode_as: cloudevents.json
         mode: append
+        # DECLARED RETENTION, per tier kind (values.yaml eventRetention).
+        # Absent, this is None and the pruner skips the table entirely -- which
+        # is how one region store reached 18,573 rows with the oldest ten days
+        # old while the handler's docstring promised pruning. An intermediate
+        # accumulates its whole subtree's events plus its own, so it keeps a
+        # SHORTER window than a leaf, not a longer one: the region is where the
+        # volume lands and where the shape is read from.
+        retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
       - topic: asset-element-telemetry
         handler: asset_element_telemetry
         table: asset_element_telemetry
