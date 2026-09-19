@@ -17,7 +17,7 @@ bash scripts/check-advancing.sh openddil 30      # must exit 0, nine stages
 bash scripts/check-derive-stage.sh 60            # must say COMPLETING
 python scripts/check_tier_feed.py openddil       # must exit 0
 bash scripts/check-shape-sizes.sh openddil       # read path: shapes under ceiling
-bash scripts/check-releasability-completeness.sh -n openddil --all-tiers   # ALL STORES
+bash scripts/check-releasability-completeness.sh -n openddil   # every store by default
 ```
 
 **If `check-advancing` reports any stage FROZEN, do not record.** That is the
@@ -30,11 +30,16 @@ the other three say.** On 2026-09-17 all nine advancing stages were green and
 other checks cannot see that: they measure whether topics advance, and the
 derive stage sits between two of them. Consumed is not completed.
 
-**`--all-tiers` IS NOT OPTIONAL ON THE GATE.** Without it the gate reports on
-the root store alone and says so in its own footer — and on 2026-09-17 that
-run was recorded as readiness while two tier stores held unlabelled rows. A
-tier decides locally against its own data; a pass at the root says nothing
-about it.
+**The gate covers every store by default now** — it used to default to the
+root and need `--all-tiers`, the checklist invoked the narrow form, and that
+run was once recorded as readiness while two tier stores held unlabelled
+rows. `--root-only` is the narrow answer you now ask for by name.
+
+**`check-derive-stage` must run BEFORE the gate**, not merely with it: it
+publishes the verdict the gate reads to decide whether an empty
+`tactical_events` is *sparse* (the fleet is quiet) or *stopped* (the producer
+died). A verdict older than 30 minutes is refused, so the order in that block
+is load-bearing rather than tidy.
 
 **And if `check-shape-sizes` fails, do not record.** Every check above this
 line measures the WRITE path. On 2026-09-18 all of them were green while
@@ -148,12 +153,25 @@ is entitled to nothing sees nothing rather than everything.
 
 ## Do not, during the recording
 
-* **Do not `helm upgrade`** — UD-14: four clients once wedged for 3½ hours
-  after a rollout, cause still open.
+* **Do not `helm upgrade` — now for TWO reasons.**
+  * **UD-14**, narrowed 2026-09-19 to "rollout tested, not reproduced" (92
+    consumer groups snapshotted across a rollout: 0 wedged). Narrowed, not
+    closed — one clean rollout is not proof against an intermittent wedge.
+  * **The wipe hook fires on every upgrade**, and now covers all four
+    Restates rather than only the root. Correct and safe on the lab, where
+    Restate state is rebuildable — and it means an upgrade mid-session
+    discards CM history and re-bootstraps. Not something to do on camera.
 * **Do not restart `faust-regional`** — ~2 minutes of changelog recovery,
   during which the region emits no rollups.
 * **Do not narrate `asset-telemetry-windows`** — still `investigate`, still
   empty, not part of the story.
+* **If the tactical event feed is empty, that is SPARSE, not broken.** Events
+  fire on transitions; a stable fleet emits none, and cm-service deliberately
+  will not re-emit while a status holds. The gate distinguishes this from a
+  stopped producer by checking the derive stage, so a blank feed alongside a
+  green pre-flight is the fleet being quiet. Say that plainly if asked —
+  it is a better answer than narrating around it, and it is the same honesty
+  the staleness indicators are there to demonstrate.
 * **Do not explain the four root-side reachbacks** unless asked; they are
   correct at this stage and retire with their own components.
 
