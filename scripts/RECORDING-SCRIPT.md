@@ -77,6 +77,32 @@ Show Ada and Bram side by side.
 
 *The beat:* the aggregate is no more visible than its least visible input.
 
+## READ THIS BEFORE BEAT 3 — the one indicator that disagrees
+
+`sever-tier.sh` cuts with a **NetworkPolicy**. The LINK UP / LINK DOWN
+indicator on the screens is driven by `hq_link_severed`, which probes
+**toxiproxy's `hq-link`** — the frontend's WAN toggle, a different mechanism
+entirely.
+
+**So during a script-driven cut the indicator will read LINK UP while the
+data visibly stops.** Measured 2026-09-19 through a full severance: the flag
+stayed `false` the whole time, while `bridge_group_lag` climbed 2713 → 3020
+and `probe_healthy` went false beside it — both live, both correct.
+
+Two honest ways to handle it, and one dishonest one:
+
+* **Drive the beat from the WAN toggle instead**, so the indicator agrees
+  with the story. Simplest if the toggle severs what you want severed.
+* **Say plainly what it tracks** — "that indicator follows the WAN simulator;
+  the buffer depth climbing is the real reading" — and point at the buffer.
+* **Do not let it pass unremarked.** This demo's whole claim is that the
+  screens refuse to show something they cannot support. An indicator
+  contradicting the story, in the beat about honest degradation, is the one
+  thing it cannot afford.
+
+Recorded as a finding, not fixed: whether that flag should track reachability
+rather than the simulator is a semantics decision, not a typo.
+
 ## BEAT 3 — dimension 1, region cut from HQ (~4 min)
 
 ```
