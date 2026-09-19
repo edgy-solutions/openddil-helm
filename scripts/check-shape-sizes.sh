@@ -143,6 +143,31 @@ print('TOTAL %d' % total)
     fi
   done <<< "$out"
   [ "$over" -eq 1 ] && echo "      ^ retention or predicate finding at THIS tier's store"
+
+  # ---------------------------------------------------------------------
+  # WORST-CASE RESIDENCY: the number the OOM actually turned on.
+  # ---------------------------------------------------------------------
+  # Streaming removed the per-request body, so a shape is no longer held
+  # whole -- but a chunk of each in-flight transfer is, plus whatever the
+  # runtime holds around it. The bound that matters is therefore
+  # concurrency, and the question a pre-flight can answer is: if every
+  # permitted in-flight shape were the LARGEST one, how does that compare
+  # to this PEP's limit?
+  #
+  # Reported rather than judged. It is a capacity reading, not a pass/fail:
+  # the ceiling above is what fails a run. Printing it keeps the two halves
+  # of the bound visible together -- bytes per shape here, shapes in flight
+  # from the PEP's own config -- because sizing either alone is what made a
+  # 256 MiB cap a race with the client's retry loop instead of a sizing.
+  inflight="$(kubectl -n "$NS" get deploy -o jsonpath="{range .items[?(@.metadata.name=='${REL}-tier-pep-${t}')]}{range .spec.template.spec.containers[0].env[*]}{.name}={.value} {end}{end}" 2>/dev/null \
+               | tr ' ' '\n' | sed -n 's/^OPENDDIL_MAX_INFLIGHT_SHAPES=//p' | head -1)"
+  inflight="${inflight:-8}"   # the PEP's own default when unset
+  memlimit="$(kubectl -n "$NS" get deploy "${REL}-tier-pep-${t}" \
+                -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}' 2>/dev/null)"
+  largest="$(printf '%s\n' "$out" | awk '$1 != "TOTAL" && $2 ~ /^[0-9]+$/ {if ($2 > m) m = $2} END {print m+0}')"
+  printf "      %-28s max %s in flight x %s KiB largest = %s KiB worst case (limit %s)\n" \
+         "in-flight budget" "$inflight" "$(( largest / 1024 ))" \
+         "$(( inflight * largest / 1024 ))" "${memlimit:-?}"
   echo
 done
 
