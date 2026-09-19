@@ -45,6 +45,12 @@ worth one beat on camera if there is room.
 
 ## C. Releasability
 
+> **The 2026-09-17 pass recorded below was a SINGLE-STORE run.** It was
+> true of the root store and was reported as readiness; `--all-tiers` on
+> 2026-09-18 then failed on two tier stores holding unlabelled rows and
+> on the root's `tactical_events` being empty-and-undeclared. Re-establish
+> this section only from an `--all-tiers` run.
+
 * **Completeness gate PASSES** — 8 populated tables, **zero unlabelled**, and
   the three rollups classified `aggregate — composed, claims no originator`.
   Re-verified 2026-09-17 **with `tactical_events` non-empty for the first
@@ -100,14 +106,23 @@ worth one beat on camera if there is room.
   148-375Mi, region 989-1192Mi; peak 58% of 2Gi). The ~1600-restart era is
   over and its cause is fixed, not merely out-scaled.
 
-**RE-RUN BEFORE RECORDING — all four, in this order:**
+**RE-RUN BEFORE RECORDING — all five, in this order:**
 
 ```
 bash scripts/check-advancing.sh openddil 40
-bash scripts/check-derive-stage.sh 60          # <-- the one that was missing
+bash scripts/check-derive-stage.sh 60          # <-- derive stage completes
 python scripts/check_tier_feed.py openddil
-bash scripts/check-releasability-completeness.sh -n openddil
+bash scripts/check-shape-sizes.sh openddil     # <-- READ path, added 2026-09-18
+bash scripts/check-releasability-completeness.sh -n openddil --all-tiers
 ```
+
+**Two of those five were added after a green suite coexisted with an
+outage.** `check-derive-stage` after nine advancing stages read green while
+fusion had zero invocations; `check-shape-sizes` after the whole write-path
+suite read green while every panel showed FEED UNAVAILABLE. **`--all-tiers`
+is not optional** — the single-store form reports on the root and says so in
+its own footer, and it was once recorded here as readiness while two tier
+stores held unlabelled rows.
 
 **If `check-derive-stage` says NOT COMPLETING, do not record**, whatever the
 other three say — that combination is precisely the eight-hour outage, and

@@ -16,7 +16,8 @@ Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 bash scripts/check-advancing.sh openddil 30      # must exit 0, nine stages
 bash scripts/check-derive-stage.sh 60            # must say COMPLETING
 python scripts/check_tier_feed.py openddil       # must exit 0
-bash scripts/check-releasability-completeness.sh -n openddil   # GATE PASSES
+bash scripts/check-shape-sizes.sh openddil       # read path: shapes under ceiling
+bash scripts/check-releasability-completeness.sh -n openddil --all-tiers   # ALL STORES
 ```
 
 **If `check-advancing` reports any stage FROZEN, do not record.** That is the
@@ -28,6 +29,18 @@ the other three say.** On 2026-09-17 all nine advancing stages were green and
 45 consumers were clean while fusion had received zero invocations, ever. The
 other checks cannot see that: they measure whether topics advance, and the
 derive stage sits between two of them. Consumed is not completed.
+
+**`--all-tiers` IS NOT OPTIONAL ON THE GATE.** Without it the gate reports on
+the root store alone and says so in its own footer — and on 2026-09-17 that
+run was recorded as readiness while two tier stores held unlabelled rows. A
+tier decides locally against its own data; a pass at the root says nothing
+about it.
+
+**And if `check-shape-sizes` fails, do not record.** Every check above this
+line measures the WRITE path. On 2026-09-18 all of them were green while
+every panel on every screen read FEED UNAVAILABLE, because one table's shape
+had grown to 10 MiB and the PEPs serving it were being OOMKilled. Nothing in
+the suite measured a byte of what the read path carries. This one does.
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
