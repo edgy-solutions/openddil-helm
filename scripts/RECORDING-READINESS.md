@@ -198,10 +198,21 @@ times); the helm rollout that preceded it had **never been tested**, because
 nobody was watching the right thing while one happened.
 
 **Now it has been.** `snapshot-consumers.sh` captured all 92 group-on-broker
-rows before and after the revision-50 rollout: **0 wedged, 0 state changes, 0
-groups disappeared**, and the full pre-flight came back 5 of 5 afterwards.
+rows before and after the revision-50 rollout (completed 03:59:54Z), then
+re-checked every 10 minutes for the next **1h43m** — eight consecutive
+samples through 05:42:43Z:
+
+* **0 wedged** at every sample (Stable + committed frozen + lag waiting)
+* **0 state changes, 0 groups disappeared**
+* **0 containers terminated in the window** — checked against
+  `lastState.terminated.finishedAt`, not the RESTARTS column, which counts
+  lifetime restarts and would have reported nine pods that last restarted
+  five days ago
+* pre-flight **5 of 5** afterwards, derive stage still COMPLETING
 
 **That narrows UD-14 honestly to "rollout tested, not reproduced."** It does
-not close it — one clean rollout is not proof against an intermittent wedge,
-and the original took 3.5 hours to be noticed. The instrument now exists, so
-the next occurrence is caught in the act instead of inferred. Keep rule 3.
+not close it, for a reason worth stating: the original wedge was *noticed*
+at 3.5 hours, which is not the same as having *begun* at 3.5 hours, and this
+window is 1h43m. One clean rollout is not proof against an intermittent
+fault. The instrument now exists, so the next occurrence is caught in the act
+instead of inferred hours later. **Keep rule 3.**
