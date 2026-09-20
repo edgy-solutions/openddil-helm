@@ -116,9 +116,41 @@ for arg in "$@"; do
     --from-parent) MODE="from-parent" ;;
     --isolate)     MODE="isolate" ;;
     --dry-run)     DRY_RUN=1 ;;
+    --restart-relay-on-heal) RESTART_RELAY=1 ;;
   esac
 done
 DRY_RUN="${DRY_RUN:-0}"
+RESTART_RELAY="${RESTART_RELAY:-0}"
+
+# ---------------------------------------------------------------------------
+# --restart-relay-on-heal -- OPT-IN, OFF BY DEFAULT, and here is why it exists
+# ---------------------------------------------------------------------------
+# `on` already restarts the site so open flows re-establish under the policy.
+# `off` had no counterpart, and the asymmetry has a measurable cost.
+#
+# The relay cannot buffer: redpanda-connect EXITS at startup when it cannot
+# initialise its Kafka output, so a severed relay crash-loops rather than
+# waiting. Kubernetes backs that off 10 -> 20 -> 40 -> 80 -> 160 -> 300s and
+# CAPS AT 300s, and a container in backoff does not retry when the network
+# returns -- it waits out the timer it is already in.
+#
+# Measured 2026-09-19: the relay's last failed run ended 15:56:10Z and it
+# started successfully at 16:01:21Z, a 311s gap that is the cap plus
+# scheduling. The heal landed at roughly 16:00:45, about 25-45s before that
+# timer expired, so the relay returned 36s later BY COINCIDENCE OF TIMING
+# rather than by reacting to anything. Had the heal landed just after the
+# 15:56:10 crash, the relay would have sat idle for a further five minutes
+# over a perfectly healthy network.
+#
+# So heal-to-fresh is 0-300s depending only on where the heal falls inside a
+# backoff window nobody controls. Deleting the relay pod clears the backoff
+# and makes the figure a property of the system instead of the clock.
+#
+# WHY OFF BY DEFAULT. The default path is what the severance test measures,
+# and the 300s worst case is a REAL property of this deployment. Turning the
+# restart on by default would improve the demo by hiding the finding, which
+# is the move this corpus exists to refuse. The flag makes the choice
+# explicit and the readiness doc records BOTH numbers.
 
 if [ -z "$TIER" ]; then
   echo "usage: $0 <tier-id> on|off|status [namespace] [--from-parent|--isolate] [--dry-run]" >&2
@@ -126,6 +158,10 @@ if [ -z "$TIER" ]; then
   echo "  --from-parent  (default) cut the uplink; the subtree stays attached" >&2
   echo "  --isolate      cut everything, subtree included" >&2
   echo "  --dry-run      render the policy and print it; apply nothing" >&2
+  echo "  --restart-relay-on-heal   on 'off', also restart this tier's relay" >&2
+  echo "                 so heal-to-fresh does not wait out a CrashLoopBackOff" >&2
+  echo "                 window of up to 300s. OFF by default: the default IS" >&2
+  echo "                 the measurement, and the worst case is a real property" >&2
   echo "" >&2
   echo "  LOG IN BEFORE YOU CUT. Keycloak runs at the ROOT, so a severed tier" >&2
   echo "  cannot mint new sessions -- an existing cookie keeps working for its" >&2
@@ -283,6 +319,18 @@ ${sel}    - ports:
 EOF
 }
 
+# The tier's own outbound relay. Leaves carry `edge-hq-bridge-<id>`;
+# an intermediate carries `tier-uplink-<id>`. Probed rather than assumed, so
+# a tier kind this script has not met yet reports "none found" instead of
+# silently restarting nothing while claiming it did.
+relay_components() {
+  for c in "edge-hq-bridge-${TIER}" "tier-uplink-${TIER}"; do
+    if kubectl get pods -n "$NS" -l "app.kubernetes.io/component=$c"          --no-headers 2>/dev/null | grep -q .; then
+      echo "$c"
+    fi
+  done
+}
+
 # ---------------------------------------------------------------------------
 # DRY RUN. Render and print; apply nothing, restart nothing, probe nothing.
 # ---------------------------------------------------------------------------
@@ -308,6 +356,19 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "  subtree: none — this tier is a leaf, so both modes are identical"
   fi
   echo
+  if [ "$RESTART_RELAY" = "1" ]; then
+    _rc="$(relay_components)"
+    if [ -n "$_rc" ]; then
+      printf '  on heal, WOULD restart relay: %s
+' "$(echo "$_rc" | tr '
+' ' ')"
+    else
+      echo "  on heal, --restart-relay-on-heal is set but NO relay component"
+      echo "  was found for ${TIER} — the step would do nothing. Fix the tier"
+      echo "  id or drop the flag rather than reading a silent no-op as a heal."
+    fi
+    echo
+  fi
   render_policy
   exit 0
 fi
@@ -408,6 +469,20 @@ case "$ACTION" in
     r="$(probe "$ROOT_HOST" "$ROOT_PORT")"
     echo "heal ${TIER}: root ${ROOT_HOST}:${ROOT_PORT} -> ${r:-?}"
     if [ "$r" = "OPEN" ]; then
+      if [ "$RESTART_RELAY" = "1" ]; then
+        _rc="$(relay_components)"
+        if [ -z "$_rc" ]; then
+          echo "  note: --restart-relay-on-heal set, but no relay component was"
+          echo "        found for ${TIER}. NOTHING WAS RESTARTED — do not read"
+          echo "        the heal figure below as the with-restart number."
+        else
+          _join="$(echo "$_rc" | tr '
+' ',')"; _join="${_join%,}"
+          echo "  restarting relay (${_join}) so heal does not wait out a"
+          echo "  CrashLoopBackOff window of up to 300s"
+          kubectl delete pod -n "$NS"             -l "app.kubernetes.io/component in (${_join})" --wait=false >/dev/null 2>&1
+        fi
+      fi
       echo "HEALED and PROVEN — root reachable again"
       exit 0
     fi
