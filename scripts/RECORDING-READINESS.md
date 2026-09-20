@@ -405,6 +405,18 @@ turning it on by default would improve the demo by hiding a real property.
 * **UD-14: rollout tested 2026-09-19, NOT reproduced.** See §G.
 * **`hq_link_severed` tracks toxiproxy, not the NetworkPolicy sever** — it
   reads LINK UP during a `sever-tier.sh` cut. See §E.
+* **RESIDUE on `dis:1:1:1000`, declared so it is not discovered on camera.**
+  The emit-path probe left one swallowed **CRITICAL manual discrepancy** in
+  that asset's AssetCM Virtual-Object state. It is **inert and invisible**:
+  the asset has no CM baseline, so `_reanalyze` returns before computing a
+  status and nothing renders. **Nothing on any screen shows it**, and its CM
+  status reads `CONFIG_STATUS_UNSPECIFIED` exactly as before the probe —
+  verified in all three stores. Two things to know anyway: it **would
+  activate if that asset were ever assigned a baseline**, and it is
+  **cleared by the next helm upgrade**, because the wipe hook discards
+  Restate Virtual-Object state. Do not "fix" it before the recording by
+  assigning a baseline — that is the one action that would make it visible.
+  Full row in `FOLLOW-UPS.md`.
 
 ## G. Things that will bite if forgotten
 
