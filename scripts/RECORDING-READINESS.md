@@ -219,6 +219,37 @@ Stable. *The Kafka topic is the buffer*, which is why a relay that cannot hold
 state is still safe to lose. A relay that buffered in memory would be the
 design worth worrying about.
 
+**IT DID COST SOMETHING, AND BEAT 6 IS WHERE IT SHOWS (measured 2026-09-19).**
+"Cost nothing" was true of the DATA and false of the CLOCK. The relay
+crash-looped into Kubernetes' **CrashLoopBackOff, which caps at 300s**, and a
+container in backoff does not retry the moment the network returns — it waits
+out the timer. Reconstructed from the live container status:
+
+| | |
+|---|---|
+| pod created (sever restarted the site) | `15:50:12Z` |
+| `restartCount` | **7** (8 runs; each died ~1s in, `exitCode 1`) |
+| last failed run | started `15:56:09Z`, died `15:56:10Z` |
+| next — and successful — start | `16:01:21Z` |
+| gap | **311s** = the 300s cap plus scheduling |
+
+The backoff ladder is 10 → 20 → 40 → 80 → 160 → **300 (capped)**, so the
+final wait was the maximum one. The dimension-2 heal converged "635s → 0s
+within 45s" from a cut that began at ~`15:50:12`, putting the heal at
+roughly **`16:00:45`** — which lands about **25–45s before the 300s timer
+expired at ~`16:01:10`**, in the last ~10% of the window. The relay came back
+36s after the heal because it was nearly out of backoff anyway, **not because
+it reacted to the heal.**
+
+**Worst case is the whole window: up to ~300s.** Had the heal landed just
+after the `15:56:10` crash instead of just before the timer expired, the
+relay would have sat idle for a further five minutes with the network
+perfectly healthy, and the region's edge-01 view would have stayed frozen for
+all of it. **On camera that is BEAT 6 appearing not to converge.** If a heal
+looks stuck, read `kubectl get pod -o jsonpath='{...lastState.terminated}'`
+on the bridge before concluding anything about the data path — the lag drains
+in seconds once the relay is actually up, as the 3020 → 3 above shows.
+
 ### A finding for the camera: `hq_link_severed` tracks a different mechanism
 
 edge-01's own `edge_buffer_status` row, updated every 2s throughout the cut,
@@ -266,17 +297,56 @@ cannot afford, given what the demo is about.
   advancing. States are being recomputed and are holding, and cm-service will
   not re-emit while a status holds. **Row counts, if a panel is questioned:**
   root 11, edge-01 14, edge-02 3, region-east 19.
-  **The suppression has a name and it was demonstrated here, not just
-  asserted.** It is a durable `last_alerted_status` on the AssetCM Virtual
-  Object — state, not an in-memory cache — and
-  `test_15_no_realert_on_stable_critical` pins it by restarting cm-service
-  between two identical observations. That test runs under compose, so it
-  proves the code path rather than this deployment; the deployment proved it
-  on its own. `tier-cm-edge-01` restarted at **15:50:18Z**, twelve hours
-  AFTER the last tactical event, and emitted nothing on the way back up. A
-  RAM-held cache would have re-fired every asset holding a non-nominal status.
-  **So if asked on camera why the feed is quiet, the answer is a mechanism,
-  not a shrug.**
+  **RETRACTED 2026-09-19, same day, before it was recorded as readiness.**
+  An earlier revision of this bullet argued the feed is quiet *because*
+  `tier-cm-edge-01` restarted at 15:50:18Z and emitted nothing, which a
+  RAM-held cache would not have done. **That reasoning does not
+  discriminate.** Silence after a restart is predicted equally well by
+  durable suppression working AND by an emit path that has been dead since
+  revision 50, and `POST /invoke/AssetCM/observe 200` does not separate them
+  either — 200 is the handler returning, not an event being published.
+  Nothing in the pre-flight touches the publish step. What replaces it:
+
+  **The suppression mechanism is real, and its scope is narrower than
+  "durable."** It is a `last_alerted_status` field persisted on the AssetCM
+  Virtual Object, and `test_15_no_realert_on_stable_critical` pins it by
+  restarting cm-service between two identical observations. But that state
+  lives in **Restate's per-Virtual-Object journal, on the StatefulSet's
+  PVC** — and `hook-restate-wipe.yaml` **deletes that PVC on every
+  `pre-install,pre-upgrade`, for the root and all three tiers**, gated by
+  `restate.ephemeralOnUpgrade`, which is **`true`** on this release. So:
+  **durable across a restart, destroyed by an upgrade.**
+
+  **That is what the 03:59 timestamp is.** Every event cluster in the whole
+  retained history sits 45–90s after a helm upgrade, and there is not one
+  event in between:
+
+  | revision | deployed (UTC) | cluster |
+  |---|---|---|
+  | 47 | 09-17 12:01:13 | 12:02:00 |
+  | 48 | 09-17 18:14:46 | 18:15:32–40 |
+  | 49 | 09-19 03:42:51 | 03:43:43–51 |
+  | 50 | 09-19 03:58:31 | 03:59:15–24 |
+
+  Each cluster is **one event per non-nominal asset per axis** — at 03:59,
+  CM discrepancies for `1001`, `1006`, `2:1:1001` (the three assets that
+  carry a CM baseline) and logistics CRITICAL for `1002`, `1004` (the two
+  the region rollup counts critical). The same subjects re-fire at every
+  cluster because the wipe erased what had suppressed them. **These are
+  re-emission artifacts of the upgrade, not fleet transitions.**
+
+  **So is the feed sparse or is the emit path dead? STILL OPEN.** One
+  injected `CmEvent` was fired at `dis:1:1:1000` to settle it. It did not:
+  that asset has **no `baseline_id`**, and `_reanalyze` returns early when
+  `not record.baseline_id`, so the handler returned **200 having done
+  nothing** — no status change, no event, no log line. A mis-aimed test,
+  not a result; CM baseline coverage is 3 of 14 assets (GD-14), which is what
+  the target should have been picked for. **Treat the feed as unverified
+  rather than as either answer**, and if a blank panel needs narrating on
+  camera, say the events fire on transitions and the last burst was the
+  deploy — which is true and checkable — rather than asserting a live
+  producer this has not established.
+
 * **Retention is declared per tier kind**: root 720h, intermediates 168h,
   leaves 72h. The gradient was inverted until 2026-09-19 (the archival tier
   kept the least), which is why the root's alert feed used to empty in a day.
