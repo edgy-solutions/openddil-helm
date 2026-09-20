@@ -40,6 +40,35 @@ Derive-stage deltas over 60s:
 | edge-02 | +75 | +12 |
 | region-east | +177 | +56 |
 
+**RE-RUN 2026-09-19 (later, fresh session): 5 of 5 again**, all four stores
+pass. Deltas held their shape — edge-01 +99/+17, edge-02 +75/+14, region-east
++175/+60. §C re-measured and unchanged (ATL 7 / ATL,BDR 1 / BDR 6 → Ada 8,
+Bram 7, liaison 14), all four ingress hosts present, Restate 4 nodes / 0
+restarts, PEPs 4 / 0 restarts.
+
+**One measured number moved: shape sizes are now 75 / 45 / 121 KiB** (was
+81 / 45 / 83). The growth is region-east `tactical_events` — real rows under
+the newly-corrected 168h retention, not Electric log accumulation: the table
+reports 19 live tuples and **0 dead**, last autovacuum 2026-09-19. Still 17x
+under the 2048 KiB ceiling, so it is a trend to know about rather than a
+problem — but it is the number to re-read first if a panel ever slows.
+
+**What the region-east `asset-cm-state` row does NOT establish.** Nothing at
+region-east produces that topic. The tier bootstrap deliberately binds no
+AssetCM subscription at an intermediate tier (*"NO DIRECT INGEST — detection
+not bound to relayed raw topics; keeping 4 of 7 subscriptions"*), all four of
+its live subscriptions sink to `AssetLogistics`, and `tier-cm-region-east` has
+served **zero invocations** since it started. That row advances because the
+edges bridge their state up: measured twice, edge-01 +99 and edge-02 +75 sum
+to the region's +174 / +175, to within one message of sampling skew — while
+`asset-logistics-status` over the same windows was +17/+14 at the edges
+against **+60** at the region, because *that* one the region really does
+derive. **So "6 advancing" is five completion terms and one arrival term.**
+It is not a false green — a region fusion stall still freezes
+`asset-logistics-status` and fails the check — but do not read it as evidence
+that the region's CM service is working, and if it ever goes frozen, suspect
+the **children** first. Recorded in `FOLLOW-UPS.md`, not fixed.
+
 **Two of these five did not exist a week ago, and each was added after a green
 suite coexisted with an outage.** `check-derive-stage` after nine advancing
 stages read green while fusion had received zero invocations, ever.
@@ -227,6 +256,16 @@ cannot afford, given what the demo is about.
   stopped producer OR on a verdict older than 30 minutes.
   If a panel is blank and the gate says `SPARSE, producer completing`, that
   is the fleet being quiet — say so plainly rather than narrating around it.
+  **The feed IS empty right now, and it was checked rather than assumed
+  (2026-09-19).** The newest tactical event at every tier is
+  `2026-09-19 03:59`, ~22h ago, and the `tactical-events` watermark is frozen
+  on all four brokers. That is the quiet fleet, not a dead producer: the two
+  services that emit these — `tier-cm-edge-01` and `tier-cm-edge-02` — are
+  being invoked continuously, **3926 and 4318 log lines per 30 minutes**, all
+  `POST /invoke/AssetCM/observe` returning 200, while `asset-cm-state` keeps
+  advancing. States are being recomputed and are holding, and cm-service will
+  not re-emit while a status holds. **Row counts, if a panel is questioned:**
+  root 11, edge-01 14, edge-02 3, region-east 19.
 * **Retention is declared per tier kind**: root 720h, intermediates 168h,
   leaves 72h. The gradient was inverted until 2026-09-19 (the archival tier
   kept the least), which is why the root's alert feed used to empty in a day.
