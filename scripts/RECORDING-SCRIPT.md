@@ -160,11 +160,48 @@ region.
 
 ## BEAT 6 — heal and close (~1 min)
 
+**Choose the heal mode before you start. Both are honest; they demonstrate
+different things, and the difference is visible on camera.**
+
+**Option 1 — DEFAULT. Shows the real worst case.**
+
 ```
 bash scripts/sever-tier.sh edge-01 off openddil
 ```
 
-Region's edge-01 view converges (measured 02:24:21 → 02:32:13, then 0.6s).
+Convergence is **seconds to ~5 minutes**, and which one you get is a race you
+do not control. The relay initialises its Kafka output lazily, so if it
+happened to be running when the cut landed it retries in place and returns in
+seconds; if it booted into the cut it exited, crash-looped, and is sitting in
+a **CrashLoopBackOff capped at 300s** that does not end early just because the
+network came back. Measured 2026-09-19: a 311s gap, and the heal landed
+25–45s before the timer expired — the relay returned 36s later **by luck of
+timing, not by reacting.**
+
+*If you take this option, say so while it converges*, because a heal that
+takes four minutes looks like a broken demo and is in fact the system telling
+the truth: **the relay holds no state, so losing it is safe — and the cost of
+that choice is paid in reconnect latency, not in data.** That is a better
+sentence than silence, and it is the same honesty the staleness indicators
+exist to demonstrate.
+
+**Option 2 — MEASURED. Shows convergence, not a timer.**
+
+```
+bash scripts/sever-tier.sh edge-01 off openddil --restart-relay-on-heal
+```
+
+Replaces the relay pod on heal so no backoff is waited out. **Measured 8s**
+(2026-09-19: heal `03:26:19Z`, region's edge-01 view 2s old at t+8s, lag
+2534 → 5). Use this if the recording needs a predictable close.
+
+**Do not present Option 2 as the system self-healing in 8 seconds.** It is the
+operator clearing a backoff, and the flag is off by default precisely so that
+choice stays visible.
+
+Either way: **say the number moved.** Region's edge-01 view goes from minutes
+stale to seconds — convergence that cannot be seen to move is
+indistinguishable from a screen that was never stale.
 
 *Close:* four tiers, one codebase, each authoritative for its own subtree;
 partitioned by entitlement, degraded honestly under a cut, converged on heal.

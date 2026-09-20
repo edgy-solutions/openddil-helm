@@ -271,6 +271,58 @@ and the buffer depth is the real reading. **Do not let it pass unremarked** —
 an indicator contradicting the story being told is the one thing this demo
 cannot afford, given what the demo is about.
 
+### Heal is now measured, and the relay turns out to be BIMODAL
+
+**Re-rehearsed 2026-09-19, dimension 2, cut 03:17:57Z → 03:26:19Z (8m22s)**,
+predicted first in `PREDICTION-2026-09-19-heal-measured.md`, ended connected.
+The cut held exactly as before — at 7m57s the region AND HQ both showed
+edge-01 **8 rows at 510s** beside edge-02 at **1s**, HQ's own region rollup
+at **26s** (the two-hop pair), edge-01's own store at **0s**, lag **2534**.
+
+**The prediction that was wrong is the useful one. THE RELAY DID NOT
+CRASH-LOOP.** It started at `03:17:26Z`, never terminated (`lastState: {}`),
+and sat there **retrying sends in place** for the whole cut:
+
+```
+level=error msg="Failed to send message to kafka: dial tcp ...:9092:
+connect: connection refused" path=root.output
+```
+
+So the 2026-09-19 finding — *"this relay cannot buffer; it exits at startup
+unable to init its Kafka output"* — is **true of one of two modes, and was
+recorded as if it were the only one.** redpanda-connect initialises its Kafka
+output **lazily**, so which mode you get is a **race** at cut time:
+
+| | when | behaviour | heal-to-fresh |
+|---|---|---|---|
+| **A — startup-init failure** | relay boots while the output is already unreachable | exits, crash-loops, backoff 10→20→40→80→160→**300s cap** | **0–300s**, set by where the heal falls in the window |
+| **B — retry in place** | relay initialised before the output went away | stays Running, retries, no backoff | **seconds** |
+
+Mode A is what happened on 2026-09-19 (7 restarts, 311s gap). Mode B is what
+happened here. **Deleting the relay pod mid-sever did NOT reproduce mode A** —
+the replacement also came up Running and retried in place — so mode A is not
+reliably inducible on demand, which is why the number below is mode B's.
+
+**Measured heal-to-fresh, mode B, with `--restart-relay-on-heal`: 8s.**
+Heal started `03:26:19Z`; the region's edge-01 view read **2s old at t+8s**;
+lag drained **2534 → 5**; every view fresh, 0 sever policies, 0 unhealthy pods.
+
+**State that number honestly.** In mode B the relay recovers on its own, so
+**8s does not measure the flag clearing a backoff — it measures a heal that
+had no backoff to clear.** The flag's specific contribution is *unproven by
+this run*. What it is for is making the outcome the same in **both** modes:
+mode A's 0–300s becomes seconds because the pod is replaced rather than left
+in its timer.
+
+**So the two numbers for the camera are:**
+
+* **default path — up to ~300s**, and only in mode A. Real (311s observed
+  2026-09-19) but **occasional**, contingent on a race nobody controls.
+* **with `--restart-relay-on-heal` — 8s measured**, and not mode-dependent.
+
+**The flag is off by default on purpose:** the default IS the measurement, and
+turning it on by default would improve the demo by hiding a real property.
+
 ## F. Known and declared, so nothing on screen is a surprise
 
 * **Declared idle** — weapons-capability (DIS carries no loadout, ADR-0038);
