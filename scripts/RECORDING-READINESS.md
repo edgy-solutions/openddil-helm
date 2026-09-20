@@ -266,6 +266,17 @@ cannot afford, given what the demo is about.
   advancing. States are being recomputed and are holding, and cm-service will
   not re-emit while a status holds. **Row counts, if a panel is questioned:**
   root 11, edge-01 14, edge-02 3, region-east 19.
+  **The suppression has a name and it was demonstrated here, not just
+  asserted.** It is a durable `last_alerted_status` on the AssetCM Virtual
+  Object — state, not an in-memory cache — and
+  `test_15_no_realert_on_stable_critical` pins it by restarting cm-service
+  between two identical observations. That test runs under compose, so it
+  proves the code path rather than this deployment; the deployment proved it
+  on its own. `tier-cm-edge-01` restarted at **15:50:18Z**, twelve hours
+  AFTER the last tactical event, and emitted nothing on the way back up. A
+  RAM-held cache would have re-fired every asset holding a non-nominal status.
+  **So if asked on camera why the feed is quiet, the answer is a mechanism,
+  not a shrug.**
 * **Retention is declared per tier kind**: root 720h, intermediates 168h,
   leaves 72h. The gradient was inverted until 2026-09-19 (the archival tier
   kept the least), which is why the root's alert feed used to empty in a day.
