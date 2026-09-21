@@ -5,3 +5,8 @@
 # declaration and every cluster-touching script refuses until someone states
 # which cluster they mean -- which is the safe direction, and the point.
 .expected-context
+
+# Python bytecode from scripts/. A .pyc was tracked here once and the ignore
+# rule alone would not have untracked it, so the file was removed from the
+# index in the same commit that added this line.
+__pycache__/
