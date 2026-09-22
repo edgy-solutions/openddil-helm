@@ -469,19 +469,26 @@ from meaningful display. Silent, and indistinguishable from an asset that is
 merely uninteresting.
 
 The recognised set lives in
-`openddil-contracts/ontology/dis_entity_types.yaml` and is currently **11
-entries**, all `country=225` (US):
+`openddil-contracts/ontology/dis_entity_types.yaml`. Every key is the
+SISO-REF-010-v37 entry for its platform, and that repo's CI resolves each one
+against the v37 XML by name. At the time of writing it has **11 keys for 10
+platforms**, all `kind=1` and `country=225` (US). MQ-9A has two keys because
+SISO enumerates it twice:
 
 ```
-1_1_225_1_1_1_0   M1A1              1_2_225_20_1_3_0  AH-64E-V6
-1_1_225_1_3_1_0   M1A2-SEPv3        1_2_225_21_1_2_0  UH-60M
-1_1_225_2_1_1_0   M2A3-Bradley      1_2_225_22_1_1_0  CH-47F-BlockII
-1_1_225_3_1_1_0   HMMWV-M1151A1     1_2_225_40_1_5_0  F-35A-Block4
-1_1_225_80_1_1_0  RCV-M             1_2_225_41_1_1_0  F-16C-Block50
-                                    1_2_225_50_1_1_0  MQ-9A-Block5
+1_1_225_1_1_2_0    M1A1              1_2_225_20_1_7_0   AH-64E-V6
+1_1_225_1_1_18_0   M1A2-SEPv3        1_2_225_21_2_26_0  UH-60M
+1_1_225_2_1_9_0    M2A3-Bradley      1_2_225_23_1_9_0   CH-47F-BlockII
+1_1_225_6_1_32_1   HMMWV-M1151A1     1_2_225_1_12_1_0   F-35A-Block4
+                                     1_2_225_1_3_3_4    F-16C-Block50
+                                     1_2_225_50_34_1_0  MQ-9A-Block5 (Reaper)
+                                     1_2_225_50_4_4_0   MQ-9A-Block5 (Predator B)
 ```
 
-Print the same list from the generator (they are kept in step):
+The file is the authority; this table is a snapshot of it.
+
+The generator emits one tuple per platform, so it prints 10 of these, without
+the Predator B key:
 
 ```bash
 python openddil-customer-bundle-example/tools/dis-sim/dis_sim.py --list-types
