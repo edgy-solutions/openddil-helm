@@ -19,12 +19,18 @@ on:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
       - "scripts/check-tier-config.sh"
+      - "scripts/check-mirror-coverage.sh"
+      - "scripts/mirror-to-artifactory.ps1"
+      - "values-artifactory.yaml"
       - ".github/workflows/chart-checks.yml"
   pull_request:
     paths:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
       - "scripts/check-tier-config.sh"
+      - "scripts/check-mirror-coverage.sh"
+      - "scripts/mirror-to-artifactory.ps1"
+      - "values-artifactory.yaml"
       - ".github/workflows/chart-checks.yml"
   workflow_dispatch:
 
@@ -64,3 +70,31 @@ jobs:
       # well-formed config with no code change.
       - name: Tier config contract
         run: ./scripts/check-tier-config.sh
+
+      # Can an air-gapped site actually pull what this chart renders?
+      #
+      # The mirror script's image list is hand-written and the chart's images
+      # are not. Between 2026-06-13 and 2026-09-23 the chart gained four the
+      # list never learned about — about 30 chart versions of silence, one of
+      # them a PRE-INSTALL hook's image, which fails an air-gapped install
+      # before a single workload starts and reports only "timed out waiting
+      # for the condition".
+      - name: Mirror coverage
+        run: ./scripts/check-mirror-coverage.sh
+
+      # A check nobody has watched fail is a check nobody has tested. Plant an
+      # image no mirror has ever heard of and require a non-zero exit.
+      - name: Mirror coverage red-check
+        run: |
+          cat > /tmp/planted.yaml <<'YAML'
+          toxiproxy:
+            image:
+              repository: docker.io/library/nginx
+              tag: "1.27"
+              digest: ""
+          YAML
+          if ./scripts/check-mirror-coverage.sh --extra-values /tmp/planted.yaml; then
+            echo "RED CHECK FAILED: an unmirrored image passed the coverage check"
+            exit 1
+          fi
+          echo "red-check green: the planted image was rejected"
