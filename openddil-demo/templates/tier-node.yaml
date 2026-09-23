@@ -133,7 +133,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.postgres.image.repository "tag" $tn.postgres.image.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $tn.postgres.image }}
           # wal_level=logical is REQUIRED, exactly as for postgres-hq
           # (infrastructure.yaml). tier-electric is an ElectricSQL instance
           # and refuses to start without it:
@@ -230,7 +230,7 @@ spec:
         # postgres image is the natural one: it ships pg_isready, so the
         # check is a real readiness probe rather than a port knock.
         - name: wait-postgres
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.postgres.image.repository "tag" $tn.postgres.image.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $tn.postgres.image }}
           resources:
             {{- toYaml $root.Values.jobs.resources | nindent 12 }}
           command:
@@ -247,7 +247,7 @@ spec:
         # Entrypoint IS the atlas binary, so `args:` carries only subcommand
         # arguments — no `command:` override, no shell.
         - name: atlas-apply
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.utilities.atlas.repository "tag" $root.Values.utilities.atlas.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $root.Values.utilities.atlas }}
           # Bounded, so an OOM cannot leave a tier DB half-migrated. The
           # root-tier Jobs have always had this; the tier Jobs did not.
           resources:
@@ -372,7 +372,7 @@ spec:
     spec:
       containers:
         - name: restate
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.restate.image.repository "tag" $root.Values.restate.image.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $root.Values.restate.image }}
           # PROVISION-TIME ONLY — see values.yaml tierNode.restate. This flag
           # affects the INITIAL partition count and cannot be changed after
           # first boot, so it is a template parameter rather than a knob.
@@ -633,7 +633,7 @@ spec:
     spec:
       containers:
         - name: electric
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.electric.image.repository "tag" $root.Values.electric.image.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $root.Values.electric.image }}
           env:
             - name: DATABASE_URL
               value: {{ printf "%s?sslmode=disable" $dsn | quote }}
@@ -1462,7 +1462,7 @@ spec:
       {{- end }}
       containers:
         - name: topaz
-          image: {{ include "openddil.thirdPartyImage" (dict "repository" $tn.topaz.image.repository "tag" $tn.topaz.image.tag "root" $root) }}
+          image: {{ include "openddil.thirdPartyImage" $tn.topaz.image }}
           # THE PROVEN INVOCATION — established by running the image, not
           # inferred. `args: ["run"]` alone exits immediately with
           #   required flag(s) "config-file" not set

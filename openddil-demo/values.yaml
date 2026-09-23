@@ -875,6 +875,11 @@ tierNode:
     image:
       repository: postgres
       tag: "15"
+      # Same shape as every other image block, so a mirrored deployment can
+      # pin this one too. scripts/check-mirror-coverage.sh fails if any
+      # rendered reference has no digest to carry.
+      digest: ""
+      pullPolicy: IfNotPresent
     auth:
       username: openddil
       password: openddil
