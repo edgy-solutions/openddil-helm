@@ -148,19 +148,29 @@ $Images = @(
     @{ src='restatedev/restate:1.6.2';                                        dst='restatedev/restate:1.6.2' },
     @{ src='ghcr.io/shopify/toxiproxy:2.12.0';                                dst='shopify/toxiproxy:2.12.0' },
 
+    # Optional stacks: releasability (topaz + keycloak + the PEP's stock
+    # python base). Off by default in the chart, mirrored anyway -- a
+    # customer who enables them in an air-gapped environment has no route
+    # back to the public registries at that point.
+    @{ src='ghcr.io/aserto-dev/topaz:0.33.16';                                dst='aserto-dev/topaz:0.33.16' },
+    @{ src='quay.io/keycloak/keycloak:26.0';                                  dst='keycloak/keycloak:26.0' },
+    @{ src='python:3.11-slim';                                                dst='library/python:3.11-slim' },
+
     # Utility images
     @{ src='arigaio/atlas:0.32.0';                                            dst='arigaio/atlas:0.32.0' },
     @{ src='alpine:3.20';                                                     dst='library/alpine:3.20' },
     #
-    # bitnami/kubectl is INTENTIONALLY NOT in this mirror inventory.
-    # Bitnami's August-2025 catalog restructure deprecated most of the
-    # historical tags; docker.io/bitnami/kubectl:1.30 is not reliably
-    # pullable anymore. The OSS chart's restate.wipe.image and the
-    # customer-overlay chart's hooks.image both default to bitnami/kubectl,
-    # but every customer environment seems to already have ITS OWN
-    # internal kubectl image (whatever your platform team blessed --
-    # alpine/k8s, dtzar/helm-kubectl, an in-house build, ...). Override
-    # the chart's repository + tag at install time to point at that:
+    # The chart's kubectl image. The restate-wipe hook is a PRE-INSTALL /
+    # PRE-UPGRADE Job and is on by default (restate.ephemeralOnUpgrade),
+    # so this one is pulled before any workload starts -- a miss here
+    # surfaces as helm's "timed out waiting for the condition" with an
+    # ImagePullBackOff hidden inside a hook Job.
+    #
+    # It is alpine/k8s rather than bitnami/kubectl: Bitnami's August-2025
+    # catalog restructure deprecated most of the historical tags, and
+    # docker.io/bitnami/kubectl:1.30 is not reliably pullable anymore.
+    # A site that would rather use its own blessed kubectl image overrides
+    # the chart instead, in which case mirror that one in place of this:
     #
     #   --set restate.wipe.image.repository=<your-registry>/path/to/kubectl
     #   --set restate.wipe.image.tag=<your-version>
@@ -168,10 +178,7 @@ $Images = @(
     # Customer-overlay chart equivalent:
     #   --set hooks.image.repository=<your-registry>/path/to/kubectl
     #   --set hooks.image.tag=<your-version>
-    #
-    # If you DO have a reliable bitnami/kubectl source (say your platform
-    # mirrors from quay.io/bitnamicharts/kubectl or similar), add a line
-    # back here matching that source path and the chart override above.
+    @{ src='docker.io/alpine/k8s:1.31.4';                                     dst='alpine/k8s:1.31.4' },
     @{ src='curlimages/curl:8.9.1';                                           dst='curlimages/curl:8.9.1' }
 )
 
@@ -428,7 +435,14 @@ if ($mirrored.Count -eq 0) {
 # When a source image short name has no entry here, the script logs a
 # warning at emit time and skips it -- safe default for new images
 # added to the inventory above. The operator either adds a mapping
-# here or accepts the digest pinning gap for that one image.
+# here or accepts the digest pinning gap for that one image. CI does not
+# accept it: scripts/check-mirror-coverage.sh renders the chart with the
+# digests this table would write and fails on any image reference that
+# comes out by tag.
+#
+# A path is any dotted values path ending in `digest`, at any depth --
+# `restate.wipe.image.digest` and `utilities.atlas.digest` are as valid
+# as `frontend.image.digest`.
 $SrcShortNameToValuesPaths = @{
     # OpenDDIL-owned (use openddil.image helper, accepts .digest)
     'frontend'                 = @('frontend.image.digest')
@@ -444,24 +458,54 @@ $SrcShortNameToValuesPaths = @{
     'runtime-bundle'           = @('bundle.image.digest')
     # Third-party (use openddil.thirdPartyImage helper, accepts .digest)
     'redpanda'                 = @('redpandaEdge.image.digest', 'redpandaHq.image.digest')
-    'connect'                  = @('redpandaConnect.image.digest')
+    'connect'                  = @('redpandaConnect.image.digest', 'edgeHqBridge.image.digest')
     'electric'                 = @('electric.image.digest')
-    'postgres'                 = @('postgresHq.image.digest')
+    'postgres'                 = @('postgresHq.image.digest', 'tierNode.postgres.image.digest')
     'restate'                  = @('restate.image.digest')
     'toxiproxy'                = @('toxiproxy.image.digest')
-    # Utility images -- referenced from job templates, not values.yaml
-    # blocks today; left out for now. Add when they get values entries.
-    #
-    # Note: kubectl image is intentionally NOT in this mapping. See the
-    # $Images comment above the kubectl entry for the catalog-
-    # availability situation; until there's a reliable source in the
-    # inventory, there's no digest to write into values-pinned.yaml.
+    # The kubectl image the restate-wipe hook runs (docker.io/alpine/k8s).
+    # Short name is the last path segment, so 'k8s'.
+    'k8s'                      = @('restate.wipe.image.digest')
+    # Optional stacks. topaz runs at HQ and, when tiers take the kit, per
+    # tier -- two values paths, one image.
+    'topaz'                    = @('releasability.topaz.image.digest',
+                                   'tierNode.topaz.image.digest')
+    'keycloak'                 = @('releasability.keycloak.image.digest')
+    'python'                   = @('releasability.pep.image.digest')
+    # Utility images. Their values blocks are utilities.<name>, with the
+    # image fields directly on them rather than under .image.
+    'atlas'                    = @('utilities.atlas.digest')
+    'alpine'                   = @('utilities.alpine.digest')
+    'curl'                     = @('utilities.curl.digest')
 }
 
 # Build a nested hashtable from the dotted paths. Top-level key is the
 # first segment (e.g. 'frontend'); we hand-write the YAML below because
 # PowerShell 5.1 ships no native ConvertTo-Yaml and we don't want to
 # require a module install just for one operational script.
+# Emit a nested hashtable as YAML. Leaves are quoted scalars; every other
+# node is a mapping. Keys sorted so two runs over the same digests produce
+# byte-identical files and a commit of values-pinned.yaml shows only real
+# digest changes.
+function Write-YamlTree {
+    param(
+        [hashtable]$Node,
+        [int]$Indent
+    )
+    $out = @()
+    $pad = ' ' * $Indent
+    foreach ($key in ($Node.Keys | Sort-Object)) {
+        $value = $Node[$key]
+        if ($value -is [hashtable]) {
+            $out += "${pad}${key}:"
+            $out += Write-YamlTree -Node $value -Indent ($Indent + 2)
+        } else {
+            $out += "${pad}${key}: `"$value`""
+        }
+    }
+    return $out
+}
+
 function Write-PinnedValuesYaml {
     param(
         [string]$Path,
@@ -470,10 +514,13 @@ function Write-PinnedValuesYaml {
         [string]$RepoBase,
         [string]$Platform
     )
-    # Group by the top-level Helm key (e.g. 'frontend', 'redpandaEdge')
-    # so each top-level block is emitted once, even when an image fans
-    # out to multiple paths sharing a parent.
-    $byTop = @{}
+    # Grow a nested hashtable from the dotted paths, so a path of any depth
+    # lands where the chart reads it. An earlier version accepted only
+    # <key>.image.digest and grouped by the first segment, which silently
+    # dropped restate.wipe, releasability.* and tierNode.*, and would have
+    # collided restate.image.digest with restate.wipe.image.digest under one
+    # 'restate' key.
+    $tree = @{}
     foreach ($shortName in $DigestByShortName.Keys) {
         if (-not $Mapping.ContainsKey($shortName)) {
             Write-Host "  (skipping $shortName -- no values-path mapping defined)" -ForegroundColor DarkYellow
@@ -482,13 +529,17 @@ function Write-PinnedValuesYaml {
         $digest = $DigestByShortName[$shortName]
         foreach ($dotted in $Mapping[$shortName]) {
             $segs = $dotted -split '\.'
-            if ($segs.Length -ne 3 -or $segs[1] -ne 'image' -or $segs[2] -ne 'digest') {
-                Write-Host "  (skipping $dotted -- expected <key>.image.digest shape)" -ForegroundColor DarkYellow
+            if ($segs.Length -lt 2 -or $segs[-1] -ne 'digest') {
+                Write-Host "  (skipping $dotted -- expected a dotted values path ending in .digest)" -ForegroundColor DarkYellow
                 continue
             }
-            $top = $segs[0]
-            if (-not $byTop.ContainsKey($top)) { $byTop[$top] = @{} }
-            $byTop[$top]['digest'] = $digest
+            $node = $tree
+            for ($i = 0; $i -lt $segs.Length - 1; $i++) {
+                $seg = $segs[$i]
+                if (-not $node.ContainsKey($seg)) { $node[$seg] = @{} }
+                $node = $node[$seg]
+            }
+            $node['digest'] = $digest
         }
     }
 
@@ -530,11 +581,7 @@ function Write-PinnedValuesYaml {
         ''
     )
 
-    foreach ($top in ($byTop.Keys | Sort-Object)) {
-        $lines += "${top}:"
-        $lines += "  image:"
-        $lines += "    digest: `"$($byTop[$top]['digest'])`""
-    }
+    $lines += Write-YamlTree -Node $tree -Indent 0
 
     # Ensure the parent directory exists.
     $parent = Split-Path -Parent $Path

@@ -138,6 +138,15 @@ electric:
 restate:
   image:
     repository: <ARTIFACTORY>/restatedev/restate
+  # The restate-wipe hook's kubectl image. This one is a PRE-INSTALL /
+  # PRE-UPGRADE Job and runs by default (restate.ephemeralOnUpgrade), so
+  # leaving it pointed at docker.io is the one omission that breaks an
+  # air-gapped install before a single workload starts — as helm's
+  # "timed out waiting for the condition", with the ImagePullBackOff
+  # hidden inside a hook Job.
+  wipe:
+    image:
+      repository: <ARTIFACTORY>/alpine/k8s
 
 # --- Template-internal utility images (chart 0.1.2+) ------------------------
 # atlas runs the postgres-schema-init Job's Atlas migration step (critical
@@ -156,3 +165,29 @@ utilities:
     repository: <ARTIFACTORY>/library/alpine
   curl:
     repository: <ARTIFACTORY>/curlimages/curl
+
+# --- Optional stacks --------------------------------------------------------
+# Both are OFF in the chart's defaults, so these overrides change nothing
+# until you enable the stack. They are here because the moment you do enable
+# one, in an air-gapped environment, is the moment there is no route back to
+# ghcr.io / quay.io / docker.io to discover what was missing.
+releasability:
+  topaz:
+    image:
+      repository: <ARTIFACTORY>/aserto-dev/topaz
+  keycloak:
+    image:
+      repository: <ARTIFACTORY>/keycloak/keycloak
+  # The PEP runs stdlib-only source from the bundle on a stock python base.
+  pep:
+    image:
+      repository: <ARTIFACTORY>/library/python
+
+# Tiers that take the kit run their own store and their own authorizer.
+tierNode:
+  postgres:
+    image:
+      repository: <ARTIFACTORY>/library/postgres
+  topaz:
+    image:
+      repository: <ARTIFACTORY>/aserto-dev/topaz
