@@ -619,6 +619,26 @@ noisiest minute of the pod's life forever.
 Create `pilot-values.yaml`:
 
 ```yaml
+# TOP-LEVEL restate, not tierNode.restate. The two blocks look alike and
+# this key belongs to the outer one; setting it under tierNode does
+# nothing at all, silently.
+restate:
+  # The chart now defaults this to FALSE, so the lab has to ask for the
+  # wipe by name. It is the right value HERE and only here: the wipe hook
+  # deletes the PVC of every Restate — the root's and all three tiers' —
+  # on every upgrade, and that is safe exactly while nothing durable lives
+  # in them. On the lab, Restate state is rebuildable from the topics.
+  #
+  # Without it, a handler-code change between deploys gives
+  # VMException(570) on every event for an asset whose Virtual Object
+  # journal was written by the old code.
+  #
+  # DO NOT carry this line into any values file for a node that holds, or
+  # will hold, intent custody (ADR-0042). There the journal IS the record
+  # that a site acted, and this flag quietly destroys the audit trail on
+  # every upgrade.
+  ephemeralOnUpgrade: true
+
 tierNode:
   enabled: true
   tiers:
@@ -631,6 +651,12 @@ tierNode:
   topaz:
     enabled: true
 ```
+
+> **The wipe still fires on every upgrade with this set** — including an
+> upgrade run mid-session, which discards CM history and re-bootstraps.
+> That is the existing "do not `helm upgrade` mid-session" rule, not a new
+> one; flipping the chart default changes who has to ask for it, not what
+> it does.
 
 > **`defaultNumPartitions` cannot be changed after the node first
 > boots.** 6 is the measured tier profile (~167 MiB idle vs ~389 MiB at

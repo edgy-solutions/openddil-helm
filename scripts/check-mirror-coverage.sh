@@ -105,6 +105,23 @@ tierNode:
 sensorIngest:
   externalAccess:
     enabled: true
+restate:
+  # The restate-wipe PRE-UPGRADE hook, and with it the kubectl image this
+  # whole check was written because the mirror had never heard of.
+  #
+  # This line was NOT here while the chart defaulted the flag to true: the
+  # hook rendered for free and the image came with it. The default is now
+  # false (a flag that destroys data should have to be asked for), and the
+  # flip alone would have taken alpine/k8s out of every pass -- leaving the
+  # check green, still running, and no longer asserting anything about the
+  # one image whose absence caused it to exist. Measured, not assumed: the
+  # rendered image set loses exactly docker.io/alpine/k8s when the flag goes
+  # false.
+  #
+  # So the hook is enabled here for the same reason every other stack above
+  # is. This file's job is to render EVERYTHING the chart can emit; a value
+  # that is off by default is precisely what it exists to turn on.
+  ephemeralOnUpgrade: true
 YAML
 
 # Parse the PowerShell inventory and values-path mapping. Both are plain

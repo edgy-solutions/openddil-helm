@@ -259,21 +259,42 @@ restate:
   adminPort: 9070
 
   # ephemeralOnUpgrade — when true, a Helm pre-install/pre-upgrade hook
-  # (hook-restate-wipe.yaml) scales restate-server to 0 and deletes its
-  # PVC before applying chart changes. The cm-service-bootstrap +
-  # logistics-fusion-bootstrap post-install hooks then re-register
-  # services against the fresh state on the way back up.
+  # (hook-restate-wipe.yaml) scales EVERY restate-server to 0 and deletes
+  # its PVC before applying chart changes — the root's and all three
+  # tiers'. The cm-service-bootstrap + logistics-fusion-bootstrap
+  # post-install hooks then re-register services against the fresh state
+  # on the way back up.
   #
-  # Right for demo iteration where handler-code changes between deploys
-  # would otherwise cause VMException(570) ("code path mismatch between
-  # previous execution and this execution") on every event for assets
-  # whose Virtual Object journal was written by old code.
+  # DEFAULT FALSE, AND THE DEFAULT IS THE POINT.
   #
-  # Set false for environments where Restate state durability matters
-  # across redeploys (prod-like CM history preservation). In that case
-  # handler-code changes require an explicit out-of-band
-  # `flush-assets.sh --deep` to clean state when needed.
-  ephemeralOnUpgrade: true
+  # This defaulted to true, which meant the destructive direction was the
+  # one an operator got by not deciding. Read the hook's own note: the
+  # hazard it records is that "the operator reads `ephemeralOnUpgrade` and
+  # believes the wipe happened", and, under ADR-0042 intent custody, that
+  # this flag becomes "the thing that silently destroys the audit trail, on
+  # every upgrade, under a flag the operator reads as already answered".
+  #
+  # A default that destroys data is only safe while nothing durable lives
+  # there. That is true today and ADR-0042 ends it, and the end arrives as
+  # a change in the DATA's class with no change here to notice — the same
+  # hazard the hook already carries a note about, from the other direction.
+  # So the safe value is the one you get for free, and the destructive one
+  # has to be asked for by name. Asking is cheap; a wipe that was wrong is
+  # not recoverable by re-running anything.
+  #
+  # SET TRUE for demo/lab iteration, where Restate state is rebuildable and
+  # handler-code changes between deploys would otherwise cause
+  # VMException(570) ("code path mismatch between previous execution and
+  # this execution") on every event for assets whose Virtual Object journal
+  # was written by old code. The lab sets it explicitly — see
+  # PILOT-RUNBOOK.md §3.
+  #
+  # LEAVE FALSE anywhere Restate state durability matters across redeploys,
+  # and anywhere intent custody will ever live (ADR-0042). With it false,
+  # handler-code changes need an explicit out-of-band
+  # `flush-assets.sh --deep` to clean state when needed — which is a
+  # deliberate act, logged, rather than a side effect of upgrading.
+  ephemeralOnUpgrade: false
 
   # Image used by the restate-wipe hook Job. This is the ONLY consumer of a
   # kubectl-runner image in the chart -- an earlier version of this comment
