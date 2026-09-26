@@ -46,6 +46,23 @@ pass. Deltas held their shape — edge-01 +99/+17, edge-02 +75/+14, region-east
 Bram 7, liaison 14), all four ingress hosts present, Restate 4 nodes / 0
 restarts, PEPs 4 / 0 restarts.
 
+
+**RE-RUN 2026-09-26 on REVISION 51 (chart 0.1.58): 5 of 5 green, ended
+connected** after both severance dimensions were cut and healed. Measured, not
+restated:
+
+| # | check | result at rev 51 |
+|---|---|---|
+| 1 | advancing | exit 0 |
+| 2 | derive stage | **COMPLETING** — edge-01 +100/+16, edge-02 +80/+12, region-east +180/+56 |
+| 3 | tier feed | clean, **45** consumers, zero unfed / unentitled / null-keyed |
+| 4 | shape sizes | **TOTAL 85 KiB** one client load; worst in-flight 194 KiB vs 256Mi limit |
+| 5 | completeness | **ALL 4 STORES PASS**, 7 populated tables, zero unlabelled |
+
+Check 2's deltas are the ones worth comparing: they hold their 2026-09-19 shape
+almost exactly (+101/+16, +75/+12, +177/+56), which is what says revision 51 did
+not change the derive stage's throughput.
+
 **One measured number moved: shape sizes are now 75 / 45 / 121 KiB** (was
 81 / 45 / 83). The growth is region-east `tactical_events` — real rows under
 the newly-corrected 168h retention, not Electric log accumulation: the table
@@ -154,7 +171,7 @@ green unless the derive stage and the shape sizes are in it.
 * **PEPs: streaming, bounded, measured.** Four at ~17 Mi, zero restarts, where
   they had been OOMKilled in a loop at a 256 Mi cap.
 
-## E. Severance, both dimensions — REHEARSED 2026-09-19 against revision 50
+## E. Severance, both dimensions — rehearsed 2026-09-19 (revision 50), RE-REHEARSED 2026-09-26 (revision 51)
 
 Predicted by classification **before either cut**
 (`PREDICTION-2026-09-19-severance-rehearsal.md`), run one dimension at a time,
@@ -162,7 +179,61 @@ each healed and verified before the next, **ended connected** with pre-flight
 5 of 5. This replaces the 2026-09-09 measurements, which were taken against a
 substrate since wiped three times with every PEP replaced.
 
-### Dimension 1 — region-east severed from HQ (`--from-parent`)
+### RE-REHEARSED 2026-09-26 against revision 51 (chart 0.1.58)
+
+Predicted by classification before either cut
+(`PREDICTION-2026-09-26-severance-rev51.md`), one dimension at a time, each
+healed and verified before the next, ended connected. The rev-50 tables below
+are kept as the prior these were read against. Three new findings came out of
+it; all three are in `FINDING-03-aggregates-and-indicators.md`.
+
+**Dimension 1** — region-east `--from-parent`, cut `15:42:25Z`, healed `15:50:38Z`,
+12 components:
+
+| # | measured at rev 51 | vs rev 50 | |
+|---|---|---|---|
+| 1.1 | telemetry **0s / 14 rows** throughout | same | ✓ |
+| 1.2 | `asset_logistics_status` **1–13s / 14 rows** | same | ✓ |
+| 1.3 | at the region: edge-01 **1s / 8**, edge-02 **1s / 6** | same | ✓ |
+| 1.4 | rollup **4 partials / 15 assets** | was 3 / 14 | ⚠ see FINDING-03 §3a |
+| 1.5 | HQ **14 rows**, frozen at `15:42:30.220342`, **254s → 305s across 48s** | same shape | ✓ |
+| 1.6 | controls: edge-01 **0s**, edge-02 **1s** | same | ✓ |
+| 1.7 | `tier-uplink-region-east` restarts **0**, Running | same | ✓ |
+| 1.8 | heal → HQ fresh in **64s** | was 45s | ✓ |
+
+**Dimension 2** — edge-01, parent region-east, cut `15:53:19Z`, healed
+`15:58:36Z`, **14** components:
+
+| # | measured at rev 51 | vs rev 50 | |
+|---|---|---|---|
+| 2.1 | edge serves locally **0s / 8 rows** | same | ✓ |
+| 2.2 | HQ's edge-01 view frozen at `15:53:23.679179`, **8 rows, 260s → 305s** | same | ✓ |
+| 2.3 | HQ's edge-02 view **0s / 6 rows** | same | ✓ |
+| 2.4 | **edge-01 224s beside edge-02 0s** | same beat | ✓ |
+| 2.5 | HQ's edge-01 **224s** while HQ's rollup is **10s** | same | ✓ |
+| 2.6 | **mode A, reproduced**: fresh pod, **5 restarts in 3m45s**, `lastState.terminated = Error/1`, backoff **2m40s** | rev 50 saw 6–7 | ✓ reproduced |
+| 2.7 | heal → fresh in **56s**, of which **42s was backoff wait** | was 45s | ✓ |
+
+**2.6 is no longer a wrong prediction; it is a property.** Rev 50 recorded it as
+`PREDICTION WRONG`. At rev 51 it reproduces exactly, so the relay's mode-A
+startup-init failure is the designed behaviour of this component and belongs in
+the expected column, not the surprise column.
+
+**Read `restartCount` BEFORE the cut.** edge-01's bridge stood at **2 restarts**
+before anything was severed. `sever-tier.sh` then restarts the site pods, so the
+severed bridge is a *new* pod counting from 0 — but a run that skips the
+pre-cut read has no way to tell a pre-existing count from the cut's own, which
+is the trap 2.6 fell into the first time.
+
+**2.7's shape matters more than its number.** The 56s splits into **42s of
+CrashLoopBackOff doing nothing** plus ~14s of actual catch-up: the 6th restart
+at `15:59:18Z` was the first one allowed to run, and data arrived by
+`15:59:32Z`. The heal is instant; recovery is gated by **where in the backoff
+the heal lands**, and the cap is 300s. On camera, heal early in the dwell — a
+cut left to reach the cap can buy five minutes of nothing happening after a heal
+that has already succeeded.
+
+### Dimension 1 at revision 50 — region-east severed from HQ (`--from-parent`)
 
 | # | prediction | measured | |
 |---|---|---|---|
@@ -180,7 +251,7 @@ would mean a path still crosses the boundary and the sever is a lie; *gone*
 would mean an absence rendered as a deletion. **Stale with rows** is what it
 did.
 
-### Dimension 2 — edge-01 severed (parent is region-east)
+### Dimension 2 at revision 50 — edge-01 severed (parent is region-east)
 
 | # | prediction | measured | |
 |---|---|---|---|
