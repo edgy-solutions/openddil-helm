@@ -35,6 +35,58 @@ in the safe direction is still a prediction that was wrong.
 
 ## 2. What is different at work — the actual list
 
+### 2.0 Variant resolution is broken on the lab — settle this at work FIRST
+
+**This supersedes what §2.1 and the rev-51 checkback rows say about variants,
+and it corrects a result this package reported as passed.**
+
+Measured after the deploy: **every one of the lab's 14 assets resolves to
+`platform_variant = UNKNOWN`, on all four stores.** At revision 50 they
+resolved correctly, so the upgrade is the event. The ontology's DIS tuples were
+realigned to SISO-REF-010-v37 on 2026-09-21 and the 0.1.58 bundle carried that
+to the cluster; the lab's simulator still emits the pre-realignment tuples; the
+two sets **do not intersect at all** (arriving ∩ current ontology = **0**,
+arriving ∩ removed = **8 of 8**). Every asset takes the unconditional
+`.or($doc.mappings._default)` fallback at `sim-dis-mapping.yaml:75`.
+
+**What this package got wrong.** It reports the relabel checkback as *"Relabels
+2, mismatches 0"*. That is wrong, and the contradicting log predated the
+report. Treat every variant-dependent row in the checkback as **void**, not
+passed — CM baseline mismatches included, since a baseline comparison against
+`UNKNOWN` establishes nothing.
+
+**The hopeful part, and it is a hypothesis rather than a measurement.** The
+realignment is correct in direction and the *lab's* simulator is the stale
+party: it emits hand-authored legacy tuples, while a live DIS simulator emits
+SISO-conformant ones — which is what the ontology now expects. Work may resolve
+**better** than before.
+
+**So this is the highest-value pre-flight check at work, it is read-only, and it
+takes a minute.** With the simulator running:
+
+```bash
+kubectl exec -n openddil <edge-broker-0> -- \
+  rpk topic consume ingress-dis-raw -p 0 -o <hw-20>:<hw> -f '%v\n' \
+  | grep -o '"dis_entity_type":{[^}]*}'
+```
+
+Compare what it prints against the 11 keys in
+`openddil-contracts/ontology/dis_entity_types.yaml`. Three outcomes:
+
+1. **they match** — variant resolution works at work; the lab's `UNKNOWN` is a
+   lab-simulator artifact. Proceed, fix the lab afterwards.
+2. **they do not match** — work is in the lab's state, and every
+   variant-dependent panel, CM baseline and fuel% figure is meaningless **on
+   camera**. This has to be known before recording, not discovered during it.
+3. **`kind=2` entries appear too** — then the munition finding applies on top,
+   and each tracked round becomes a **permanent** UNKNOWN fleet member, because
+   the wipe flag is false here (§2.2) and there is no eviction path (§2.3).
+
+Full measurement, both ends of the path:
+`FINDING-2026-09-26-variant-resolution-is-broken.md`. Note also that `RCV-M`'s
+tuple was removed **with no replacement** (11 keys removed, 10 added), so that
+entity cannot resolve by construction on either cluster.
+
 ### 2.1 A COTS DIS simulator replaces `dis-sim`
 
 The lab's entity feed is the `dis-sim` fixture. At work it is a live COTS DIS
@@ -43,9 +95,13 @@ simulator. Consequences, in order of how likely they are to bite:
 * **Entity types will not be the lab's.** The lab's variant resolution is
   exercised against a known fixture list. A live simulator emits DIS
   enumerations the resolver has never seen, and an unresolved tuple lands as an
-  asset with **no `platform_variant`** rather than as an error. Check variant
-  coverage early: an asset with a null variant is an unmapped enumeration, not a
-  broken pipeline.
+  asset rather than as an error. **Corrected 2026-09-26:** it does **not** land
+  with a null `platform_variant` — it lands as the literal string
+  **`UNKNOWN`**, from `_default`, together with an empty
+  `configuration_baseline` and the nomenclature *"Unrecognized DIS entity type
+  — requires ontology curation"*. A check looking for nulls finds none and
+  reads as clean. Count `platform_variant = 'UNKNOWN'` instead, and see §2.0 —
+  on the lab that count is currently **14 of 14**.
 * **Volume and cadence differ.** Every timing number in this package — the
   derive-stage deltas, the 64s and 56s heal convergences, the CrashLoopBackOff
   arithmetic — was measured at the lab's rate. Treat them as shapes, not
@@ -105,6 +161,15 @@ upgrade.** Afterwards, the only evidence is Restate's own state.
 
 
 ### 2.3 Aggregates keep a withdrawn asset's contribution
+
+**A design now exists for this**, written 2026-09-26 after the lab measurements:
+`openddil-contracts/decisions/DESIGN-2026-09-26-asset-lifecycle.md`. Nothing is
+built, so everything below still holds at work; read the design for the *shape*
+of the fix and, more usefully here, for the measurement that changes the
+procedure — a null-valued record means **three different things** to the three
+readers, and on a projector-fed topic it is **safe but ineffective** (the decode
+error is caught, logged once and the offset commits), so "produce a tombstone" is
+not a procedure until it names the topic.
 
 Worse than 2.2, because this is what gets rendered. The regional aggregator's
 Faust table is keyed by `asset_id`, `_emit_rollups` iterates **every key it has
@@ -247,7 +312,12 @@ Two consequences that do bear on the deploy:
 6. Post: pre-flight 5 of 5, partition re-measured, four-profile login.
 7. If it wedges across three consecutive samples: **roll back to 50.** A
    half-rolled cluster is ruled out as an end state. Rolling back also puts the
-   chart version back into the pod templates.
+   chart version back into the pod templates. **Rollback is state-neutral for
+   Restate** — measured, not assumed: the wipe hook registers only
+   `pre-install,pre-upgrade` and nothing in the chart registers `pre-rollback`,
+   so `helm rollback` fires no wipe even though 0.1.56 defaults
+   `ephemeralOnUpgrade` to **true**. Rolling back does not clear state, and it
+   does not need a decision about the flag.
 
 **Revision 51 is the last fleet-wide rollout you get by accident.** Removing the
 chart version from pod labels is itself a pod-spec change, so 0.1.56→0.1.58 rolls
@@ -258,8 +328,19 @@ this one.
 
 ## 4. Open, and not mine to close
 
-* **The lab is left with the aggregate residue, and the procedure I first wrote
-  for it named the wrong broker.** `region_fleet_summary`, `region_wear_trends`
+* ~~**The lab is left with the aggregate residue**~~ — **CLEARED 2026-09-26**,
+  and durably: a tombstone at offset **9345227** on the **region-east**
+  changelog (`VALUE_BYTES=0`), 6 orphaned rows deleted across both stores, and
+  both stores reading **3 classes / 14 assets** — confirmed across a further
+  cold restart, because the tombstone lives in the changelog and every future
+  recovery replays the delete. The cleanest evidence was a *frozen* timestamp
+  beside *advancing* siblings before anything was deleted. One correction to
+  carry forward: **readiness is not recovery** — the deployment reported
+  `readyReplicas: 1` after 4s while Faust recovery had 50s left, so wait on
+  `Recovery complete` in the log, never on `1/1`. Full record:
+  `RESULT-2026-09-26-residue-cleanup.md`. The original bullet follows, as
+  written, because the broker correction in it is the part worth keeping:
+* **The procedure I first wrote for the residue named the wrong broker.** `region_fleet_summary`, `region_wear_trends`
   and `region_top_factors` each carry a `releasability_class=''` partial on HQ and
   region-east, from a spurious entity otherwise fully removed. Measured since:
   the key is **`dis:1:1:1099`** (range-bounded scan: 15 distinct keys over 111,976
@@ -267,8 +348,8 @@ this one.
   one. Full detail and the exact commands are in
   `FINDING-2026-09-26-changelog-broker-and-wipe-hook.md` §7. `kubectl scale` is
   now permitted and the scale cycle is measured safe (`Recovery complete` in ~5s,
-  0 non-healthy after), but **producing a tombstone is still denied**, so this is
-  **unfixed and yours.** I scaled the aggregator down, was refused the produce,
+  0 non-healthy after), and the tombstone has since been produced (see the CLEARED note
+  above), so this is **done, not yours.** I scaled the aggregator down, was refused the produce,
   and scaled it straight back rather than leave it at 0 — the cluster is in its
   exact prior state. A tombstone is the *supported* semantics here:
   null-means-delete-this-key is Faust's own changelog recovery contract, unlike
@@ -276,7 +357,13 @@ this one.
   untested input class.
 * A stale, frozen twin of that changelog topic sits on the HQ broker under the
   identical name. Inert, but it is why a correct-looking tombstone can be a
-  silent no-op. Worth deleting when attended.
+  silent no-op. Worth deleting when attended. **Measured 2026-09-26:** the HQ
+  twin holds **14,368,522** records, last written **2026-09-08 02:51:26Z**; the
+  live region-east one holds **9,362,307**, last written 2026-09-26. **The dead
+  twin is the larger of the two and 18.8 days stale** — size and partition
+  metadata both point at the wrong answer, and only a record timestamp
+  separates them. Indexed as a row in
+  `openddil-contracts/decisions/FOLLOW-UPS.md`.
 * Three ingress `compact` topics still retain a last record for the same key.
   Inert unless a consumer group is reset or a store is rebuilt from the topics.
   Clearing it is an attended job.
@@ -306,7 +393,15 @@ this one.
   `pre-install,pre-upgrade`, and nothing in the chart registers `pre-rollback`,
   so `helm rollback` fires no wipe. **Rollback is state-neutral for Restate.**
 * The simulator-side fix (`DIS_ENTITY_TYPES_PATH` JSON drop with the
-  SISO-conformant list) was **not** done tonight.
+  SISO-conformant list) was **not** done tonight — and per §2.0 this is not a
+  tidy-up but **the open half of a breaking change**: variant resolution has not
+  returned, and the lab is not a valid proving ground for anything
+  variant-dependent until it does. Also owed, and missing entirely: **a gate
+  comparing the arriving tuples to the ontology's keys.** `check-ontology-siso.py`
+  verifies the ontology against SISO and says honestly that it establishes
+  nothing about the wire; `ontology_check.py` was meant for this neighbourhood
+  and is a no-op that logs *"Ontology consistency check OK"*
+  (`FINDING-2026-09-26-kind2-munition-resolution.md` §7).
 * `operator.regioneast` exists in `users.yaml:157` and the realm export but is not
   exercised by the partition demo, and is still absent from
   `users-promoted.yaml` — yours.
