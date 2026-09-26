@@ -1,11 +1,49 @@
 {{/*
-Common labels — applied to every resource.
+Common labels — for an OBJECT'S OWN metadata. Not for a pod template: use
+openddil.podLabels there, and read why below before changing either.
 */}}
 {{- define "openddil.labels" -}}
+{{ include "openddil.podLabels" . }}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+{{- end }}
+
+{{/*
+Pod-template labels — openddil.labels MINUS helm.sh/chart.
+
+WHY THE CHART VERSION IS NOT IN A POD LABEL
+-------------------------------------------
+A pod template label is part of the pod's spec, so changing it changes the
+template hash and rolls the workload. helm.sh/chart carries the chart
+version, so while it lived here EVERY chart version bump rolled EVERY
+workload -- 95 of the chart's 96 -- whether or not that bump touched them.
+
+That is not a cosmetic cost. It made the blast radius of a release
+independent of its content: a one-line comment fix and a rewrite of the
+projector were the same deploy, so the rollout could never be reasoned about
+from the diff. Worse, it kept putting the whole fleet through the one event
+UD-14 names as the trigger that preceded the 3.5-hour wedge, for no reason
+connected to what was being released.
+
+The chart version still belongs on the objects -- that is the question
+"which chart made this?", and answering it is what the label is for. It does
+not belong in the answer to "what should this pod be running?", because the
+chart version is not part of that.
+
+WHAT IS DELIBERATELY STILL HERE
+-------------------------------
+app.kubernetes.io/version, which is .Chart.AppVersion. That one SHOULD roll
+pods: appVersion changing means the application changed, and a rollout is
+the correct response rather than an accident. The distinction being drawn is
+not "no version labels on pods", it is "the packaging version is not the
+application version".
+
+So: a chart version bump now rolls nothing by itself. Images, config
+checksums and appVersion still roll what they should.
+*/}}
+{{- define "openddil.podLabels" -}}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 app.kubernetes.io/part-of: openddil
 {{- end }}
 

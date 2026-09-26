@@ -133,7 +133,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 8 }}
       annotations:
         # Roll the pod when the policy changes. The bundle image is a rolling
@@ -282,7 +282,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
       annotations:
         openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
@@ -562,7 +562,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
         openddil.io/policy-revision: {{ $root.Release.Revision | quote }}

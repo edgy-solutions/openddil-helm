@@ -88,7 +88,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "electric-sync" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -225,7 +225,7 @@ spec:
         # presents as green everywhere with nothing moved.
         checksum/restate-config: {{ include "openddil.hubRestateConfigToml" . | sha256sum }}
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "restate-server" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -341,7 +341,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "restate-hub" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -388,7 +388,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -494,7 +494,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -605,7 +605,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "cm-service-bootstrap" "root" .) | nindent 8 }}
     spec:
       restartPolicy: OnFailure
@@ -661,7 +661,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -739,7 +739,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-bootstrap" "root" .) | nindent 8 }}
     spec:
       restartPolicy: OnFailure
@@ -799,7 +799,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -867,7 +867,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}

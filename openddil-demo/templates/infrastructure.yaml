@@ -48,7 +48,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -146,7 +146,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $ | nindent 8 }}
+        {{- include "openddil.podLabels" $ | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" $component "root" $) | nindent 8 }}
     spec:
       {{- with $.Values.global.imagePullSecrets }}
@@ -305,7 +305,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "redpanda-hq" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -484,7 +484,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "postgres-hq" "root" .) | nindent 8 }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -580,7 +580,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "topic-init" "root" .) | nindent 8 }}
     spec:
       restartPolicy: OnFailure

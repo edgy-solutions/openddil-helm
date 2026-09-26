@@ -34,7 +34,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" . | nindent 8 }}
+        {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "postgres-schema-init" "root" .) | nindent 8 }}
     spec:
       restartPolicy: OnFailure

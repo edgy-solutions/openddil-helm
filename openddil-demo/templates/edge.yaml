@@ -33,7 +33,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -175,7 +175,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -245,7 +245,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "faust-edge-%s" $edge.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -381,7 +381,7 @@ spec:
         # annotation, it is a stale PROCESS.
         checksum/connect-config: {{ include "openddil.edgeBridgeConnectYaml" (dict "edge" $edge "root" $root "edgeBroker" $edgeBroker) | sha256sum }}
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -494,7 +494,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}

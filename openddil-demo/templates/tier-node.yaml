@@ -128,7 +128,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       containers:
@@ -208,7 +208,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
     spec:
       restartPolicy: OnFailure
       initContainers:
@@ -361,7 +361,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-restate-%s" $tier.id) "root" $root) | nindent 8 }}
       annotations:
         # Hashes the RENDERED BODY, not a hand-listed tuple of the values
@@ -481,7 +481,7 @@ spec:
         # defect that produced this rule in the first place.
         checksum/projector-config: {{ include "openddil.tierProjectorConfig" (dict "tier" $tier "root" $root) | sha256sum }}
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       initContainers:
@@ -628,7 +628,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       containers:
@@ -687,7 +687,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       containers:
@@ -846,7 +846,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
       annotations:
         openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
@@ -1052,7 +1052,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       initContainers:
@@ -1137,7 +1137,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       initContainers:
@@ -1220,7 +1220,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
     spec:
       restartPolicy: OnFailure
       {{- with $root.Values.global.imagePullSecrets }}
@@ -1409,7 +1409,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       {{- if $root.Values.releasability.enabled }}
@@ -1571,7 +1571,7 @@ spec:
         # presents as green everywhere with nothing moved.
         checksum/uplink-config: {{ include "openddil.tierUplinkConnectYaml" (dict "tier" $tier "root" $root "broker" $broker) | sha256sum }}
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-uplink-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}

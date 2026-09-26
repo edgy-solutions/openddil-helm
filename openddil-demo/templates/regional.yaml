@@ -31,7 +31,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openddil.labels" $root | nindent 8 }}
+        {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 8 }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
