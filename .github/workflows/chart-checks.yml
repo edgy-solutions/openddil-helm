@@ -40,6 +40,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pass 4 of the mirror check asks whether the images deployed OUTSIDE
+      # the chart are mirrored too -- dis-sim, from that repo's k8s manifest.
+      # Without this checkout the pass says "NOT RUN" and the check still
+      # exits 0, which is a green check asserting less than it did yesterday:
+      # exactly what the restate-wipe default flip nearly did to pass 1. So CI
+      # supplies the sibling and the skip becomes a local-only condition.
+      #
+      # It lands in a subdirectory of this repo's working tree rather than
+      # beside it, because actions/checkout will not write outside the
+      # workspace. Nothing commits it; OPENDDIL_BUNDLE_EXAMPLE is how the
+      # script is told to look there instead of at ../.
+      - name: Checkout openddil-customer-bundle-example (for mirror pass 4)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-customer-bundle-example
+          path: openddil-customer-bundle-example
+
       - uses: azure/setup-helm@v4
         with:
           version: "v3.16.2"
@@ -80,6 +97,8 @@ jobs:
       # before a single workload starts and reports only "timed out waiting
       # for the condition".
       - name: Mirror coverage
+        env:
+          OPENDDIL_BUNDLE_EXAMPLE: ${{ github.workspace }}/openddil-customer-bundle-example
         run: ./scripts/check-mirror-coverage.sh
 
       # A check nobody has watched fail is a check nobody has tested. Plant an
@@ -98,3 +117,21 @@ jobs:
             exit 1
           fi
           echo "red-check green: the planted image was rejected"
+
+      # And the same for pass 4, which has its own input and would otherwise
+      # be the one pass nobody had seen fail. Planted in a fake sibling tree,
+      # so the real manifest is not touched.
+      - name: Mirror coverage red-check, pass 4
+        run: |
+          mkdir -p /tmp/fake-bundle-example/tools/planted/k8s
+          cat > /tmp/fake-bundle-example/tools/planted/k8s/planted.yaml <<'YAML'
+          spec:
+            containers:
+              - name: planted
+                image: ghcr.io/edgy-solutions/openddil/no-such-image:1.0
+          YAML
+          if OPENDDIL_BUNDLE_EXAMPLE=/tmp/fake-bundle-example ./scripts/check-mirror-coverage.sh; then
+            echo "RED CHECK FAILED: an unmirrored out-of-chart image passed pass 4"
+            exit 1
+          fi
+          echo "red-check green: pass 4 rejected the planted manifest image"

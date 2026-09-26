@@ -5,6 +5,10 @@ name: Build and publish runtime-bundle image
 # replaces the local `scripts/build-bundle.sh` for users who want
 # registry-driven builds.
 #
+# It also publishes .../openddil/dis-sim, the DIS generator's image, in a
+# second independent job -- see the comment above `build-dis-sim` for why a
+# fixture image is published here rather than anywhere else.
+#
 # Triggers:
 #   * push to master of THIS repo (e.g. someone edits the Dockerfile)
 #   * manual workflow_dispatch (e.g. rebuild after openddil-contracts
@@ -154,3 +158,93 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           # No build-args — the bundle image has none.
+
+  # ---------------------------------------------------------------------------
+  # dis-sim — the DIS PDU generator's image
+  # ---------------------------------------------------------------------------
+  # Not part of the bundle image. It rides this workflow because this is where
+  # OpenDDIL images get published, and because a test fixture does not deserve
+  # a workflow of its own.
+  #
+  # WHY IT IS PUBLISHED AT ALL
+  # --------------------------
+  # opendis is baked into it so the generator needs no PyPI at container start.
+  # That fixed one problem and created a smaller one: an image nothing pushes
+  # cannot be pulled, so every cluster needed `build.sh --load` run against its
+  # nodes first, and missing that step arrives as ImagePullBackOff in a
+  # simulator pod -- which reads as a broken fixture rather than a missing
+  # build. Publishing it closes the registry half of that. The mirror
+  # inventory in scripts/mirror-to-artifactory.ps1 carries it for air-gapped
+  # sites, and scripts/check-mirror-coverage.sh pass 4 holds the manifest's
+  # reference against that inventory, because this image is deployed by a
+  # manifest in another repo and the chart render can never see it.
+  #
+  # NO `needs:` ON THE BUNDLE JOB. A fixture image must not be able to fail
+  # the runtime bundle, and the bundle must not have to succeed for the
+  # fixture to publish.
+  #
+  # TRIGGERS: the Dockerfile lives in openddil-customer-bundle-example, so
+  # this repo's `paths` filter cannot see a change to it. The daily schedule
+  # is what covers that -- exactly the unwired-source-repo case it was added
+  # for. Wiring a repository_dispatch from that repo would need a
+  # BUNDLE_REBUILD_PAT secret there (contents:write on THIS repo); until that
+  # secret exists, a notify workflow would fail on every push, so the
+  # schedule is the wiring.
+  #
+  # SINGLE PLATFORM, ON PURPOSE. linux/amd64 only, because `load: true` is
+  # what makes the verification step below possible and load is
+  # single-platform. The consequence is stated rather than discovered: an
+  # arm64 node cannot run this image and reports "no matching manifest".
+  # Giving it an arm64 child means adding `platforms:` and giving up a
+  # pre-publish proof that the dependency is really in there -- and the proof
+  # is worth more than an architecture nothing in the lab uses.
+  build-dis-sim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout openddil-customer-bundle-example
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-customer-bundle-example
+          path: openddil-customer-bundle-example
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # :1.0 is the opendis version, which is the whole content of this
+      # image and the wire contract with sensor-ingest's decoder. It moves
+      # when that pin moves and not when a build happens. :latest exists for
+      # the mirror-script convention and is not what the manifests deploy.
+      - name: Build dis-sim (load, do not push yet)
+        uses: docker/build-push-action@v5
+        with:
+          context: openddil-customer-bundle-example/tools/dis-sim
+          file: openddil-customer-bundle-example/tools/dis-sim/Dockerfile
+          load: true
+          push: false
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/openddil/dis-sim:1.0
+            ghcr.io/${{ github.repository_owner }}/openddil/dis-sim:latest
+
+      # The same pre-publish gate the bundle has for atlas migrations, and
+      # the same one build.sh runs locally: prove the dependency is IN the
+      # image with no network at all. A build log cannot tell a real install
+      # from a base image that already had it or a RUN line that no-opped,
+      # and --network none is what makes a container that would still reach
+      # PyPI fail HERE instead of in a lab at 03:00.
+      - name: Prove opendis is baked in, with no network
+        run: |
+          docker run --rm --network none \
+            ghcr.io/${{ github.repository_owner }}/openddil/dis-sim:1.0 \
+            python -c "from opendis.dis7 import EntityStatePdu; from opendis.DataOutputStream import DataOutputStream; print('ok')"
+
+      - name: Push dis-sim
+        run: |
+          docker push ghcr.io/${{ github.repository_owner }}/openddil/dis-sim:1.0
+          docker push ghcr.io/${{ github.repository_owner }}/openddil/dis-sim:latest

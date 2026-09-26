@@ -17,7 +17,8 @@
 # So this check does not read either list. It RENDERS the chart, with every
 # optional stack enabled, and holds what comes out against the inventory.
 #
-# WHAT IT ASSERTS, in three passes over the rendered manifests:
+# WHAT IT ASSERTS, in four passes -- three over the rendered manifests and
+# one over a manifest the chart does not own:
 #
 #   1. COVERAGE. Every image reference, with its tag, appears in the
 #      mirror inventory. Catches a new image, and catches a version bump
@@ -32,7 +33,21 @@
 #      restate.wipe, releasability.* and tierNode.* stayed pointed at
 #      public registries.
 #
-# Pass 1 is coverage; 2 and 3 are the reasons coverage is worth having.
+#   4. NOT-ONLY-THE-CHART. Every image a k8s manifest in
+#      openddil-customer-bundle-example deploys is in the inventory too. One
+#      image lives there: dis-sim, the DIS generator that feeds the
+#      pipeline's front door. Mirror everything the chart renders and nothing
+#      else, and an air-gapped site gets a stack with nothing arriving at it
+#      -- which presents as a pipeline fault, not a missing image.
+#
+# Pass 1 is coverage; 2 and 3 are the reasons coverage is worth having; 4 is
+# there because the chart render is not the whole deploy.
+#
+# Pass 4 reads k8s manifests only. `docker-compose.customer.yml` in that repo
+# names two more images (a connect and a rabbitmq) and they are deliberately
+# out of scope: this inventory is what a site copies to run the CHART, and
+# that compose file is a different deployment whose registry story is the
+# customer's. Stated so the gap is a decision rather than an oversight.
 #
 # USAGE
 #   ./scripts/check-mirror-coverage.sh [--extra-values FILE]
@@ -41,6 +56,12 @@
 # the CI red-check, which plants an unmirrored image and requires this
 # script to FAIL. A check nobody has watched fail is a check nobody has
 # tested.
+#
+# The sibling repo is found at ../openddil-customer-bundle-example, or
+# wherever OPENDDIL_BUNDLE_EXAMPLE points. If it is not there, pass 4 says so
+# on its own line and in the RESULT line rather than vanishing -- a check that
+# quietly stops asserting something is the failure mode this file was written
+# after. CI checks the sibling out, so the skip cannot happen where it counts.
 #
 # EXIT: 0 = every pass clean. 1 = at least one finding, each printed with
 # the image and the pass that rejected it.
@@ -189,6 +210,18 @@ render "$TMP/pass1.yaml"
 render "$TMP/pass2.yaml" -f "$TMP/digests.yaml"
 render "$TMP/pass3.yaml" -f "$TMP/artifactory.yaml" -f "$TMP/digests.yaml"
 
+# Pass 4's input is not a render. It is the `image:` lines of every k8s
+# manifest in the customer bundle example -- collected here rather than in the
+# analyser so that a missing sibling is a shell-level fact, not a parse.
+BUNDLE_EXAMPLE="${OPENDDIL_BUNDLE_EXAMPLE:-../openddil-customer-bundle-example}"
+if [ -d "$BUNDLE_EXAMPLE" ]; then
+    find "$BUNDLE_EXAMPLE" -path '*/k8s/*'          \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null       | xargs -0 -r grep -h -E '^[[:space:]]*image:[[:space:]]'       > "$TMP/pass4.yaml" 2>/dev/null
+    # An existing but empty file is itself a finding: the manifests were
+    # found and named no image, which means this pass is watching the wrong
+    # directory. Keep the file so the analyser can say that.
+    touch "$TMP/pass4.yaml"
+fi
+
 "$PY" - "$TMP" "$MIRROR_REGISTRY" <<'PY'
 import pathlib, re, sys
 
@@ -262,10 +295,41 @@ for ref in images("pass3.yaml"):
         findings.append(("3 redirectable", ref,
                          "not redirected to the mirror registry by values-artifactory.yaml"))
 
+# Pass 4: the same coverage question as pass 1, asked of a manifest the chart
+# does not own. Nothing about pinning or redirection -- that manifest has no
+# values file to overlay, which is precisely why its image has to be in the
+# inventory by hand and precisely why nothing noticed that it was not.
+pass4_state = "skipped"
+if (tmp / "pass4.yaml").exists():
+    refs4 = images("pass4.yaml")
+    if not refs4:
+        findings.append(("4 not-only-the-chart", "(no image found)",
+                         "the bundle example's k8s manifests named no image: "
+                         "this pass is looking at the wrong directory"))
+        pass4_state = "0 refs"
+    else:
+        pass4_state = f"{len(refs4)} refs"
+    for ref in refs4:
+        repo, digest = split_ref(ref)
+        if digest is not None:
+            if repo not in SRC_REPOS:
+                findings.append(("4 not-only-the-chart", ref,
+                                 "repository absent from the mirror inventory"))
+        elif repo not in SRC:
+            hint = ("absent from the mirror inventory"
+                    if repo.rsplit(":", 1)[0] not in SRC_REPOS
+                    else "mirrored at a different tag than the manifest deploys")
+            findings.append(("4 not-only-the-chart", ref, hint))
+
 counts = {p: len(images(f"pass{i}.yaml")) for i, p in
           ((1, "coverage"), (2, "pinnable"), (3, "redirectable"))}
 print(f"inventory: {len(inventory)} images")
 print("rendered:  " + ", ".join(f"{n} refs ({p})" for p, n in counts.items()))
+if pass4_state == "skipped":
+    print("pass 4:    NOT RUN -- no ../openddil-customer-bundle-example "
+          "(set OPENDDIL_BUNDLE_EXAMPLE)")
+else:
+    print(f"pass 4:    {pass4_state} from the bundle example's k8s manifests")
 
 if findings:
     print()
@@ -274,5 +338,6 @@ if findings:
     print(f"\nRESULT: FAIL ({len(findings)})")
     sys.exit(1)
 
-print("RESULT: PASS")
+print("RESULT: PASS"
+      + (" -- but pass 4 did not run" if pass4_state == "skipped" else ""))
 PY

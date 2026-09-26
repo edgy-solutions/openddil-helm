@@ -127,7 +127,7 @@ if ($Method -eq 'crane') {
 # Keep the src tags synced with openddil-demo/values.yaml.
 # -----------------------------------------------------------------------
 $Images = @(
-    # OpenDDIL-owned (10)
+    # OpenDDIL-owned (12)
     @{ src='ghcr.io/edgy-solutions/openddil/frontend:latest';                 dst='edgy-solutions/openddil/frontend:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/sensor-ingest:latest';            dst='edgy-solutions/openddil/sensor-ingest:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/faust-edge:latest';               dst='edgy-solutions/openddil/faust-edge:latest' },
@@ -139,6 +139,21 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/logistics-sim:latest';             dst='edgy-solutions/openddil/logistics-sim:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/hub-restate-projector:latest';    dst='edgy-solutions/openddil/hub-restate-projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';           dst='edgy-solutions/openddil/runtime-bundle:latest' },
+    #
+    # dis-sim is the ONE entry here the chart does not render. It is the DIS
+    # PDU generator that feeds the pipeline's front door, deployed by
+    # openddil-customer-bundle-example/tools/dis-sim/k8s/dis-sim.yaml, and an
+    # air-gapped site that mirrors only what the chart renders has a stack
+    # with nothing arriving at it.
+    #
+    # Tag-pinned rather than :latest, unlike every other OpenDDIL image here,
+    # because 1.0 is the opendis version baked into it -- the wire contract
+    # with sensor-ingest's decoder, not a build number -- and :1.0 is what the
+    # manifest actually deploys. Mirroring :latest would mirror a tag nothing
+    # pulls. check-mirror-coverage.sh pass 4 holds that manifest against this
+    # row, so the two cannot drift silently the way the chart's images did for
+    # 30 versions.
+    @{ src='ghcr.io/edgy-solutions/openddil/dis-sim:1.0';                     dst='edgy-solutions/openddil/dis-sim:1.0' },
 
     # Third-party services (semver-pinned, security-review-friendly)
     @{ src='docker.redpanda.com/redpandadata/redpanda:v26.1.7';               dst='redpandadata/redpanda:v26.1.7' },
@@ -456,6 +471,12 @@ $SrcShortNameToValuesPaths = @{
     'logistics-sim'            = @('logisticsSim.image.digest')
     'hub-restate-projector'    = @('restateHub.image.digest')
     'runtime-bundle'           = @('bundle.image.digest')
+    # dis-sim has no chart values path because the chart does not deploy it.
+    # An explicit empty list, not an omission: an unmapped short name prints
+    # "no values-path mapping defined" on every run, which reads as a pinning
+    # gap somebody should close. There is nothing to close -- the reference
+    # lives in the bundle-example manifest.
+    'dis-sim'                  = @()
     # Third-party (use openddil.thirdPartyImage helper, accepts .digest)
     'redpanda'                 = @('redpandaEdge.image.digest', 'redpandaHq.image.digest')
     'connect'                  = @('redpandaConnect.image.digest', 'edgeHqBridge.image.digest')
