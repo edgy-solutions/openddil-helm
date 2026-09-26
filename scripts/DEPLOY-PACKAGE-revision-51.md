@@ -8,50 +8,123 @@ so it is settled by measurement rather than by argument afterwards.
 
 Baseline is **helm revision 50**, deployed 2026-09-19 from chart
 `openddil-demo-0.1.56` at `openddil-helm@d43e9ef`. Target is
-`openddil-demo-0.1.57` at `openddil-helm@dae37c8`.
+`openddil-demo-0.1.58` at `openddil-helm@2dd2256` — the chart's last change.
+`0f67690` is the repo tip and touches only scripts and CI.
+
+**Revised 2026-09-25**, after three things landed that this document had listed
+as open or taken on trust. The chart version left every pod template (0a and
+1.5 — and it does *not* make this a smaller deploy). The Topaz digest was
+verified against the registry (1.3). dis-sim's image is published (0c), which
+closes 2.2 outright. Section 0's wipe flag is now a render assertion rather
+than a checkbox, and section 3 samples the rollout instead of only what
+follows it.
 
 ---
 
 ## 0. Read this first — the three things that decide the deploy
 
-**(a) This is a full-stack rolling restart, not a two-pod change.**
-`helm.sh/chart` is in the pod template label set of **95 of the chart's 96
-workloads**. The version bump 0.1.56 to 0.1.57 changes that label, which
-changes every pod template, which rolls every workload. The values diff is
-tiny and the blast radius is total; those two facts are not connected, and
-reading the first as evidence for the second is the mistake this section
-exists to prevent.
+**(a) This is a full-stack rolling restart — and the last one that packaging
+will ever cause.**
+
+`helm.sh/chart` was in the pod template label set of **95 of the chart's 96
+workloads**. 0.1.58 takes it out of all 95 (2dd2256). That does *not* make
+revision 51 a smaller deploy: **removing a pod label is itself a change to the
+pod spec**, so every workload still rolls. What it changes is everything after
+this one.
+
+Measured — the rev-50 chart against the rev-51 chart, rendered at lab values:
+
+| | rev 50 | rev 51 |
+|---|---|---|
+| objects rendered | 206 | 206, none added, none removed |
+| pod templates | 95 | 95 |
+| ...carrying `helm.sh/chart` | 95 | **0** |
+| pod templates whose labels differ 50 to 51 | — | **95** (the label is removed) |
+| objects differing for any **other** reason | — | **5**, the tier Topaz digests (1.3) |
+| render size | 17,448 lines | 17,353 — exactly 95 fewer |
+
+And forward, which is the reason for doing it at all: 0.1.58 to a hypothetical
+0.1.59 changes **0** pod templates while still updating the label on all 206
+objects. `app.kubernetes.io/version` stays in the pod labels deliberately — it
+carries `appVersion`, and an application version change *should* roll pods. A
+packaging version should not.
 
 That matters because of UD-14: the helm rollout is the trigger that preceded
 the 3.5-hour wedge and had never been watched. Revision 50 was the first one
 watched — 92 group-on-broker rows, eight clean samples over 1h43m, 0 wedged.
-Revision 51 is the second opportunity, and a bigger one, because it restarts
-more.
+Revision 51 is the second opportunity, it restarts more, and it is **the
+largest that will ever arrive by accident**. After this, no version bump
+produces a fleet-wide roll to watch. If the rollout is not sampled while it is
+happening (section 3), that natural experiment is spent, and the next one has
+to be manufactured on purpose.
 
-**(b) If the lab does not pass `restate.ephemeralOnUpgrade: true`, the wipe
-silently does not happen.** The default is now false. Rendered and counted:
-the rev-50 chart emits 11 `restate-wipe` lines with the lab values; the
-rev-51 chart with the same values emits **0**. Handler-code changes between
-deploys then meet Virtual Object journals written by the old code, which is
-`VMException(570)` on every event for those assets — and it arrives as data
-that stops moving, not as an upgrade that failed.
+**(b) GATE — the wipe flag, asserted by a render before the upgrade runs.**
 
-This is the first deploy where that flag has to be passed. Passing it
-restores the exact revision-50 behaviour; the change is to what happens when
-nobody decides, not to what happens when somebody does.
+The default is now false, and this is the first deploy where the flag has to be
+passed. Passing it restores the exact revision-50 behaviour: the change is to
+what happens when nobody decides, not to what happens when somebody does.
 
-**(c) dis-sim now needs its image on the nodes before it will start.**
-`openddil/dis-sim:1.0` is built by `tools/dis-sim/build.sh --load`, and there
-is no registry behind the name. Without it the simulator pods
-ImagePullBackOff, no DIS traffic is produced, and **the relabel predictions in
-section 2 cannot be checked at all** — they are all downstream of assets
-emitting. Build and load before `deploy.sh`, not after noticing.
+Do not tick a box. Render the release from the values the upgrade will actually
+pass, and read the number:
+
+```bash
+# VALUES: exactly the -f files the upgrade will pass, in the same order
+helm template "$REL" ./openddil-demo -f "$VALUES" | grep -c restate-wipe
+```
+
+**Expect `11`. Anything else: stop, and do not upgrade.**
+
+Measured at 0.1.58: **11** lines with top-level
+`restate.ephemeralOnUpgrade: true`, **0** without it. The rev-50 chart emits
+the same 11 at the same values, so this assertion says revision 51 wipes
+exactly where revision 50 did — not merely that some hook exists somewhere.
+
+* **0** means the hook is not in the release at all. Handler-code changes then
+  meet Virtual Object journals written by the old code: `VMException(570)` on
+  every event for those assets, arriving as data that stopped moving rather
+  than as an upgrade that failed.
+* **Neither 0 nor 11** means the hook rendered differently from either revision
+  this was measured against. Read the render — the number is not the finding,
+  the diff is.
+
+Why a render rather than a checklist line: the failure mode is a flag that was
+silently not passed, and a checkbox gets ticked by the same person who would
+have passed it. The trap in 1.1 — the key under `tierNode` instead of at top
+level — also produces **0** here, and that is exactly what a checkbox cannot
+catch.
+
+**(c) dis-sim's image is published now — confirm the tag instead of building
+it.** This was a pre-deploy hazard when the package was written, and is not
+one any more:
+
+```
+ghcr.io/edgy-solutions/openddil/dis-sim:1.0
+  digest  sha256:862dd904ec638921088693bdfcdbc4899128cca82ea92184901edd3d9a08ceeb
+  pushed  2026-09-25, by openddil-helm's build-bundle workflow
+  single-platform linux/amd64, on purpose -- see that job's comment
+  anonymously pullable from ghcr.io: checked, so no pull secret is needed
+```
+
+The manifest in `openddil-customer-bundle-example` points at that ref
+(`e72784f`), so on a cluster with egress to ghcr.io there is nothing to do
+before `deploy.sh`. In an air gap it comes from the mirror: it is a row in
+`scripts/mirror-to-artifactory.ps1`, and pass 4 of `check-mirror-coverage.sh`
+holds the manifest's reference against that row so the two cannot drift.
+`build.sh --load` still works and still builds the same ref — it is for
+iterating on the Dockerfile now, not a prerequisite.
+
+**What has not changed:** if the simulator pods do not start, no DIS traffic is
+produced and **the relabel predictions in section 2 cannot be checked at
+all** — they are all downstream of assets emitting. And amd64-only means an
+arm64 node reports "no matching manifest" rather than a pull failure.
 
 ---
 
 ## 1. Values diff, 50 to 51
 
-Two commits touch the chart. The complete substantive diff:
+Three commits touch the chart: `792febe` (tier image blocks), `dae37c8` (the
+wipe default) and `2dd2256` (chart 0.1.58, the pod-label change). The complete
+substantive diff:
 
 ### 1.1 `restate.ephemeralOnUpgrade: true` to `false` (dae37c8)
 
@@ -96,20 +169,51 @@ digests are read. Five image references change:
 | `tier-topaz-region-west` | `topaz:0.33.16` | `topaz@sha256:835868c0...` |
 | `topaz-hq` (root) | `topaz@sha256:835868c0...` | unchanged — already honoured |
 
-**The one thing not verifiable from here:** that `sha256:835868c0...` *is* tag
-`0.33.16`. The root has run this digest since it was pinned, so the risk is
-low, but it has never been the tier's image. If the digest resolves to a
-different build, five tier authorizers change behaviour at once. `topaz-hq` is
-the control: it already runs this digest, so a tier that disagrees with HQ
-after the deploy is the signal.
+**This risk is retired.** When the package was written, that
+`sha256:835868c0...` *is* tag `0.33.16` was the one thing not verifiable from
+here. It was then checked against ghcr.io and it holds — pulled both ways, the
+image IDs are identical, so the tag-to-digest substitution is behaviour-neutral
+for all five tiers. Evidence:
+`scripts/EVIDENCE-2026-09-25-topaz-digest.md`.
+
+The same check turned up something the identity question does not reach: the
+pin is an **OCI image index**, carrying linux/amd64 and linux/arm64. So pinning
+it does *not* freeze the architecture — the kubelet still resolves the index
+per node. Had the pin been the amd64 *child* digest instead, the identity check
+would have passed just as cleanly while the deploy quietly became amd64-only,
+and an arm64 node would have presented it as one tier's authorizer failing to
+start rather than as an architecture pin.
+
+`topaz-hq` remains the control: it already runs this digest, so a tier whose
+decisions disagree with HQ's after the deploy is still a finding — the check
+rules out the image, not the wiring.
 
 ### 1.4 Rendered diff, in full
 
 At lab values (`releasability`, `tierNode`, `sensorIngest.externalAccess` on,
-wipe explicitly true), rev-50 and rev-51 renders are both 17,448 lines and
-differ in exactly two ways: the `helm.sh/chart` label, everywhere, and the
-five Topaz references above. **No resource is added or removed. No schema
-migration is implied by the chart.**
+wipe explicitly true), the rev-50 render is 17,448 lines and the rev-51 render
+is 17,353. They differ in exactly two ways: the `helm.sh/chart` pod label,
+removed from all 95 pod templates, and the five Topaz references above. **No
+resource is added or removed. No schema migration is implied by the chart.**
+
+### 1.5 `helm.sh/chart` leaves every pod template (2dd2256)
+
+`openddil.labels` is now *defined as* `openddil.podLabels` plus
+`helm.sh/chart`, so the two sets cannot drift apart, and 38 pod-template call
+sites switched to `openddil.podLabels`. The 86 object-metadata call sites are
+untouched: every object still carries the chart version, which is what makes a
+deployed object traceable to its release.
+
+Two things checked rather than assumed, because both would present as an
+outage:
+
+* **Selectors are unaffected.** They read `app.kubernetes.io/component` from
+  `openddil.selectorLabels`, never from `openddil.labels`, so no Deployment or
+  StatefulSet selector changes — which matters, as a selector is immutable and
+  a changed one fails the upgrade outright. `sever-tier.sh`'s NetworkPolicy
+  selects by component too.
+* **206 objects render before and after, with none added or removed** (0a). The
+  render shrinks by exactly the 95 label lines it drops.
 
 ---
 
@@ -152,15 +256,23 @@ visible in any of the queries above — it shows up as events that stop being
 processed for particular assets, which is why section 0(b) is a pre-deploy
 checklist item rather than a post-deploy check.
 
-### 2.2 One ledger row this deploy partially closes
+### 2.2 One ledger row this deploy closes outright
 
 `OPEN 2026-09-23 — the DIS fixture reaches PyPI at container start`. Its close
-list item 2 was "bake generator and dependency into one small image". The
-**dependency** is now baked (`tools/dis-sim/Dockerfile`, verified by importing
-`opendis` under `--network none`); the **generator** deliberately is not — it
-stays in the ConfigMap so there is exactly one copy of it. Remaining gap: the
-image is built locally, not published, so the row closes on the PyPI clause
-and stays open on the registry clause.
+list item 2 was "bake generator and dependency into one small image". **Both
+clauses are now closed, which they were not when this package was written.**
+
+The **dependency** is baked (`tools/dis-sim/Dockerfile`), verified by importing
+`opendis` under `--network none` — locally, and again in CI before the push, so
+a build that would still reach PyPI fails in the pipeline rather than in a lab.
+The **generator** deliberately is not baked: it stays in the ConfigMap so there
+is exactly one copy of it, and baking it would make the Dockerfile a second
+place it lives.
+
+The registry clause closed on 2026-09-25 (0c): the image is in GHCR, in the
+mirror inventory, and pass 4 of `check-mirror-coverage.sh` fails if the
+manifest and the inventory ever stop agreeing. **The row can be closed in the
+ledger, with that check named as what keeps it closed.**
 
 ---
 
@@ -214,12 +326,71 @@ prediction after the fact.
    rehearsal that leaves the fleet severed has tested the cut and not the
    heal, and the heal is half the claim.
 
-**Added for revision 51 specifically:** run `snapshot-consumers.sh` across the
-rollout itself, before any severance work — sampling every 10 minutes for at
-least an hour after the rollout completes, as at revision 50. With 95 pod
-templates rolling instead of a handful, this is the strongest test UD-14 has
-had. Compare against the rev-50 baseline of 92 group-on-broker rows: 0 wedged,
-0 state changes, 0 groups disappeared.
+**Added for revision 51: sample ACROSS the rollout, not only after it.**
+
+At revision 50 the sampling started once the rollout had finished, which
+answers "did the fleet end up wedged". It cannot answer "did anything wedge
+while the pods were restarting and then recover", and the trigger under
+investigation is the rollout itself. With 95 pod templates rolling, and with
+this being the last fleet-wide roll a version bump will produce (0a), a group
+that wedges mid-roll and heals before the first post-rollout sample is
+invisible for good.
+
+**1. Baseline, the last thing before the upgrade** (also in section 5):
+
+```bash
+export OPENDDIL_SNAPSHOT_DIR=~/openddil-snapshots-rev51   # somewhere that survives
+./scripts/snapshot-consumers.sh pre-51
+```
+
+**2. During the roll — a second terminal, started BEFORE `helm upgrade`:**
+
+```bash
+for i in $(seq -w 1 15); do
+  ./scripts/snapshot-consumers.sh "roll-$i"
+  sleep 120
+done
+```
+
+**3. After `kubectl rollout status` is clean on the last workload:** `post-00`,
+then every 10 minutes to `post-60`, as at revision 50.
+
+**4. The diffs, because which pairs you compare is the whole design:**
+
+```bash
+# consecutive pairs through the roll -- the only thing that catches a group
+# that wedged mid-roll and recovered. pre-51 -> post-60 cannot see it.
+for i in $(seq -w 1 14); do
+  j=$(printf '%02d' $((10#$i + 1)))
+  ./scripts/snapshot-consumers.sh --diff "roll-$i" "roll-$j"
+done
+./scripts/snapshot-consumers.sh --diff pre-51 post-00   # what the roll cost
+./scripts/snapshot-consumers.sh --diff pre-51 post-60   # did it end clean
+./scripts/snapshot-consumers.sh --diff post-00 post-60  # the rev-50 comparison
+```
+
+**What each category means, and it is not the same mid-roll as after:**
+
+* **`STATE` and `GONE` mid-roll are expected, not findings.** 95 pods
+  restarting means groups rebalance and members leave. `GONE` in particular
+  goes wholesale: the script enumerates groups by exec-ing into each redpanda
+  pod, so while a broker is restarting it contributes no rows at all and every
+  group on it reads `GONE`. Mid-roll, that is the rollout working.
+* **`WEDGED` is the finding at any point** — Stable, committed offset frozen,
+  lag waiting — and the diff exits non-zero on it. That is the UD-14 signature:
+  the broker still counts the group as a healthy member, the pod reads
+  `1/1 Running`, there is work waiting, and nothing is being committed.
+* **One caveat, stated so a false positive is not narrated as a wedge.** The
+  signature was tuned at 10-minute spacing; at 2 minutes a group that is merely
+  slow can look frozen. So a mid-roll `WEDGED` row is a **lead, not a result**:
+  take another snapshot immediately and diff again. A wedge that holds across
+  three consecutive samples is the thing. One sample is not.
+* **After the roll settles, the categories mean what they meant at revision
+  50.** Compare against that baseline: 92 group-on-broker rows, 0 wedged, 0
+  state changes, 0 groups disappeared.
+
+**Keep the snapshot directory.** It is the only record that the trigger was
+watched, and this is the last rollout of this size that will happen by itself.
 
 ---
 
@@ -258,7 +429,7 @@ helm rollback "$REL" 50 -n "$NS"
 |---|---|
 | the chart at 0.1.56 | values passed with `-f` — re-pass them |
 | the five Topaz references to `:0.33.16` | Restate state wiped by the pre-upgrade hook, if the flag was passed |
-| the `helm.sh/chart` label, rolling every pod a second time | schema migrations applied forward |
+| the `helm.sh/chart` pod label, rolling every pod a second time | schema migrations applied forward |
 | | the ontology re-resolution — rows re-emitted under the new tuples stay |
 
 **The asymmetry worth naming.** Rolling back the chart does not roll back the
@@ -275,27 +446,51 @@ Decide against section 2's check-backs, not against pod status — "pods are
 Running" is not verification, and it is exactly what was green through both
 prior incidents.
 
+**And it puts the chart version back into the pod templates.** 0.1.56 labels
+pod templates with `helm.sh/chart`, so rolling back restores the behaviour 0a
+describes: every subsequent version bump rolls the whole fleet again, whatever
+it contains. That is a reason to prefer fixing forward over rolling back, not a
+reason to refuse a rollback that is otherwise warranted — but it should be a
+decision rather than a surprise two chart versions later.
+
 ---
 
 ## 5. Pre-deploy checklist
 
-- [ ] `tools/dis-sim/build.sh --load` has run; `openddil/dis-sim:1.0` is on the nodes (0c)
-- [ ] The values file passed with `-f` contains **top-level** `restate.ephemeralOnUpgrade: true` (0b, 1.1)
-- [ ] Every `-f` originally installed with is being re-passed
+**The first item is a gate, not a checkbox.** It is the one failure here that
+nothing downstream would reveal, so it is asserted by a command whose output is
+read before the upgrade runs:
+
+```bash
+helm template "$REL" ./openddil-demo -f "$VALUES" | grep -c restate-wipe
+# expect exactly 11. 0 = the flag did not arrive. Anything else: read the
+# render. Do not upgrade on a number you did not expect. (0b)
+```
+
+- [ ] **GATE:** that render prints `11` with the exact `-f` files, in the exact order, that the upgrade will pass (0b, 1.1)
+- [ ] Every `-f` the release was originally installed with is being re-passed
+- [ ] `ghcr.io/edgy-solutions/openddil/dis-sim:1.0` is reachable from the cluster, or mirrored in an air gap (0c) — no local build needed any more
 - [ ] `/tmp/values-before-51.yaml` and `/tmp/variants-rev50.txt` captured (4)
-- [ ] `snapshot-consumers.sh` baseline taken immediately before the upgrade (3)
+- [ ] `OPENDDIL_SNAPSHOT_DIR` set somewhere that survives, and `snapshot-consumers.sh pre-51` taken as the last act before `helm upgrade` (3)
+- [ ] The every-2-minutes sampling loop is already running in a second terminal (3)
 - [ ] Pre-flight 5 of 5 green before starting
 
 ## 6. Post-deploy, in order
 
-1. Pods settle; **do not accept "Running" as verification**.
-2. Section 2 rows 1-8 — the per-asset checks. Any difference beyond the two
+1. Pods settle; **do not accept "Running" as verification**. The sampling loop
+   from section 3 keeps running while they do — that window is the experiment,
+   and it is not repeatable.
+2. `kubectl rollout status` clean on the last workload, then `post-00`, and the
+   consecutive-pair diffs across the `roll-*` snapshots (section 3, step 4).
+   Do this before the per-asset checks: a wedge found here changes what every
+   query below means.
+3. Section 2 rows 1-8 — the per-asset checks. Any difference beyond the two
    predicted relabels is a finding.
-3. `snapshot-consumers.sh` every 10 minutes for at least an hour (section 3,
-   UD-14).
-4. Pre-flight 5 of 5.
-5. Severance re-rehearsal (section 3), one dimension at a time, ending
+4. `snapshot-consumers.sh` every 10 minutes for at least an hour (section 3,
+   UD-14), then `--diff pre-51 post-60`.
+5. Pre-flight 5 of 5.
+6. Severance re-rehearsal (section 3), one dimension at a time, ending
    connected.
-6. Write the measured results back into the ledger rows they answer. The rows
+7. Write the measured results back into the ledger rows they answer. The rows
    are written to be *closed by measurement*, and a prediction that is never
    checked back is worse than none, because it reads as settled.
