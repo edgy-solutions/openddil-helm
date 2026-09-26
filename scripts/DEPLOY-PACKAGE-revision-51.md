@@ -1,10 +1,21 @@
 # Deploy package — revision 51
 
-**Nothing here has been executed against any cluster.** No `helm upgrade`, no
-`kubectl`, no query. The chart renders and diffs below were produced locally
-from the repository; every number attributed to the cluster is a *prediction*
-carried forward from the ledger, and every one of them has a check-back query
-so it is settled by measurement rather than by argument afterwards.
+> **EXECUTED ON THE LAB 2026-09-26 — this is now the work-deploy package.**
+> Revision 51 was deployed to `edgy-lab` by this procedure and measured against
+> the predictions below. The line that used to open this document ("nothing here
+> has been executed against any cluster") no longer holds and has been removed
+> rather than softened. **Before running this at work, read
+> `WORK-DEPLOY-revision-51.md`** — it carries what was measured, what came back
+> different from the prediction, the two check-back queries in this document that
+> **cannot run as written**, and the list of ways the work cluster differs from
+> the lab. Predictions and their measured outcomes are in
+> `PREDICTION-2026-09-26-rev51-lab.md`; severance at revision 51 is in
+> `RECORDING-READINESS.md` §E.
+
+The chart renders and diffs below were produced locally from the repository.
+Every number attributed to the cluster began as a *prediction* with a check-back
+query, so it is settled by measurement rather than by argument afterwards — and
+as of 2026-09-26 those check-backs have been run on the lab.
 
 Baseline is **helm revision 50**, deployed 2026-09-19 from chart
 `openddil-demo-0.1.56` at `openddil-helm@d43e9ef`. Target is
