@@ -167,6 +167,29 @@ If severance is shown at work, know these in advance:
   severed bridge counts from 0. Without the pre-cut read there is no way to tell
   a pre-existing count from the cut's own.
 
+### 2.8 What CI has validated, and what it has not
+
+The chart you deploy at work is `openddil-demo-0.1.58`. The last commit that
+`Chart checks` and `Package and publish openddil-demo chart` actually ran against
+is **`0f67690`**, both green. Every commit pushed after it — the whole overnight
+write-up, including this file — touches `scripts/*.md` only, and both workflows
+filter on `openddil-demo/**`, four named `scripts/*.sh`/`.ps1` files,
+`values-artifactory.yaml` and their own workflow files. So the absence of CI runs
+for `ad28c8e` and `0df3175` is the path filters working, not a failure. Do not go
+looking for a broken pipeline in the morning.
+
+Two consequences that do bear on the deploy:
+
+* The **runtime-bundle image** was last built by the daily scheduled run, not by
+  a change. If the projector has moved ahead of the bundle's Atlas migrations,
+  the symptom at work is a postgres `column "X" does not exist`. If you want a
+  fresh bundle before deploying, use the `workflow_dispatch` button on
+  `notify-bundle-rebuild.yml` in `openddil-contracts` — it exists for the case
+  where the `paths-ignore` filter legitimately skipped a rebuild.
+* A green CI history says the chart renders and publishes. It says nothing about
+  the cluster. The pre-flight is the only thing that speaks for the cluster, and
+  it is 5 of 5 on the lab, not at work.
+
 ---
 
 ## 3. Order of operations at work
