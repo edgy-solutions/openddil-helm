@@ -79,6 +79,30 @@ mappings.
 **So at work, deleting an asset's DB rows does not remove the asset.** Cancel the
 invocation, then clear the object state, on every Restate server that holds it —
 cancel first, or the timer re-creates the state you just cleared.
+**Two decoys around this flag, both measured on the lab.**
+
+*The flag has a lookalike in the live values.* Revision 50's user-supplied values
+contain `tierNode.restate.useEmptyDir: false` — a **nested `restate:` block that
+is not where the flag goes** — while `ephemeralOnUpgrade` appears **0 times**
+anywhere in those values. Reading live values at work, you will see a `restate:`
+key and it is the wrong one. The flag is **top-level** `restate:`; under
+`tierNode:` it renders 0 wipe lines and wipes nothing.
+
+*There is no post-hoc way to confirm the wipe ran.* The wipe is a Helm **hook**
+(`pre-install,pre-upgrade`, `hook-delete-policy: before-hook-creation,hook-succeeded`),
+so both obvious after-the-fact checks are blind:
+
+* **`helm get manifest` never shows it** — hooks are excluded from the stored
+  manifest. Measured: `grep -c restate-wipe` returns **0 for revision 51**, the
+  revision whose values *do* carry the flag and whose `helm template` gate
+  rendered **11** lines. A zero there means nothing at all.
+* **`kubectl get jobs` never shows it either**, because `hook-succeeded` deletes
+  the Job on success.
+
+So `helm template` — the §0(b) gate — is the only thing that sees the wipe, and
+only *before* the fact. **Render the gate and read the number before you
+upgrade.** Afterwards, the only evidence is Restate's own state.
+
 
 ### 2.3 Aggregates keep a withdrawn asset's contribution
 
@@ -111,6 +135,19 @@ entitled to its inputs. So no gate in the suite can see a stale aggregate
 partition, and none claims to.
 
 **At work this means one spurious entity permanently inflates the rollups**, and
+**And the state you would have to reach into is not where its name says it is.**
+The aggregator's table lives in a Faust changelog topic, and on the lab that
+topic exists **twice under the same name on two brokers**: the live one with
+111,976 retained records and 15 keys on the *region* broker, and a **frozen twin
+holding 14 records** on the HQ broker. The env var that selects it is called
+`REGIONAL_HQ_BROKERS` and it resolves to the *region* broker. A tombstone sent to
+the HQ-named broker is accepted, changes nothing, and looks like a completed fix.
+Check which broker actually carries the moving watermark before you write to it.
+
+Also, when you read that topic: `rpk topic consume -o start` **under-reads it**
+— on the lab it returned only the last 30 offsets on a topic reporting
+`LOG-START-OFFSET 0`, which twice produced a confident and wrong "the key is not
+there". Use the range form `-o <start>:<end>`.
 neither a gate nor a pod restart will tell you or fix it.
 
 ### 2.4 The mirror
@@ -221,27 +258,33 @@ this one.
 
 ## 4. Open, and not mine to close
 
-* **The lab is left with the aggregate residue.** `region_fleet_summary` and
-  `region_wear_trends` each carry a `releasability_class=''` partial on HQ and
-  region-east, from a spurious entity that is otherwise fully removed. The
-  surgical fix is: scale the regional aggregator to 0, write a **tombstone** for
-  changelog key `"dis:1:1:1099"` on
-  `region-region-east-aggregator-region_region_east_assets_latest-changelog`,
-  scale back to 1 so recovery applies the delete, **then** delete the leftover
-  `class=''` rows from both stores — the stateless projector never deletes, so
-  the rows outlive the emission and need the explicit delete either way. I was
-  denied permission to scale the deployment and to produce into the changelog, so
-  this is **unfixed and yours.** A tombstone is the *supported* semantics here:
+* **The lab is left with the aggregate residue, and the procedure I first wrote
+  for it named the wrong broker.** `region_fleet_summary`, `region_wear_trends`
+  and `region_top_factors` each carry a `releasability_class=''` partial on HQ and
+  region-east, from a spurious entity otherwise fully removed. Measured since:
+  the key is **`dis:1:1:1099`** (range-bounded scan: 15 distinct keys over 111,976
+  records), and the **live changelog is on the region-east broker**, not the HQ
+  one. Full detail and the exact commands are in
+  `FINDING-2026-09-26-changelog-broker-and-wipe-hook.md` §7. `kubectl scale` is
+  now permitted and the scale cycle is measured safe (`Recovery complete` in ~5s,
+  0 non-healthy after), but **producing a tombstone is still denied**, so this is
+  **unfixed and yours.** I scaled the aggregator down, was refused the produce,
+  and scaled it straight back rather than leave it at 0 — the cluster is in its
+  exact prior state. A tombstone is the *supported* semantics here:
   null-means-delete-this-key is Faust's own changelog recovery contract, unlike
   the ingress topics, where the projector has no null handling and a null is an
   untested input class.
+* A stale, frozen twin of that changelog topic sits on the HQ broker under the
+  identical name. Inert, but it is why a correct-looking tombstone can be a
+  silent no-op. Worth deleting when attended.
 * Three ingress `compact` topics still retain a last record for the same key.
   Inert unless a consumer group is reset or a store is rebuilt from the topics.
   Clearing it is an attended job.
 * The aggregator module docstring says it owns "RocksDB Tables"; the app is
   constructed with `store="memory://"`. Doc drift.
-* `region_top_factors` reports **4** rows while my per-class query over it
-  returned none — unresolved, low stakes, recorded so it is not met as a surprise.
+* ~~`region_top_factors` reports 4 rows while a per-class query returns none~~ —
+  **resolved, not a defect.** It holds 4 classed rows (BDR, ATL, `ATL,BDR`, `''`);
+  the earlier contradiction was a fault in my query, not the data.
 * Two check-back queries in the rev-51 package cannot run as written, found by
   running them before the deploy: row 4 selects `platform_variant` from
   `asset_cm_state`, which has no such column (join `telemetry_latest_state`
@@ -253,9 +296,15 @@ this one.
 * Row 5's expected value is ambiguous: it says "region critical 2 to 1", but since
   ADR-0029 `region_fleet_summary` is partitioned by releasability class. Total
   critical is 3; the ATL slice is 2. It was checked back as the ATL slice.
-* `helm history` is blocked in this session, so revision 50's existence is taken
-  from the 2026-09-19 handoff rather than confirmed live — the one unverified
-  rollback input.
+* ~~`helm history` is blocked, so revision 50's existence is unverified~~ —
+  **closed.** Confirmed first-hand once `helm history` was permitted:
+  `50  Fri Sep 18 22:58:31 2026  superseded  openddil-demo-0.1.56`, and
+  `51 ... deployed openddil-demo-0.1.58` with `helm status` `REVISION: 51`.
+  Rollback to 50 is a real target. It returns the chart to **0.1.56**, where
+  `restate.ephemeralOnUpgrade` defaults **true** — but that does **not** mean a
+  rollback wipes Restate: the wipe hook registers only
+  `pre-install,pre-upgrade`, and nothing in the chart registers `pre-rollback`,
+  so `helm rollback` fires no wipe. **Rollback is state-neutral for Restate.**
 * The simulator-side fix (`DIS_ENTITY_TYPES_PATH` JSON drop with the
   SISO-conformant list) was **not** done tonight.
 * `operator.regioneast` exists in `users.yaml:157` and the realm export but is not
