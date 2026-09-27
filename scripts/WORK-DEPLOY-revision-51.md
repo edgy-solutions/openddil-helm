@@ -492,3 +492,42 @@ this one.
 * `operator.regioneast` exists in `users.yaml:157` and the realm export but is not
   exercised by the partition demo, and is still absent from
   `users-promoted.yaml` — yours.
+* **The scenario reset is not a tool you can lean on yet — do not run it here.**
+  `reset-scenario.sh` was run against the lab on 2026-09-26 and **phase 4 has
+  never completed, on any cluster**: `rpk topic trim-prefix` returns
+  `POLICY_VIOLATION` on `cleanup.policy=compact` topics, and the compacted topics
+  are the state topics. Phases 1–3 *do* mutate (six producers to 0, Restate state
+  clear enqueued on all four runtimes), so an aborted run leaves a quiesced
+  cluster. It self-heals once the producers are scaled back to 1 — measured twice,
+  worked twice — but that is an operator step, not the script's. Four ways to
+  finish the mechanism, and the one decision blocking it, are in
+  `FINDING-2026-09-26-trim-refused-on-compacted-topics.md`. **Consequence for the
+  recording: there is no proven one-command restart yet.** Plan the demo so a
+  restart means a fresh namespace or an attended sequence, not this script.
+* **Updated 2026-09-27: the mechanism is now written, and that does not change
+  the advice above.** Phase 4 takes the mixed strategy — trim where
+  `cleanup.policy` contains `delete`, capture-delete-recreate-assert where it is
+  pure `compact` — and an `--red-check-topic-config` flag makes the assertion
+  falsifiable on demand. It also now has a single EXIT trap that restores every
+  scaled-down workload on an abort, so the quiesced-cluster residue described
+  above should no longer need an operator step. **None of that has executed.**
+  The script has not been run end to end since the change; only the trap's three
+  cases were exercised, and in a standalone harness rather than in the script.
+  Until it has round-tripped once on the lab — baseline, reset, re-seed, same
+  counts — treat it exactly as the bullet above says: do not run it here.
+* **Seven state topics are `compact` on `edge-01/02/03/hq` and `delete` on
+  `region-east`** — one broker of five, all seven, same direction, so it is one
+  creation path that did not carry the topic configs. Independent of the reset,
+  that broker's state topics grow without bound and anything rebuilding from the
+  start of those logs reads full history instead of latest-per-key. **Check it here
+  before the recording** (`rpk topic describe <topic> -p` per broker); if the work
+  cluster reproduces it, the regional tier is the one that shows it.
+* **Images: nothing needs a push, and CI has already built everything.** As of
+  2026-09-27 every relevant commit is pushed and green — the kind gate is in the
+  published `runtime-bundle:latest` (built on that commit; the bundle COPYs
+  `openddil-demo/dynamic-mappings/`), and the zstd→lz4 producer fix is in the
+  published `cm-service` and `logistics-fusion-service` images. The chart pins
+  `:latest` with `pullPolicy: Always`, so **a fresh deploy here picks all of it up
+  with no chart change.** The lab is the case that needs care, not work: its
+  cm/fusion pods predate the fixed images by hours, so they still run the
+  zstd-producing code until those deployments are restarted.
