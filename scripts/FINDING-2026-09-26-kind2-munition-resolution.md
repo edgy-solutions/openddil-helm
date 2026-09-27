@@ -279,6 +279,58 @@ lab tonight, arriving by a supported path rather than a spurious one.
   arrives intact.
 * **Independent of all of the above:** fix `ontology_check.py:70`, §7.
 
+## 10a. What was actually done — the gate, 2026-09-27
+
+§10 lists options by cost. The decision taken was **none of them exactly**: the
+munition is refused **admission** rather than taught to resolve, because §8.3 is
+the constraint that outranks the resolution question — **`kind` is not in
+`asset_id`**, so a resolvable munition is still an unfilterable fleet member.
+Resolving `kind=2` would have made the rows prettier without making the fleet
+count right.
+
+**`openddil-demo/dynamic-mappings/dis-kind-gate.yaml`**: admits a declared set
+of DIS entity kinds, default `[1]`, counts each refusal per kind in
+`dis_ingress_kind_dropped{kind="N"}`, drops before reshaping, and does **not**
+route to the DLQ — a refused kind is policy, not malformed data. Wired into
+`openddil-base-connect.yaml` **ahead of** `sim_dis_mapping`, because after that
+resource runs the message is already asset-shaped and `dis_entity_type.kind`
+has moved under `asset.`.
+
+**Red and green, both measured under compose:**
+
+| condition | result |
+|---|---|
+| gate in, `kind=2` sent | absent from `raw-sensor-stream`; `dis_ingress_kind_dropped{kind="2"}` = 1; DLQ unchanged at 0 |
+| gate in, `kind=9` sent | absent; `{kind="9"}` = 1 |
+| gate in, `kind=1` sent | **landed**, offset 203 — the gate is not a feed outage |
+| gate **removed**, `kind=2` sent | `dis:1:1:54002` landed at offset 206 — the leak assertion is live |
+
+Offsets **202** and **203** of `raw-sensor-stream` now hold the before/after
+pair in one topic: the munition that got in pre-gate, and the platform admitted
+post-gate.
+
+**Guarded by `tests/hero_scenario_v3/test_54_dis_kind_gate.py`**, which asserts
+the counter moved, that nothing reached the topic or the DLQ, **and that
+`kind=1` still lands** — without that third assertion the test passes for a
+gate that drops the entire feed, which is a total ingress outage wearing the
+appearance of a clean deploy. It **skips rather than passes** when the metrics
+endpoint is unreachable, so a dead scrape cannot read as a zero counter.
+
+**What §10 still owes, unchanged by this.** The ontology PR is still the right
+end state for *resolution* — munition rows stay in the overlay and variant
+coverage on them should still read zero `UNKNOWN`. The gate is the guard until
+`DESIGN-2026-09-26-asset-lifecycle.md` lands, and it does nothing for assets
+already in the stores or for platforms that leave the field. `ontology_check.py`
+(§7) is still a no-op.
+
+**Two limits recorded honestly.** The admitted set cannot be overridden at work
+without a chart change — the connect container's `env:` block
+(`templates/edge.yaml:205`) is hardcoded and the chart has no `extraEnv` hook —
+and **nothing scrapes `:4196`**, so the counter is evidence that must be
+fetched by hand, where an empty result is indistinguishable from nobody
+looking. Both are rows in `FOLLOW-UPS.md`; both are stated in
+`WORK-DEPLOY-revision-51.md` §2.9.
+
 ## 11. Provenance
 
 Everything in §4 and §7 was measured tonight against files in the working tree,

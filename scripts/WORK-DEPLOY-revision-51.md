@@ -302,13 +302,92 @@ Two consequences that do bear on the deploy:
 
 ---
 
+### 2.9 The ingress kind gate — REQUIRED, and already on
+
+**This is a required setting, not an option, and the reason is §2.0 outcome 3
+plus §2.2 plus §2.3 acting together.** A live DIS simulator emits munition
+PDUs (`kind=2`). Measured under compose on 2026-09-26: a `kind=2` entity is
+admitted as a **full fleet asset**, indistinguishable downstream from a tank,
+because
+
+* its variant resolves to `UNKNOWN` like everything else right now (§2.0), and
+* **`kind` is not part of `asset_id`** — the id is
+  `dis:<site>:<application>:<entity>` — so **no fleet query can filter
+  munitions out by key pattern**, and
+* the wipe flag is **false** at work (§2.2) and there is no eviction path
+  (§2.3), so each round is a **permanent** member.
+
+On camera that means the asset count includes every round fired, and it grows
+for the length of the recording, with no query available to hide it.
+
+**What ships.** `openddil-demo/dynamic-mappings/dis-kind-gate.yaml` admits a
+declared set of DIS entity kinds, **defaults to `[1]` (PLATFORM)**, drops
+everything else before reshaping, and **counts each drop per kind** in
+`dis_ingress_kind_dropped{kind="N"}`. Gated messages do **not** go to the DLQ —
+a refused kind is policy, not malformed data, and DLQ depth has to stay
+meaningful.
+
+**It needs no chart change and no values change.** It is a new file in the
+bundle's `dynamic-mappings/`, and Connect already runs `-r /mappings/*.yaml`,
+so the glob picks it up. It is wired into `openddil-base-connect.yaml` **ahead
+of** `sim_dis_mapping`, which is the only correct position: once that resource
+has run, `dis_entity_type.kind` has moved under `asset.` and the message is an
+asset-shaped event — gating there would be refusing something already built.
+
+**Verified both directions under compose, not just wired:** with the gate in,
+`kind=2` and `kind=9` were absent from `raw-sensor-stream`, the counter read
+`{kind="2"} 1` and `{kind="9"} 1`, the DLQ stayed at 0, and `kind=1` still
+landed. With the gate removed, `dis:1:1:54002` (`kind=2`) landed — so the
+topic-leak assertion is live, not decorative. Guarded by
+`tests/hero_scenario_v3/test_54_dis_kind_gate.py`; `test_04` confirms normal
+resolution is undisturbed (`variant=M1A2-SEPv3`).
+
+**Two things to know before you rely on it at work.**
+
+1. **You cannot change the admitted set at work without a chart change.** The
+   gate reads `${DIS_ADMITTED_ENTITY_KINDS:1}`, but the connect container's
+   `env:` block in `templates/edge.yaml:205` is hardcoded to `REDPANDA_BROKER`
+   and **the chart has no `extraEnv` hook anywhere.** So the default is in
+   reach of a bundle rebuild and any override is not. That makes the gate
+   required by construction — and it also means that if work's feed
+   legitimately carries a kind you want (say `kind=3`), there is **no quick
+   escape hatch**, and you will be looking at a silently thinner fleet. Adding
+   `extraEnv` to that container is the one-line chart change that buys the
+   escape hatch; consider it before the recording, not during.
+2. **Nothing scrapes the counter.** Connect's Prometheus endpoint is on by
+   default at `:4196/metrics`, and there is no `ServiceMonitor` and no
+   `prometheus.io/scrape` annotation in the chart. Read it by hand:
+
+   ```bash
+   kubectl exec -n openddil <connect-pod> -- \
+     wget -qO- http://localhost:4196/metrics | grep dis_ingress_kind_dropped
+   ```
+
+   **An absent series and an absent scrape produce the same empty output**, so
+   "no munitions were refused" and "nobody is looking" are indistinguishable
+   from that command — and the first is the answer you will assume. If the
+   output is empty, confirm the endpoint answers at all before concluding
+   anything about munitions.
+
+**What the gate does not do.** It stops munitions becoming assets; it does not
+give assets a lifecycle. Everything already in the stores stays there, and a
+platform that leaves the field still never departs. That is
+`DESIGN-2026-09-26-asset-lifecycle.md`, and this gate is explicitly the guard
+until it lands. Munition rows remain in the ontology overlay for resolution, so
+variant coverage on them still matters and should still read zero `UNKNOWN`.
+
+---
+
 ## 3. Order of operations at work
 
 1. Set the kubeconfig and confirm `kubectl config current-context`; make
    `.expected-context` right **deliberately**.
 2. Pre-flight 5 of 5. Do not proceed on 4.
 3. `helm get values` to capture live values; **render the §0(b) gate and expect
-   the number you intend.** Revision 50's captured values contain no
+   the number you intend.** Confirm at the same time that the bundle image you
+   are deploying carries `dynamic-mappings/dis-kind-gate.yaml` (§2.9) — it is
+   required, it is default-on, and it arrives via the bundle, not via values,
+   so `helm get values` will never mention it. Revision 50's captured values contain no
    `restate.ephemeralOnUpgrade` at all, so re-passing them unchanged under 0.1.58
    renders **0** wipe lines and wipes nothing, silently. Decide whether you want
    the wipe at work and pass the flag accordingly — top-level, not under
