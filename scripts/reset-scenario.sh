@@ -1,0 +1,1750 @@
+#!/usr/bin/env bash
+# ===========================================================================
+# reset-scenario.sh — the only real delete in the system
+# ===========================================================================
+#
+# WHAT THIS IS
+#
+# A live demo runs a scenario, then has to run it again from the same
+# baseline. Nothing in the pipeline is built to make that possible on its
+# own: Restate's Virtual Objects are durable by design, the carrying Kafka
+# topics are compacted (last record per key kept forever), the projector
+# tables are upsert-only with no retention, the regional aggregator holds a
+# Faust table backed by a changelog topic that replays on every restart, and
+# Electric's shape logs are append-only. Each of those is the CORRECT
+# behaviour for a system that is supposed to remember a fleet. None of them
+# is what a demo operator wants between take one and take two.
+#
+# This script is the deliberate exception: it reaches into five kinds of
+# state and empties them. It is the ONLY place in this repo that does a real,
+# permanent delete of scenario data. Every other script either reads,
+# restarts, or reconfigures.
+#
+# WHAT THIS RESETS, AND WHAT IT DOES NOT
+#
+# It resets the DEPLOYMENT — the whole fleet's accumulated scenario state —
+# never a single asset. There is no "remove this one asset" mode here on
+# purpose: per-asset deletion is the lifecycle question (see
+# FINDING-2026-09-26-no-asset-eviction.md and the lifecycle ADR's answer,
+# "no deletes"), and conflating the two would make an operator reach for a
+# blunt whole-fleet tool to solve a one-asset problem, or vice versa.
+#
+# THE FIVE COMPONENTS, AND WHY EACH NEEDS ITS OWN STEP
+# (full detail: PREDICTION-2026-09-26-scenario-reset.md, this doc's sibling
+# and the source of every predicted value this script verifies against)
+#
+#   1. Restate     — per-Virtual-Object journals on a PVC. AssetLogistics
+#                     re-arms its own timer every tick, forever
+#                     (asset_logistics.py:477). Clearing state without first
+#                     cancelling the scheduled timer lets the very next tick
+#                     fire against empty state and recreate what was cleared.
+#   2. Topics       — the carrying topics are cleanup.policy=compact, so the
+#                     last record per key survives indefinitely. Deleting or
+#                     recreating a topic would require restating its config
+#                     here — a second copy of the chart's topic matrix that
+#                     drifts. Trimming needs no config knowledge at all.
+#   3. Stores       — 12 of 13 tables are upsert-mode with no retention.
+#                     TRUNCATE is rejected: it emits one WAL message that
+#                     Electric's client does not reliably honour, so the
+#                     failure mode is "Postgres says 0 rows, UI still shows
+#                     the old fleet." Per-row DELETE propagates correctly.
+#   4. Aggregator   — Faust's table is memory-backed but changelog-backed:
+#                     a pod bounce replays the changelog and restores every
+#                     key. The changelog IS a topic, so it is trimmed in step
+#                     4 (topics) — but the Faust pods must not restart until
+#                     after that trim, which is why the restart is its own
+#                     step, strictly after topics.
+#   5. Electric     — no PVC, no mounted volume: shape logs live in the pod's
+#                     container filesystem. Deleting the pod is the entire
+#                     mechanism; clients rebuild shapes against a new handle
+#                     on their next request.
+#
+# ORDER IS THE MECHANISM, NOT A CONVENTION. See the numbered phase comments
+# below for why each step has to precede the next; getting two of them
+# backwards produces a reset that looks complete on inspection and is not.
+#
+# Reference: PREDICTION-2026-09-26-scenario-reset.md — every "predicted"
+# value this script's --verify pass checks against was written there BEFORE
+# this script existed, specifically so the run could disagree with it.
+# ===========================================================================
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# WHICH CLUSTER. Asserted, never inherited. See lib/require-cluster.sh.
+# There is deliberately no --force / escape hatch here, for the same reason
+# there is none in require-cluster.sh itself: this script deletes rows and
+# state for a living, and the one time a shortcut around the cluster check
+# would be reached for is exactly the wrong cluster, under time pressure.
+# ---------------------------------------------------------------------------
+. "$(dirname "$0")/lib/require-cluster.sh"
+
+NS="${NS:-openddil}"
+RELEASE="${RELEASE:-openddil}"
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+DRY_RUN=false
+BASELINE_ONLY=false
+VERIFY_ONLY=false
+SKIP_RESTATE=false
+SKIP_TOPICS=false
+SKIP_AGGREGATOR=false
+SKIP_STORES=false
+SKIP_ELECTRIC=false
+SKIP_PRODUCERS=false
+RED_CHECK_TOPIC_CONFIG=false   # JUDGMENT CALL 10 red-check, see phase4_topics
+
+usage() {
+  cat <<'EOF'
+reset-scenario.sh — reset all scenario state for the openddil demo deployment
+
+USAGE
+  reset-scenario.sh [flags]
+
+  Env overrides:
+    NS       target namespace (default: openddil)
+    RELEASE  helm release name, used for name-pattern discovery (default: openddil)
+
+FLAGS
+  --dry-run          Print every mutating command; execute none. Reads
+                      (baseline, discovery, high-watermarks, verify) still
+                      run, because you need real numbers to print a real plan.
+  --baseline-only     Run phase 1 (record every §4 count) and exit. No writes.
+  --verify-only       Run phase 9 (re-read every §4 count, PASS/FAIL) and
+                      exit with that phase's exit code. No writes.
+  --skip-restate      Do not cancel invocations or clear Restate state.
+  --skip-topics       Do not trim any topic partition.
+  --skip-aggregator   Do not restart the Faust deployments. THIS IS THE
+                      DOCUMENTED RED-CHECK (PREDICTION doc §5): skipping it
+                      alone is expected to leave the regional rollup carrying
+                      the pre-reset asset_count even though every store and
+                      topic reads clean.
+  --skip-stores       Do not DELETE FROM any Postgres table.
+  --skip-electric     Do not delete the Electric pods.
+  --skip-producers    Do not scale producers down or back up.
+  --red-check-topic-config
+                      After the first pure-compact topic is deleted and
+                      recreated, perturb its cleanup.policy and confirm the
+                      post-recreate capture assertion notices before putting
+                      it back. Self-repairing; touches exactly one topic.
+                      See JUDGMENT CALL 10.
+  --help              This text.
+
+Every --skip-* flag prints a loud warning naming the residue it leaves, and
+--skip-* does NOT soften the phase 9 verification: the point of the flag is
+to make a partial reset visibly, provably partial, not to hide the
+consequence of using it.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true ;;
+    --baseline-only) BASELINE_ONLY=true ;;
+    --verify-only) VERIFY_ONLY=true ;;
+    --skip-restate) SKIP_RESTATE=true ;;
+    --skip-topics) SKIP_TOPICS=true ;;
+    --skip-aggregator) SKIP_AGGREGATOR=true ;;
+    --skip-stores) SKIP_STORES=true ;;
+    --skip-electric) SKIP_ELECTRIC=true ;;
+    --skip-producers) SKIP_PRODUCERS=true ;;
+    --red-check-topic-config) RED_CHECK_TOPIC_CONFIG=true ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Stamped once, before anything mutates. The aggregator verify needs a
+# before-this-run boundary to tell a FRESH rollup from a leftover row, and it
+# has to be the same boundary for every phase, so it is taken here and never
+# re-read. UTC, because the DB columns are timestamptz.
+#
+# This host value is only a FALLBACK. It is replaced in phase 1 by the
+# database's own now(), because this script runs on a workstation and compares
+# against a timestamptz column written by a pod: if the workstation clock is
+# even slightly ahead of the cluster, no row ever looks "fresh" and a correct
+# reset reports UNMEASURED. The boundary has to come from the same clock as the
+# column it is compared to.
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_STARTED_AT_SOURCE="workstation clock (fallback)"
+
+OVERALL_FAIL=0
+
+echo "reset-scenario: namespace=$NS release=$RELEASE dry-run=$DRY_RUN"
+
+# ---------------------------------------------------------------------------
+# maybe_run — the single gate every MUTATING action goes through.
+#
+# Under --dry-run it prints the exact argv it would have executed and does
+# nothing. Otherwise it prints the same line (every destructive action says
+# what it is about to do, with the target's full name, before doing it —
+# required, not decorative: a reset that fails silently partway through is
+# indistinguishable from one that succeeded, unless every step announced
+# itself first) and then runs it.
+#
+# Reads (baseline counts, discovery, high-watermarks) do NOT go through
+# this — they run unconditionally, dry-run or not, because --dry-run still
+# has to show real trim offsets and real row counts to be worth anything.
+# ---------------------------------------------------------------------------
+maybe_run() {
+  local desc="$1"; shift
+  echo "-> $desc"
+  if $DRY_RUN; then
+    printf '   [dry-run] would run:'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+skip_warning() {
+  local component="$1" residue="$2"
+  echo
+  echo "!!! SKIPPING $component RESET — NOT reset, residue expected !!!"
+  echo "    $residue"
+  echo
+}
+
+# ---------------------------------------------------------------------------
+# Discovery — every target is FOUND, never hardcoded, exactly as
+# check-advancing.sh discovers its Connect pods by name-pattern rather than
+# by listing edges. A hardcoded instance list goes stale the day a tier is
+# added (or, per the PREDICTION doc, is asymmetric on purpose: edge-03 has a
+# broker and a projector but NO tier Postgres/Restate/Electric stack — a
+# script that assumes tiers are uniform either errors looking for
+# tier-pg-edge-03 or silently reads a clean reset over a tier it never
+# touched). The patterns below name FAMILIES (postgres-hq / tier-pg-,
+# restate-server / tier-restate-, etc.), not instances; kubectl tells us
+# which instances of each family currently exist.
+# ---------------------------------------------------------------------------
+discover() {
+  # $1 = kubectl resource kind (sts | deploy | pods), $2 = extended regex
+  # matched against the bare resource name (kind/ prefix stripped).
+  # `|| true`: under `set -e`, a grep that legitimately finds nothing (no
+  # tier-pg-edge-03, because there isn't one) must not abort the script.
+  kubectl get "$1" -n "$NS" -o name 2>/dev/null \
+    | sed 's#^[^/]*/##' \
+    | grep -E "$2" || true
+}
+
+# RESOLVED BY MEASUREMENT (ROWS doc, call 6). A name-pattern alone is wrong
+# here in BOTH directions, and the lab proves both:
+#
+#   openddil-tier-restate-bootstrap-edge-01-bfhcx   Succeeded   container: bootstrap
+#                                                               image: cm-service
+#   openddil-restate-hub-864ff98b68-bnrr8           Running     container: restate-hub
+#                                                               image: hub-restate-projector
+#
+# The three `tier-restate-bootstrap-*` Job pods DO match `^…-tier-restate-`
+# and would be exec'd into as if they were runtimes — they are terminated
+# SDK Jobs, so every query against them fails. `restate-hub` is the hub's SDK
+# service (a Deployment, not the runtime) and is excluded only by luck of the
+# current pattern, which is not a property to depend on.
+#
+# So Restate runtimes are discovered by the one thing that actually defines
+# one: a Running pod with a container named `restate` — which is the same
+# container name every exec below already passes to `-c`. On the lab this
+# selects exactly 4 (restate-server-0 + three tier-restate-*-0) and excludes
+# the hub SDK Deployment and all three bootstrap Jobs.
+discover_restate_runtimes() {
+  kubectl get pods -n "$NS" \
+    -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\t"}{range .spec.containers[*]}{.name}{","}{end}{"\n"}{end}' \
+    2>/dev/null | grep -E $'\t(.*,)?restate,' | cut -f1 || true
+}
+
+mapfile -t POSTGRES_PODS < <(discover pods "^${RELEASE}-(postgres-hq|tier-pg-)")
+mapfile -t RESTATE_PODS  < <(discover_restate_runtimes)
+mapfile -t REDPANDA_PODS < <(discover pods "^${RELEASE}-redpanda-" | grep -v -- '-connect-' || true)
+mapfile -t ELECTRIC_PODS < <(discover pods "^${RELEASE}-(electric-sync|tier-electric-)")
+mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
+mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
+  "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^dis-sim-edge-")
+
+# JUDGMENT CALL 10 — state consumers, quiesced only around phase 4's
+# delete-and-recreate of pure-compact topics. Named by FAMILY, same
+# convention as every other mapfile here: projector-/tier-projector- (store
+# writers), cm-service/tier-cm- and logistics-fusion-service/tier-fusion-
+# (the CM and regional-fusion services), faust- (already discovered above,
+# by a narrower pattern, for the phase 5 restart — matched again here
+# because it is ALSO a consumer of its own changelog topic), edge-hq-
+# bridge-/tier-uplink- (the egress bridges). Any one of these touching a
+# just-deleted topic recreates it at broker defaults — see
+# auto_create_topics_enabled in the phase 4 header.
+mapfile -t STATE_CONSUMER_DEPLOYS < <(discover deploy \
+  "^${RELEASE}-(projector-|tier-projector-|cm-service\$|tier-cm-|logistics-fusion-service\$|tier-fusion-|faust-|edge-hq-bridge-|tier-uplink-)")
+
+echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
+     "redpanda=${#REDPANDA_PODS[@]} electric=${#ELECTRIC_PODS[@]}" \
+     "faust=${#FAUST_DEPLOYS[@]} producers=${#PRODUCER_DEPLOYS[@]}" \
+     "state-consumers=${#STATE_CONSUMER_DEPLOYS[@]}"
+
+# ---------------------------------------------------------------------------
+# Stores — the table list and the one permanent exclusion.
+#
+# audit_log is carried in its OWN array, never in TABLES, and delete_table()
+# below refuses it a second time at the point of use. It is the ADR-0029
+# decision log. A reset that clears the record of who was allowed to see
+# what is a cover-up, not a reset — the one table whose entire purpose is to
+# outlive operator acts must outlive this one.
+# ---------------------------------------------------------------------------
+TABLES=(
+  telemetry_latest_state
+  asset_cm_state
+  asset_logistics_status
+  asset_capability_state
+  asset_telemetry_windows
+  asset_registry
+  asset_element_telemetry
+  region_fleet_summary
+  region_top_factors
+  region_wear_trends
+  tactical_events
+  edge_buffer_status
+  inventory_items
+)
+EXCLUDED_TABLES=(audit_log)  # ADR-0029 decision log. PERMANENT. See header.
+
+# pg_query POD SQL — every call reads $POSTGRES_USER / $POSTGRES_DB from the
+# POD'S OWN ENVIRONMENT AT RUNTIME. Never hardcoded: hq's container runs
+# POSTGRES_USER=postgres, the tier instances run POSTGRES_USER=openddil, and
+# a script that assumed one would authenticate correctly against three
+# instances and silently fail (or worse, silently no-op) against the fourth.
+#
+# `-- sh -c '...'`: required here for two independent reasons, not one — the
+# command needs a shell to expand $POSTGRES_USER/$POSTGRES_DB at all, and
+# separately, ANY kubectl exec that hands the container a shell pipeline or
+# a container-absolute path must go through sh -c/bash -c on this toolchain.
+# A bare argument that merely LOOKS like a POSIX path gets silently rewritten
+# by MSYS when this runs under Git Bash on Windows, and the failure then
+# surfaces as an unreachable service, not as a quoting bug — see
+# check-advancing.sh's kind_drops() for the first time this bit someone.
+pg_query() {
+  local pod="$1" sql="$2"
+  kubectl exec -n "$NS" "$pod" -c postgres -- sh -c \
+    "psql -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"$sql\"" \
+    2>/dev/null
+}
+
+pg_table_exists() {
+  local pod="$1" table="$2" v
+  v="$(pg_query "$pod" "SELECT to_regclass('public.${table}') IS NOT NULL")"
+  [ "$v" = "t" ]
+}
+
+pg_count() {
+  local pod="$1" table="$2"
+  pg_query "$pod" "SELECT count(*) FROM ${table}"
+}
+
+delete_table() {
+  local pod="$1" table="$2" excl
+  for excl in "${EXCLUDED_TABLES[@]}"; do
+    if [ "$table" = "$excl" ]; then
+      echo "REFUSING to delete from $table — it is in EXCLUDED_TABLES (ADR-0029)." >&2
+      exit 1
+    fi
+  done
+  maybe_run "DELETE FROM $table on $pod" \
+    kubectl exec -n "$NS" "$pod" -c postgres -- sh -c \
+    "psql -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \"DELETE FROM ${table};\""
+}
+
+# ---------------------------------------------------------------------------
+# Restate result reading — machine format, not a parsed table.
+#
+# RESOLVED BY MEASUREMENT 2026-09-27 (see
+# /c/tmp/rev51-run/ROWS-2026-09-26-reset-six-judgment-calls.md, call 1).
+# An earlier revision hand-parsed the CLI's rendered table and handled both a
+# box-drawing and a pipe-delimited shape. Both were guesses, and one was dead
+# code: `restate sql --help` offers `--json` and `--jsonl`, and the default
+# `--table-style` is `compact`, i.e. NO borders at all.
+#
+# So the parser is gone. `--json` emits one human line ("N rows. Query took
+# ...") followed by a JSON array, and everything below reads the array.
+#
+# The cross-check the parser needed is gone with it, and that is the point:
+# measured, it compared two numbers that are legitimately different —
+#   select count(distinct service_key), count(*) from state -> 14, 84
+# 14 Virtual Object keys, 6 state entries each. A guard comparing those would
+# have aborted a CORRECT reset and blamed the parser. Where a count matters,
+# this script now says which of the two it means.
+# ---------------------------------------------------------------------------
+restate_sql() {
+  # Raw passthrough, kept for callers that only need an exit status.
+  local pod="$1" sql="$2"
+  kubectl exec -n "$NS" "$pod" -c restate -- restate sql --json "$sql" 2>/dev/null
+}
+
+restate_json() {
+  # The JSON array only: drop the leading human-readable summary line.
+  local pod="$1" sql="$2"
+  restate_sql "$pod" "$sql" | sed -n '/^[[:space:]]*\[/,$p'
+}
+
+json_field() {
+  # $1 = JSON array text, $2 = flat scalar field name -> one value per line.
+  # Every field this script reads (service_name, service_key, id, n) is a flat
+  # scalar, so this needs no JSON parser and pulls no nested object.
+  #
+  # `|| true` IS LOAD-BEARING, not defensive clutter. With `set -euo pipefail`
+  # (line 70) a grep that matches nothing returns 1, pipefail promotes that to
+  # the pipeline, the function returns 1, and every caller of the form
+  # `x="$(json_field ... | head -1)"` kills the script from inside a command
+  # substitution. "No rows matched" is a legitimate and expected answer here —
+  # it is the answer after phase 3 clears the state, and on a cold cluster it is
+  # the answer at baseline. Guarding once here fixes every call site.
+  local raw="$1" field="$2"
+  printf '%s' "$raw" \
+    | { grep -oE "\"${field}\":(\"[^\"]*\"|-?[0-9]+(\.[0-9]+)?)" || true; } \
+    | sed -E "s/^\"${field}\"://; s/^\"//; s/\"\$//"
+}
+
+restate_count() {
+  # Single-aggregate query -> the one value of the named column. Reads the
+  # field by NAME rather than by position or by "last number on the line":
+  # the summary line carries digits of its own ("1 rows. Query took 2.39ms"),
+  # so a positional read of the whole output is a trap.
+  local pod="$1" sql="$2" col="${3:-n}"
+  json_field "$(restate_json "$pod" "$sql")" "$col" | tail -1
+}
+
+# Set during phase 1 from a LIVE scheduled invocation, because by verify time
+# there are deliberately none left to measure.
+MEASURED_CADENCE_S=""
+
+measure_restate_cadence() {
+  # Emits a whole number of seconds on stdout. Prefers the value measured at
+  # baseline; measures fresh if that is missing; falls back to the env default
+  # only when there is no scheduled invocation anywhere to read.
+  if [ -n "$MEASURED_CADENCE_S" ]; then
+    printf '%s' "$MEASURED_CADENCE_S"
+    return
+  fi
+  local pod raw a b da db delta
+  for pod in "${RESTATE_PODS[@]}"; do
+    raw="$(restate_json "$pod" \
+      "select scheduled_at, scheduled_start_at from sys_invocation where status = 'scheduled' limit 1")"
+    a="$(json_field "$raw" "scheduled_at" | head -1)"
+    b="$(json_field "$raw" "scheduled_start_at" | head -1)"
+    [ -z "$a" ] || [ -z "$b" ] && continue
+    da="$(date -d "$a" +%s 2>/dev/null || true)"
+    db="$(date -d "$b" +%s 2>/dev/null || true)"
+    if [ -n "$da" ] && [ -n "$db" ]; then
+      delta=$((db - da))
+      # Sanity-bound it. A negative or absurd delta means the read is wrong,
+      # and a wrong cadence silently weakens the re-arm check rather than
+      # failing it, so an out-of-range value is discarded rather than used.
+      if [ "$delta" -gt 0 ] && [ "$delta" -le 600 ]; then
+        MEASURED_CADENCE_S="$delta"
+        printf '%s' "$delta"
+        return
+      fi
+    fi
+  done
+  printf '%s' "$RESTATE_CADENCE_SECONDS"
+}
+
+# ---------------------------------------------------------------------------
+# Electric shape reads (ROWS doc, call 4). All three unknowns that made an
+# earlier revision substitute a weaker check are now measured:
+#   port    read per pod from its own container spec — 5133 on the hub,
+#           3000 on each tier. A hardcoded port reads 1 instance in 4.
+#   client  only `curl` is present (`wget` is not installed).
+#   shape   /v1/shape?table=<t>&offset=-1 answers 200 with an
+#           `electric-handle` response header and a JSON array body.
+# ---------------------------------------------------------------------------
+ELECTRIC_SHAPE_TABLE="${ELECTRIC_SHAPE_TABLE:-telemetry_latest_state}"
+
+electric_port() {
+  # Never assumed. Empty output means "do not guess" — the caller reports
+  # UNMEASURED rather than inventing 3000.
+  kubectl get pod -n "$NS" "$1" \
+    -o jsonpath='{.spec.containers[0].ports[0].containerPort}' 2>/dev/null || true
+}
+
+electric_shape() {
+  # Headers on stderr, body on stdout, so one call can serve both readers
+  # without parsing a merged stream.
+  local pod="$1" port="$2"
+  [ -z "$port" ] && return 0
+  kubectl exec -n "$NS" "$pod" -- sh -c \
+    "curl -s -m 15 -D /dev/stderr 'http://127.0.0.1:${port}/v1/shape?table=${ELECTRIC_SHAPE_TABLE}&offset=-1'" \
+    2>&1 || true
+}
+
+electric_shape_handle() {
+  # The handle identifies the shape LOG. A different handle after the pod is
+  # deleted is the actual evidence that the log was discarded and rebuilt;
+  # an unchanged handle means it survived, which is the failure to catch.
+  electric_shape "$1" "$2" \
+    | { grep -i '^electric-handle:' || true; } | head -1 | sed -E 's/^[^:]+:[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+electric_shape_rows() {
+  # Count JSON objects in the array body by their `"key":` members, which is
+  # one per row in Electric's shape response. Header lines are excluded by
+  # taking only from the first bracket onwards.
+  electric_shape "$1" "$2" \
+    | sed -n '/^[[:space:]]*\[/,$p' \
+    | { grep -o '"key":' || true; } | wc -l | tr -d ' '
+}
+
+# ---------------------------------------------------------------------------
+# Redpanda: read a topic's per-partition (partition, log-start, high-water)
+# rows. Column layout ($1 partition, $(NF-1) log-start, $NF high-watermark)
+# matches how check-derive-stage.sh's hw() and check-advancing.sh's hw()
+# both key off a numeric partition id in $1 / trailing numeric column — this
+# reuses that same measured layout rather than asserting a fixed column
+# count, since REPLICAS can render as a single bracketed token that shifts
+# absolute column numbers.
+# ---------------------------------------------------------------------------
+topic_partitions() {
+  local pod="$1" topic="$2"
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic describe "$topic" -p 2>/dev/null \
+    | awk 'NR > 1 && $1 ~ /^[0-9]+$/ { print $1, $(NF - 1), $NF }' || true
+}
+
+broker_topics() {
+  local pod="$1"
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic list 2>/dev/null \
+    | awk 'NR > 1 { print $1 }' || true
+}
+
+is_internal_topic() {
+  case "$1" in
+    _*) return 0 ;;   # covers both `_`- and `__`-prefixed internal topics
+    # FOUND BY THE BASELINE, not by review. The `_*` test above only catches
+    # topics whose name STARTS with an underscore, and Faust's control topics
+    # do not — they are `<app-id>-__assignor-__leader`, e.g.
+    # `openddil-edge-01-__assignor-__leader`, so all 11 of them on the lab were
+    # in the trim set. Trimming a leader-election log is a control-plane
+    # mutation that the PREDICTION doc predicts nothing about and that this
+    # script has no business making: it is not scenario data, and its residue
+    # is not what "the fleet is empty" means.
+    #
+    # The `-changelog` topics are deliberately NOT excluded here — those ARE
+    # scenario state (Faust table backing logs) and the PREDICTION doc requires
+    # them trimmed before the Faust restart. The two are cleanly separable:
+    # every assignor/leader topic contains `__`, and no changelog topic does.
+    *-__assignor-__leader) return 0 ;;
+    *__*) return 0 ;;   # any other Faust/Kafka control topic of that family
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# JUDGMENT CALL 10 — topic config capture, read-only. `rpk topic trim-prefix`
+# was proven (2026-09-27, scratch topics) to return POLICY_VIOLATION when a
+# topic's cleanup.policy is pure `compact`; it only succeeds when the policy
+# is `compact,delete`. 53 topics on the lab (13 each on hq/edge-01/edge-02/
+# edge-03, 1 on region-east — all state topics or Faust changelogs) are pure
+# `compact`, so phase 4 has to delete and recreate them instead of trimming
+# — and a recreate needs the topic's live config read back BEFORE the
+# delete, or there is nothing to recreate it from.
+#
+# These three are READS. They do not go through maybe_run and they run
+# under --dry-run too — a dry-run that cannot show the real captured config
+# for a delete-and-recreate topic is worthless for exactly the topics that
+# need the most scrutiny.
+# ---------------------------------------------------------------------------
+topic_dynamic_config() {
+  # Sorted `key=value` lines, DYNAMIC_TOPIC_CONFIG rows only. DEFAULT_CONFIG
+  # rows are excluded on purpose: they come back on their own the moment a
+  # topic is recreated (auto_create_topics_enabled, measured fact 3), so
+  # capturing them would just be restating broker defaults as if they were
+  # part of this topic's identity.
+  local pod="$1" topic="$2"
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic describe "$topic" -c 2>/dev/null \
+    | awk '$3=="DYNAMIC_TOPIC_CONFIG"{printf "%s=%s\n",$1,$2}' | sort || true
+}
+
+topic_shape() {
+  # Single line: "<partitions> <replicas>". Parsed by KEY NAME out of the
+  # SUMMARY block, same reasoning as topic_partitions() above: REPLICAS can
+  # render as a bracketed token that shifts absolute column numbers, so this
+  # reads by name and never by position.
+  local pod="$1" topic="$2"
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic describe "$topic" 2>/dev/null \
+    | awk '$1=="PARTITIONS"{p=$2} $1=="REPLICAS"{r=$2} END{print p, r}' || true
+}
+
+topic_policy() {
+  # The cleanup.policy value alone, or empty if the row cannot be read. This
+  # is the ONLY thing phase 4 uses to decide trim vs delete-and-recreate, so
+  # an empty result is handled by the caller as "unknown" — never defaulted
+  # into either bucket.
+  local pod="$1" topic="$2"
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic describe "$topic" -c 2>/dev/null \
+    | awk '$1=="cleanup.policy"{print $2}' || true
+}
+
+# ---------------------------------------------------------------------------
+# Capture store. A pod|topic -> multi-line-config assoc array was rejected:
+# bash has no native nested value, so a multi-line config would have to be
+# flattened into one string and re-split, and it would give an operator
+# nothing to inspect afterwards. A file does both jobs for free — it is the
+# artifact someone can `diff` by hand if this phase ever disagrees with them
+# about what "matches" means.
+#
+# Not deleted at the end. It is evidence for exactly the case this phase is
+# built to catch: a topic that came back different from what was there
+# before its delete.
+# ---------------------------------------------------------------------------
+TOPIC_CAPTURE_DIR="${TMPDIR:-/tmp}/reset-scenario-capture-$$"
+
+# assert_topic_matches_capture POD TOPIC -> 0 equal, 1 differs.
+#
+# Re-reads shape + dynamic config LIVE, in the same two-part form the
+# capture file was written in, and diffs the two. Deliberately compares the
+# WHOLE dynamic set and the shape, not just the keys the recreate's `-c`
+# list passed — comparing only what was just written would make this an
+# assertion that the create command's own arguments were echoed back, which
+# proves nothing. Comparing everything is what lets it also catch a broker
+# that auto-created the topic underneath this script (measured fact 3): an
+# auto-created topic has DEFAULT config and 1 partition, which will not
+# match a captured 8-partition, 4-key dynamic config.
+#
+# Under --dry-run nothing was deleted, so this reads the topic's own,
+# still-live, unmutated config against a capture taken from that same
+# config moments earlier — it trivially passes. That is not special-cased
+# below; it falls out of calling this function unconditionally.
+assert_topic_matches_capture() {
+  local pod="$1" topic="$2"
+  local capfile="$TOPIC_CAPTURE_DIR/$pod/$topic.cap"
+  local live
+  live="$(mktemp)"
+  { printf 'shape %s\n' "$(topic_shape "$pod" "$topic")"; topic_dynamic_config "$pod" "$topic"; } > "$live"
+  if diff -u "$capfile" "$live" > /dev/null 2>&1; then
+    rm -f "$live"
+    return 0
+  fi
+  echo "CAPTURE MISMATCH: $topic on $pod does not match its pre-mutation capture" >&2
+  diff -u "$capfile" "$live" >&2 || true
+  rm -f "$live"
+  return 1
+}
+
+# ===========================================================================
+# PHASE 1 — BASELINE. Recorded and printed before anything is touched.
+# A reset with no before-reading cannot be shown to have done anything: the
+# claim this script exists to support ("run, reset, re-run: same baseline
+# counts") is only checkable if there IS a first-run baseline on record.
+# ===========================================================================
+declare -A BASE_STORE_COUNT   # key "pod|table" -> count
+declare -A BASE_AUDIT_COUNT   # key "pod" -> audit_log count (never deleted, re-checked unchanged in phase 9)
+declare -A BASE_RESTATE_KEYS  # key "pod" -> DISTINCT Virtual Object keys (14 on the lab)
+declare -A BASE_RESTATE_ROWS  # key "pod" -> state ROWS. NOT derivable from keys: measured 84/14 on hq but 59/8, 43/6, 98/14 on the tiers, so entries-per-key is ragged and both numbers are asserted separately.
+declare -A BASE_RESTATE_SCHED # key "pod" -> scheduled invocation count
+declare -A BASE_ELECTRIC_HANDLE # key "pod" -> shape handle before the reset (must CHANGE after)
+declare -A BASE_ELECTRIC_ROWS   # key "pod" -> shape row count before the reset
+declare -A BASE_TOPIC_HW      # key "pod|topic|partition" -> high watermark
+declare -A ORIG_REPLICAS      # key deployment name -> replica count before quiesce
+
+phase1_baseline() {
+  echo
+  echo "=== PHASE 1: baseline (read-only) ==="
+
+  # Re-stamp the freshness boundary from the DATABASE clock (see the comment at
+  # RUN_STARTED_AT). Taken from the first discovered Postgres pod, before any
+  # mutation, so every later "is this row newer than the run?" question is asked
+  # in the same time base as the rows it is asking about.
+  if [ "${#POSTGRES_PODS[@]}" -gt 0 ]; then
+    local dbnow
+    dbnow="$(pg_query "${POSTGRES_PODS[0]}" "SELECT now()" || true)"
+    if [ -n "$dbnow" ]; then
+      RUN_STARTED_AT="$dbnow"
+      RUN_STARTED_AT_SOURCE="database clock on ${POSTGRES_PODS[0]}"
+    fi
+  fi
+  echo "  run boundary: $RUN_STARTED_AT  [$RUN_STARTED_AT_SOURCE]"
+
+  echo "--- stores ---"
+  local pod table cnt
+  for pod in "${POSTGRES_PODS[@]}"; do
+    for table in "${TABLES[@]}"; do
+      if pg_table_exists "$pod" "$table"; then
+        cnt="$(pg_count "$pod" "$table")"
+        BASE_STORE_COUNT["$pod|$table"]="$cnt"
+        printf '  %-28s %-28s %s\n' "$pod" "$table" "$cnt"
+      else
+        printf '  %-28s %-28s (table not present, skipped)\n' "$pod" "$table"
+      fi
+    done
+    if pg_table_exists "$pod" "audit_log"; then
+      cnt="$(pg_count "$pod" "audit_log")"
+      BASE_AUDIT_COUNT["$pod"]="$cnt"
+      printf '  %-28s %-28s %s   (EXCLUDED — recorded only to confirm UNCHANGED in phase 9)\n' \
+        "$pod" "audit_log" "$cnt"
+    fi
+  done
+
+  echo "--- restate ---"
+  # TWO numbers, deliberately. Measured 2026-09-27: 14 Virtual Object keys hold
+  # 84 state rows (6 entries each), so "how much state is there" has two correct
+  # answers and a predicted zero that names neither is unverifiable. Both are
+  # recorded and both are asserted in phase 9.
+  local keys rows sched
+  for pod in "${RESTATE_PODS[@]}"; do
+    keys="$(restate_count "$pod" "select count(distinct service_key) as n from state")"
+    rows="$(restate_count "$pod" "select count(*) as n from state")"
+    sched="$(restate_count "$pod" "select count(*) as n from sys_invocation where status = 'scheduled'")"
+    BASE_RESTATE_KEYS["$pod"]="${keys:-0}"
+    BASE_RESTATE_ROWS["$pod"]="${rows:-0}"
+    BASE_RESTATE_SCHED["$pod"]="${sched:-0}"
+    printf '  %-28s object-keys=%-5s state-rows=%-6s scheduled-invocations=%s\n' \
+      "$pod" "${keys:-0}" "${rows:-0}" "${sched:-0}"
+  done
+  # Measure the re-arm cadence NOW, while scheduled invocations still exist.
+  # After phase 3 there are none by design, so this is the only window in the
+  # run where the number can be read rather than assumed.
+  printf '  re-arm cadence (measured from scheduled_at -> scheduled_start_at): %ss\n' \
+    "$(measure_restate_cadence)"
+
+  echo "--- electric (shape handle + rows, per instance) ---"
+  local eport ehandle erows
+  for pod in "${ELECTRIC_PODS[@]}"; do
+    eport="$(electric_port "$pod")"
+    if [ -z "$eport" ]; then
+      printf '  %-52s port=UNMEASURED (no containerPort in spec — not guessed)\n' "$pod"
+      continue
+    fi
+    ehandle="$(electric_shape_handle "$pod" "$eport")"
+    erows="$(electric_shape_rows "$pod" "$eport")"
+    BASE_ELECTRIC_HANDLE["$pod"]="$ehandle"
+    BASE_ELECTRIC_ROWS["$pod"]="${erows:-0}"
+    printf '  %-52s port=%-5s rows=%-4s handle=%s\n' \
+      "$pod" "$eport" "${erows:-0}" "${ehandle:-UNMEASURED}"
+  done
+
+  echo "--- topics (per broker, per partition) ---"
+  local topic line part logstart hw
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic; do
+      [ -z "$topic" ] && continue
+      is_internal_topic "$topic" && continue
+      while read -r part logstart hw; do
+        [ -z "$part" ] && continue
+        BASE_TOPIC_HW["$pod|$topic|$part"]="$hw"
+        printf '  %-28s %-30s p%-3s log_start=%-8s hw=%s\n' "$pod" "$topic" "$part" "$logstart" "$hw"
+      done < <(topic_partitions "$pod" "$topic")
+    done < <(broker_topics "$pod")
+  done
+
+  echo "--- producers (current replica counts) ---"
+  local d rc
+  for d in "${PRODUCER_DEPLOYS[@]}"; do
+    rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+    printf '  %-40s replicas=%s\n' "$d" "${rc:-?}"
+  done
+
+  echo "=== end baseline ==="
+}
+
+# ===========================================================================
+# PHASE 2 — QUIESCE PRODUCERS. First mutation, before any state is cleared:
+# resetting into a live feed re-fills what the rest of this script is about
+# to empty, so nothing downstream can be trusted until producers are down.
+# Original replica counts are captured HERE, not assumed to be 1, because
+# phase 8 restores exactly what was recorded here.
+# ===========================================================================
+phase2_quiesce() {
+  echo
+  echo "=== PHASE 2: quiesce producers ==="
+  if $SKIP_PRODUCERS; then
+    skip_warning "PRODUCERS" \
+      "Producers stay at their current replica count. Any store, topic, or\n    Restate state cleared below will start refilling immediately from the\n    live feed — the rest of this reset's readings will not hold still."
+    return 0
+  fi
+  # Armed BEFORE the first scale, not after: a failure reading the very first
+  # replica count must already be covered. See emergency_restore_scales.
+  arm_scale_trap
+  local d rc
+  for d in "${PRODUCER_DEPLOYS[@]}"; do
+    rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+    ORIG_REPLICAS["$d"]="${rc:-1}"
+    if [ -z "$rc" ]; then
+      echo "WARNING: could not read current replica count for $d; recorded 1 as a" >&2
+      echo "         last resort. If that is wrong, phase 8 will restore it wrong." >&2
+    fi
+    maybe_run "scale $d to 0 (was ${ORIG_REPLICAS[$d]})" \
+      kubectl scale deploy -n "$NS" "$d" --replicas=0
+  done
+}
+
+# ===========================================================================
+# PHASE 3 — RESTATE. Per instance: cancel scheduled invocations FIRST, THEN
+# clear state per service. This order is LOAD-BEARING, not a preference:
+# the measured baseline is one self-re-arming timer per asset
+# (asset_logistics.py:477, AssetLogistics.on_timer re-arms unconditionally).
+# Clear state before cancelling and the very next tick fires against empty
+# state, emits "no telemetry observed" as DEGRADED, and reschedules itself —
+# recreating everything this phase just cleared. See
+# FINDING-2026-09-26-no-asset-eviction.md for the incident this order
+# prevents at single-asset scale; at whole-fleet scale it is worse, not
+# smaller.
+#
+# Service names are DISCOVERED from the state table's own group-by, never
+# hardcoded as AssetCM/AssetLogistics — a third Virtual Object service added
+# later must not require touching this script to be reset.
+# ===========================================================================
+phase3_restate() {
+  echo
+  echo "=== PHASE 3: restate (cancel scheduled invocations, then clear state) ==="
+  if $SKIP_RESTATE; then
+    skip_warning "RESTATE" \
+      "Scheduled invocations are not cancelled and Virtual Object state is not\n    cleared. The self-re-arming timer (asset_logistics.py:477) keeps firing;\n    every store this script empties below will be repopulated by Restate's\n    own next tick, on its own schedule, regardless of the producers' state."
+    return 0
+  fi
+
+  local pod raw ids id svc_raw services svc scheduled_n parsed_n
+  for pod in "${RESTATE_PODS[@]}"; do
+    echo "-- $pod --"
+
+    # 1. Scheduled invocations, cancelled BEFORE any clear.
+    raw="$(restate_json "$pod" "select id from sys_invocation where status = 'scheduled'")"
+    mapfile -t ids < <(json_field "$raw" "id")
+    scheduled_n="$(restate_count "$pod" "select count(*) as n from sys_invocation where status = 'scheduled'")"
+    parsed_n="${#ids[@]}"
+    # This cross-check now compares like with like: one id row per scheduled
+    # invocation against count(*) of the same predicate. (The earlier revision
+    # compared an object-key count against a state-row count — 14 against 84 —
+    # and would have aborted a correct run. See ROWS doc, call 1.)
+    if [ "$parsed_n" != "${scheduled_n:-0}" ]; then
+      echo "ERROR: $pod — read $parsed_n scheduled invocation id(s) but count(*)" >&2
+      echo "       reports ${scheduled_n:-'(unreadable)'}. Refusing to cancel a" >&2
+      echo "       possibly-incomplete list: a missed timer re-arms everything." >&2
+      OVERALL_FAIL=1
+      continue
+    fi
+    for id in "${ids[@]}"; do
+      if $DRY_RUN; then
+        maybe_run "cancel scheduled invocation $id on $pod (CLI)" true
+        continue
+      fi
+      echo "-> cancel scheduled invocation $id on $pod"
+      # Same -y / timeout reasoning as the state clear below: no tty here.
+      if ! kubectl exec -n "$NS" "$pod" -c restate -- \
+             timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$id"; then
+        # Admin-API fallback: the CLI path is primary ("Cancel via the
+        # restate CLI ... and/or the admin API"); this fills in the "and/or"
+        # with the exact syntax already measured working in
+        # FINDING-2026-09-26-no-asset-eviction.md, from a pod with curl.
+        # Wrapped in sh -c per the MSYS-URL-rewriting note above pg_query().
+        echo "   CLI cancel failed for $id on $pod — falling back to admin API" >&2
+        kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
+          "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'"
+      fi
+    done
+
+    # 2. Services with any state, cleared only now that their timers are cancelled.
+    svc_raw="$(restate_json "$pod" "select service_name, count(distinct service_key) as n from state group by service_name")"
+    mapfile -t services < <(json_field "$svc_raw" "service_name")
+    local svc_n
+    svc_n="$(restate_count "$pod" "select count(distinct service_name) as n from state")"
+    if [ "${#services[@]}" != "${svc_n:-0}" ]; then
+      echo "ERROR: $pod — parsed ${#services[@]} service name(s) but count query" >&2
+      echo "       reports ${svc_n:-'(unreadable)'}. Refusing to clear a possibly-" >&2
+      echo "       incomplete service list." >&2
+      OVERALL_FAIL=1
+      continue
+    fi
+    for svc in "${services[@]}"; do
+      if $DRY_RUN; then
+        maybe_run "clear state for service $svc on $pod" true
+        continue
+      fi
+      echo "-> clear state for service $svc on $pod"
+      # -y RESOLVED BY MEASUREMENT (ROWS doc, call 5). `restate --help` carries a
+      # global "-y, --yes: Auto answer yes to confirmation prompts. Default to
+      # false, unless running on ci". kubectl exec here has no tty, so WITHOUT -y
+      # a confirmation prompt makes this hang forever rather than fail — the one
+      # outcome an overnight/unattended reset must not have. The timeout is the
+      # belt to that braces: if anything still blocks, it fails loudly and the
+      # phase reports it instead of the script sitting on a dead prompt.
+      if ! kubectl exec -n "$NS" "$pod" -c restate -- \
+             timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc"; then
+        # -f/--force is documented for a version mismatch between CLI and
+        # server. Not used as a first attempt on purpose — it is an escape
+        # hatch for exactly one failure mode, and using it unconditionally
+        # would hide every OTHER reason a clear could fail.
+        echo "   plain clear failed for $svc on $pod — retrying with -f/--force" >&2
+        echo "   (version-mismatch escape hatch; see PREDICTION doc §3.3)" >&2
+        kubectl exec -n "$NS" "$pod" -c restate -- \
+          timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc" -f
+      fi
+    done
+  done
+}
+
+# ===========================================================================
+# PHASE 4 — TOPICS.
+#
+# JUDGMENT CALL 10. The header this replaces argued that delete-and-recreate
+# would need this script to restate every topic's partition count and
+# cleanup policy — a second copy of the chart's topic matrix that drifts —
+# and that trimming needed no such knowledge. That argument is correct for
+# the topics `rpk topic trim-prefix` can actually touch, and wrong for the
+# rest: proven 2026-09-27 on scratch topics, trim-prefix returns
+# POLICY_VIOLATION when a topic's cleanup.policy is pure `compact`, and only
+# succeeds when the policy is `compact,delete`. 53 topics on the lab (13
+# each on hq/edge-01/edge-02/edge-03, 1 on region-east — all state topics or
+# Faust changelogs) are pure `compact`. Trimming cannot empty them at any
+# setting; the split is textual and absolute:
+#
+#   cleanup.policy contains "delete"  -> trim (unchanged path, below)
+#   cleanup.policy is pure "compact"  -> delete, then recreate from a capture
+#
+# THE OLD OBJECTION, ANSWERED. The config this recreate needs is not
+# restated from this script's own knowledge of the chart — it is CAPTURED
+# from the live broker immediately before that topic's delete (see
+# topic_shape/topic_dynamic_config and the capture store above
+# is_internal_topic). There is no second copy of the chart's topic matrix to
+# drift, because nothing here claims to know the matrix; it reads whatever
+# the broker is actually running right now. And a capture that is never
+# checked against what comes back is only a hope that the recreate matched
+# it — assert_topic_matches_capture is what turns that into an actual check,
+# on every recreated topic, every run.
+#
+# WHY CONSUMERS ARE QUIESCED, AND WHY THIS IS PER-TOPIC, NOT BULK.
+# auto_create_topics_enabled=true on every broker (measured 2026-09-27): the
+# instant ANY consumer or producer touches a topic that does not currently
+# exist, the broker recreates it with DEFAULT config — 1 partition,
+# cleanup.policy=delete, none of the 53 topics' real settings. Every one of
+# these 53 topics has at least one live consumer group (measured fact 4), so
+# between this phase's `rpk topic delete` and its `rpk topic create`, a
+# consumer group that is still running WILL win the race and hand this
+# script a topic to "recreate" that the broker already auto-created wrong.
+# That is exactly the state assert_topic_matches_capture exists to catch —
+# but catching it after the fact is a fallback, not a plan, so the state
+# consumers are scaled to zero before any delete happens at all (see
+# quiesce_state_consumers below). And because the danger window is "topic
+# does not exist yet", each pure-compact topic is deleted AND recreated
+# before the next one is even looked at — deleting all 53 first and creating
+# all 53 second would hold every one of them open to the auto-create race
+# for the full duration of the batch, not just its own turn.
+#
+# STILL TRUE, UNCHANGED FROM THE ORIGINAL HEADER:
+#
+# Faust's changelog topics need no special-casing: they are ordinary topics
+# on these same brokers and are swept in by the same per-broker enumeration,
+# as long as they are not internal-prefixed (they are not).
+#
+# `rpk topic trim-prefix` sets the log START offset; it does NOT zero the
+# high watermark. The predicted post-reset state for a trimmed topic is
+# log_start == high_watermark, not high_watermark == 0 — read the high
+# watermark first, per partition, and trim exactly to it.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Consumer quiesce for the delete-and-recreate topics only (STATE_CONSUMER_
+# DEPLOYS, discovered above). Same shape as phase2_quiesce's producer
+# quiesce — read .spec.replicas, store it in the SAME ORIG_REPLICAS array
+# keyed by deployment name (producer and state-consumer deployment names do
+# not collide), scale to 0 through maybe_run — plus one thing phase 2 does
+# not need: a wait for the pods to actually be gone, because a Deployment
+# that still has a live pod mid-termination can still hold an open consumer
+# session against the very topic this phase is about to delete.
+#
+# The EXIT trap is installed by the caller the moment it decides to call
+# this, not inside this function — the moment that matters is "consumers
+# are now being taken down", and phase4_topics knows that before this
+# function's first line runs.
+# ---------------------------------------------------------------------------
+quiesce_state_consumers() {
+  echo "-- quiescing state consumers (recreate-eligible topics are about to" \
+       "be deleted; a live consumer would auto-create one back at broker" \
+       "defaults the instant it reconnects — see the phase 4 header) --"
+  local d rc
+  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
+    rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+    ORIG_REPLICAS["$d"]="${rc:-1}"
+    if [ -z "$rc" ]; then
+      echo "WARNING: could not read current replica count for $d; recorded 1 as a" >&2
+      echo "         last resort. If that is wrong, the restore below will restore" >&2
+      echo "         it wrong." >&2
+    fi
+    maybe_run "scale $d to 0 (was ${ORIG_REPLICAS[$d]})" \
+      kubectl scale deploy -n "$NS" "$d" --replicas=0
+  done
+
+  if $DRY_RUN; then
+    echo "   [dry-run] not waiting for pods to terminate — nothing was actually" \
+         "scaled down"
+    return 0
+  fi
+
+  # Polled by DEPLOYMENT NAME, never by label: these nine families
+  # (projector-, tier-projector-, cm-service, tier-cm-, logistics-fusion-
+  # service, tier-fusion-, faust-, edge-hq-bridge-, tier-uplink-) do not
+  # share a uniform label — the same reason discover() itself matches by
+  # name-pattern rather than by listing pods (see the discover() comment).
+  local i cur
+  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
+    i=0
+    while [ "$i" -lt 60 ]; do
+      cur="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
+      if [ -z "$cur" ] || [ "$cur" = "0" ]; then
+        break
+      fi
+      sleep 2
+      i=$((i + 1))
+    done
+    if [ "$i" -ge 60 ]; then
+      echo "WARNING: $d still reports status.replicas=$cur after 120s of polling —" >&2
+      echo "         proceeding anyway. A pod that has not actually terminated yet" >&2
+      echo "         can still win the auto-create race against the recreate below." >&2
+    fi
+  done
+}
+
+restore_state_consumers() {
+  # Scale each state consumer back to what quiesce_state_consumers recorded.
+  # Safe to call twice: a maybe_run scale to an already-correct replica
+  # count is a no-op on the cluster. Safe to call on a deployment that was
+  # NEVER quiesced this run, too (ORIG_REPLICAS has no entry for it) — that
+  # is the normal case when this runs from the EXIT trap after quiesce_
+  # state_consumers dies partway through its own loop, and restoring an
+  # unrecorded count would be a guess, not a restore.
+  local d rc
+  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
+    rc="${ORIG_REPLICAS[$d]:-}"
+    [ -z "$rc" ] && continue
+    maybe_run "restore $d to $rc" \
+      kubectl scale deploy -n "$NS" "$d" --replicas="$rc"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# emergency_restore_scales — the SINGLE EXIT trap, covering BOTH scale-downs.
+#
+# WHY THIS EXISTS, and why it is not the per-phase trap it replaced.
+#
+# Every phase here is called BARE at the bottom of the file, not inside a
+# function that checks its status. Under `set -euo pipefail` that means a
+# `return 1` from any phase aborts the whole script on the spot — so
+# phase4_topics' new failure path (a topic that did not match its capture)
+# would abort BEFORE phase8_restore_producers ever ran, leaving the producers
+# phase 2 scaled to zero still at zero. That is precisely the half state this
+# script exists to prevent, and phase 4's own `trap 'restore_state_consumers'
+# EXIT` could not prevent it: it rescued the consumers and left the producers
+# down, and its matching `trap - EXIT` would have disarmed any script-wide
+# trap for phases 5 through 8 as a side effect. Two traps on EXIT are one
+# trap; the second silently wins.
+#
+# So: ONE trap, armed the first time anything is scaled down, restoring
+# everything with a recorded original count.
+#
+# Three properties a trap must have that an ordinary restore need not:
+#   * it cannot be allowed to fail. Each scale is guarded individually and
+#     prints the exact by-hand command on failure, because a trap that dies
+#     halfway leaves the operator with no list of what is still down.
+#   * it must not fire on a clean run. SCALES_RESTORED is set by phase 8, and
+#     a zero exit status returns immediately — otherwise a legitimately
+#     non-zero phase 9 (a --skip-* red-check SUCCEEDING) would print an
+#     alarming emergency block over an already-correct cluster.
+#   * it must respect --dry-run. A dry run that mutates the cluster from its
+#     error path is not a dry run.
+# ---------------------------------------------------------------------------
+SCALES_ARMED=false
+SCALES_RESTORED=false
+
+arm_scale_trap() {
+  $SCALES_ARMED && return 0
+  SCALES_ARMED=true
+  trap 'emergency_restore_scales' EXIT
+}
+
+emergency_restore_scales() {
+  local exit_code=$?
+  trap - EXIT   # never re-enter, whatever happens below
+  [ "$exit_code" -eq 0 ] && return 0
+  $SCALES_RESTORED && return 0
+
+  echo >&2
+  echo "!!! ABORTED AT EXIT $exit_code WITH WORKLOADS SCALED DOWN !!!" >&2
+  echo "    Restoring recorded replica counts so the cluster is not left" >&2
+  echo "    half reset. This is a ROLLBACK of the scale-downs only — every" >&2
+  echo "    store, topic and Restate mutation already made STAYS made, and" >&2
+  echo "    this cluster has NOT been reset. Read the phase output above" >&2
+  echo "    before re-running." >&2
+  echo >&2
+
+  local d rc
+  for d in "${PRODUCER_DEPLOYS[@]:-}" "${STATE_CONSUMER_DEPLOYS[@]:-}"; do
+    [ -z "$d" ] && continue
+    rc="${ORIG_REPLICAS[$d]:-}"
+    [ -z "$rc" ] && continue
+    echo "-> emergency restore $d to $rc" >&2
+    $DRY_RUN && continue
+    kubectl scale deploy -n "$NS" "$d" --replicas="$rc" >&2 || {
+      echo "   COULD NOT RESTORE $d. Run this by hand:" >&2
+      echo "     kubectl scale deploy -n $NS $d --replicas=$rc" >&2
+    }
+  done
+}
+
+phase4_topics() {
+  echo
+  echo "=== PHASE 4: topics (capture, then trim or delete-and-recreate) ==="
+  if $SKIP_TOPICS; then
+    skip_warning "TOPICS" \
+      "No partition is trimmed, and no topic is deleted or recreated. Every\n    compacted topic — trim-eligible or pure-compact alike — keeps its full\n    latest-per-key contents, including the Faust changelog topics phase 5\n    depends on being empty — if phase 5 also runs, it will republish the\n    SAME pre-reset fleet from state that was expected to be empty."
+    return 0
+  fi
+
+  mkdir -p "$TOPIC_CAPTURE_DIR"
+  echo "topic capture directory (kept after this run — evidence, not scratch): $TOPIC_CAPTURE_DIR"
+
+  # --- capture pass: ALL brokers, ALL non-internal topics, BEFORE any
+  # mutation. This has to be a separate, complete pass rather than
+  # capture-then-mutate per topic, because deciding whether to quiesce
+  # consumers at all needs the FULL tally (specifically: is there anything
+  # recreate-eligible) before the mutation pass can begin.
+  local pod topic policy shape dynamic capdir capfile
+  local -a CAPTURED_TOPICS=()
+  declare -A TOPIC_BUCKET=()
+  local trim_n=0 recreate_n=0
+
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic; do
+      [ -z "$topic" ] && continue
+      is_internal_topic "$topic" && continue
+
+      policy="$(topic_policy "$pod" "$topic")"
+      capdir="$TOPIC_CAPTURE_DIR/$pod"
+      mkdir -p "$capdir"
+      capfile="$capdir/$topic.cap"
+      shape="$(topic_shape "$pod" "$topic")"
+      dynamic="$(topic_dynamic_config "$pod" "$topic")"
+      { printf 'shape %s\n' "$shape"; printf '%s\n' "$dynamic"; } > "$capfile"
+
+      case "$policy" in
+        *delete*)
+          TOPIC_BUCKET["$pod|$topic"]="trim"
+          trim_n=$((trim_n + 1))
+          ;;
+        compact)
+          TOPIC_BUCKET["$pod|$topic"]="recreate"
+          recreate_n=$((recreate_n + 1))
+          ;;
+        *)
+          # Covers both an empty read (rpk/awk found no cleanup.policy row)
+          # and any value that is neither of the two measured shapes. An
+          # unreadable policy must not be silently treated as trim-eligible
+          # — trim-prefix's own POLICY_VIOLATION on a pure-compact topic is
+          # the entire reason this split exists, so guessing wrong here
+          # reproduces the bug this phase was rewritten to fix.
+          echo "WARNING: $pod/$topic — cleanup.policy read back as '${policy:-EMPTY}'," >&2
+          echo "         neither pure compact nor delete-containing. Skipping this" >&2
+          echo "         topic: not trimmed, not recreated." >&2
+          continue
+          ;;
+      esac
+      CAPTURED_TOPICS+=("$pod|$topic")
+    done < <(broker_topics "$pod")
+  done
+
+  echo "capture: $((trim_n + recreate_n)) topics ($trim_n trim-eligible, $recreate_n recreate-eligible)"
+
+  local quiesced=false
+  if [ "$recreate_n" -gt 0 ]; then
+    # Armed the moment the quiesce starts, and NOT disarmed by this phase —
+    # see emergency_restore_scales for why a per-phase trap was the wrong
+    # shape. `set -euo pipefail` with no trap is how this script has already
+    # been shown (call 9) to die mid-mutation and leave a state nothing
+    # cleans up; consumers scaled to zero is exactly that kind of state, so
+    # the restore must not depend on this phase reaching its own last line.
+    arm_scale_trap
+    quiesce_state_consumers
+    quiesced=true
+  else
+    echo "no recreate-eligible (pure-compact) topics found — skipping consumer quiesce"
+  fi
+
+  # --- mutation pass, in the SAME order the capture pass built
+  # CAPTURED_TOPICS in. Re-deriving this order by re-listing topics from the
+  # broker was rejected: calling broker_topics() a second time is exactly
+  # the auto-create race this phase exists to guard against, on the one
+  # call site where getting a DIFFERENT topic list than the capture pass
+  # saw would silently desync a topic from its own capture file.
+  local pt part logstart hw failure=""
+  local red_check_done=false
+  for pt in "${CAPTURED_TOPICS[@]}"; do
+    pod="${pt%%|*}"
+    topic="${pt#*|}"
+
+    if [ "${TOPIC_BUCKET[$pt]}" = "trim" ]; then
+      while read -r part logstart hw; do
+        [ -z "$part" ] && continue
+        if [ "$logstart" = "$hw" ]; then
+          printf '  %-28s %-30s p%-3s already at hw=%s — nothing to trim\n' \
+            "$pod" "$topic" "$part" "$hw"
+          continue
+        fi
+        # JUDGMENT CALL 9 — found by the first REAL run, which the dry-run could
+        # not have caught, because --dry-run prints this command instead of
+        # executing it.
+        #
+        # `rpk topic trim-prefix` PROMPTS: "Confirm deletion of all data before
+        # the new start offsets? (Y/n)". `kubectl exec` here has no tty, so the
+        # prompt read EOF, rpk exited 1, and `set -e` killed the script on the
+        # very first trim — after producers were already scaled down and Restate
+        # state was already cleared. That is the exact half state this script
+        # exists to prevent: stores full, topics full, producers down.
+        #
+        # This is the same family as call 5 (`restate` needs `-y`). Call 5 was
+        # taken by reading `restate --help`; nobody read `rpk trim-prefix
+        # --help`. The lesson generalises: EVERY mutating CLI in this script is
+        # assumed to prompt until its help text says otherwise.
+        #
+        # `--no-confirm` ("Disable confirmation prompt"), plus a timeout, so a
+        # future prompt on some other path fails fast instead of hanging.
+        maybe_run "trim $topic partition $part on $pod: log_start $logstart -> $hw" \
+          kubectl exec -n "$NS" "$pod" -c redpanda -- \
+          timeout "${RPK_CMD_TIMEOUT:-60}" \
+          rpk topic trim-prefix "$topic" --offset "$hw" --partitions "$part" --no-confirm
+      done < <(topic_partitions "$pod" "$topic")
+      continue
+    fi
+
+    # pure compact -> delete, then recreate from this topic's own capture.
+    #
+    # `rpk topic delete` takes NO confirmation flag and does not prompt —
+    # CHECKED against `rpk topic delete --help` (2026-09-27): its only flags
+    # are -h/--help and -r/--regex. Unlike trim-prefix (call 9), there is no
+    # prompt to defeat here, so no --no-confirm equivalent exists or is
+    # needed — but it is still wrapped in a timeout, because a hang is still
+    # a hang whether or not a prompt caused it.
+    #
+    # That `-r` is `--regex` on THIS subcommand, not `--replicas`: a stray
+    # `-r <n>` meant for create would instead turn "$topic" into a regex on
+    # delete and could match (and delete) more than the one topic intended.
+    # Not used here for exactly that reason.
+    capfile="$TOPIC_CAPTURE_DIR/$pod/$topic.cap"
+    maybe_run "delete $topic on $pod (pure-compact — will be recreated from its capture)" \
+      kubectl exec -n "$NS" "$pod" -c redpanda -- \
+      timeout "${RPK_CMD_TIMEOUT:-60}" \
+      rpk topic delete "$topic"
+
+    # Parse this topic's own capture back into create flags. `_` discards
+    # the literal "shape" label the capture file's first line starts with.
+    local _ cap_partitions cap_replicas
+    read -r _ cap_partitions cap_replicas < "$capfile"
+    local -a create_configs=()
+    local kv
+    while IFS= read -r kv; do
+      [ -z "$kv" ] && continue
+      create_configs+=(-c "$kv")
+    done < <(tail -n +2 "$capfile")
+
+    # Long forms --partitions/--replicas on create, never -p/-r: create's -r
+    # is --replicas, delete's -r above is --regex — same short flag, two
+    # meanings, on sibling subcommands of the same CLI. -c/--topic-config is
+    # a repeatable stringArray, built here as a bash ARRAY and expanded as
+    # "${create_configs[@]}" rather than one string, so a value containing a
+    # space cannot be word-split into a second, wrong flag.
+    #
+    # --if-not-exists is available on create and deliberately NOT used: the
+    # whole point of this path is that the topic must not already exist
+    # when this runs. Masking a pre-existing topic would mask precisely the
+    # auto-create race the assertion below exists to catch.
+    maybe_run "recreate $topic on $pod from capture ($cap_partitions partitions, $cap_replicas replicas)" \
+      kubectl exec -n "$NS" "$pod" -c redpanda -- \
+      timeout "${RPK_CMD_TIMEOUT:-60}" \
+      rpk topic create "$topic" --partitions "$cap_partitions" --replicas "$cap_replicas" \
+      "${create_configs[@]}"
+
+    # Called unconditionally, dry-run or not — see the comment on this
+    # function for why a dry run trivially (and correctly) passes here
+    # rather than being special-cased out.
+    if ! assert_topic_matches_capture "$pod" "$topic"; then
+      failure="$pt"
+      break
+    fi
+
+    if $RED_CHECK_TOPIC_CONFIG && ! $red_check_done; then
+      red_check_done=true
+      if $DRY_RUN; then
+        echo "  --red-check-topic-config: skipped under --dry-run — the probe has to" \
+             "actually perturb cleanup.policy to test whether the assertion notices," \
+             "and --dry-run means nothing here is allowed to actually mutate."
+      else
+        echo "  --red-check-topic-config: probing $topic on $pod"
+        # cleanup.policy is the perturbation field because it is the one
+        # dynamic key present on all 53 recreate-eligible topics (the
+        # changelogs carry nothing else), and compact,delete is a value the
+        # broker accepts — so this tests the ASSERTION, not rpk's input
+        # validation.
+        maybe_run "red-check: perturb cleanup.policy on $topic ($pod)" \
+          kubectl exec -n "$NS" "$pod" -c redpanda -- \
+          timeout "${RPK_CMD_TIMEOUT:-60}" \
+          rpk topic alter-config "$topic" --set cleanup.policy=compact,delete
+
+        if assert_topic_matches_capture "$pod" "$topic"; then
+          echo "RED-CHECK FAILED: the capture assertion did not notice a perturbed" >&2
+          echo "cleanup.policy — it cannot be trusted to notice an auto-created topic" >&2
+          echo "either." >&2
+          # Restore runs on this path too — a real config change was just
+          # made to the lab, and a failed red-check is not a reason to
+          # leave it there.
+          maybe_run "red-check: restore cleanup.policy on $topic ($pod)" \
+            kubectl exec -n "$NS" "$pod" -c redpanda -- \
+            timeout "${RPK_CMD_TIMEOUT:-60}" \
+            rpk topic alter-config "$topic" --set cleanup.policy=compact
+          failure="$pt"
+          break
+        fi
+
+        maybe_run "red-check: restore cleanup.policy on $topic ($pod)" \
+          kubectl exec -n "$NS" "$pod" -c redpanda -- \
+          timeout "${RPK_CMD_TIMEOUT:-60}" \
+          rpk topic alter-config "$topic" --set cleanup.policy=compact
+
+        if ! assert_topic_matches_capture "$pod" "$topic"; then
+          echo "RED-CHECK: restoring cleanup.policy did not repair the assertion —" >&2
+          echo "the probe could not put $topic back the way it found it." >&2
+          failure="$pt"
+          break
+        fi
+        echo "  --red-check-topic-config: PASSED ($topic on $pod)"
+      fi
+    fi
+  done
+
+  # The normal restore. The trap stays ARMED: phase 2's producers are still at
+  # zero until phase 8, and disarming here would hand phases 5-8 the very gap
+  # this trap was added to close.
+  if $quiesced; then
+    restore_state_consumers
+  fi
+
+  if [ -n "$failure" ]; then
+    echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} did not match its" >&2
+    echo "captured configuration. The capture directory holds the expected" >&2
+    echo "form for every topic this run touched: $TOPIC_CAPTURE_DIR" >&2
+    return 1
+  fi
+}
+
+# ===========================================================================
+# PHASE 5 — AGGREGATOR. Restart the Faust deployments ONLY NOW. Phase 4's
+# changelog trim must already have happened: Faust replays its changelog
+# topic on startup and restores every key from it, so restarting before the
+# trim (or skipping the trim, --skip-topics/--skip-aggregator's own residue)
+# produces a reset that LOOKS complete — stores empty, topics trimmed — while
+# the regional rollup still carries the pre-reset fleet. This is the
+# documented red-check (PREDICTION doc §5): --skip-aggregator exists
+# specifically to make that failure mode visible on demand instead of
+# hypothetical.
+# ===========================================================================
+phase5_aggregator() {
+  echo
+  echo "=== PHASE 5: aggregator (restart Faust, after topics are trimmed) ==="
+  if $SKIP_AGGREGATOR; then
+    skip_warning "AGGREGATOR" \
+      "Faust deployments are NOT restarted. THIS IS THE DOCUMENTED RED-CHECK\n    (PREDICTION doc §5): expect every store to read 0 and every topic to\n    read trimmed, while the regional rollup (region-fleet-summary) keeps\n    serving the PRE-RESET asset_count from the in-memory Faust table that\n    was never asked to reload. If phase 9 does NOT show that residue, the\n    aggregator step was never load-bearing and this red-check has failed."
+    return 0
+  fi
+  local d
+  for d in "${FAUST_DEPLOYS[@]}"; do
+    maybe_run "rollout restart $d" kubectl rollout restart deploy -n "$NS" "$d"
+  done
+}
+
+# ===========================================================================
+# PHASE 6 — STORES. DELETE, never TRUNCATE (see header). audit_log is never
+# touched — see EXCLUDED_TABLES and delete_table()'s own refusal.
+# ===========================================================================
+phase6_stores() {
+  echo
+  echo "=== PHASE 6: stores (DELETE FROM, never TRUNCATE, never audit_log) ==="
+  if $SKIP_STORES; then
+    skip_warning "STORES" \
+      "No table is touched. Every projector table keeps its pre-reset rows —\n    telemetry_latest_state, asset_cm_state, etc. — and the UI will keep\n    showing the previous run's fleet regardless of what Restate or Kafka\n    now hold."
+    return 0
+  fi
+  local pod table
+  for pod in "${POSTGRES_PODS[@]}"; do
+    for table in "${TABLES[@]}"; do
+      if pg_table_exists "$pod" "$table"; then
+        delete_table "$pod" "$table"
+      else
+        printf '  %-28s %-28s (table not present, skipped)\n' "$pod" "$table"
+      fi
+    done
+  done
+}
+
+# ===========================================================================
+# PHASE 7 — ELECTRIC. Delete the pods; there is no PVC and no mounted
+# volume on electric-sync or any tier-electric-* (hub.yaml:99-120), so shape
+# logs live only in the container filesystem. Deleting the pod IS the
+# reset — clients rebuild shapes against a new handle on their next request.
+# Run after stores are emptied (phase 6), so the shapes clients rebuild
+# reflect the reset data, not the old fleet re-synced into a fresh shape.
+# ===========================================================================
+phase7_electric() {
+  echo
+  echo "=== PHASE 7: electric (delete pods — no volume, deletion is the reset) ==="
+  if $SKIP_ELECTRIC; then
+    skip_warning "ELECTRIC" \
+      "Electric pods are not deleted, so their existing shape logs are not\n    discarded. A client holding an old shape handle can keep being served\n    an append-only log seeded from before the reset."
+    return 0
+  fi
+  local pod
+  for pod in "${ELECTRIC_PODS[@]}"; do
+    maybe_run "delete electric pod $pod (discards its shape logs)" \
+      kubectl delete pod -n "$NS" "$pod"
+  done
+}
+
+# ===========================================================================
+# PHASE 8 — RESTORE PRODUCERS. Scale back to what phase 2 recorded, never to
+# an assumed 1 — a producer legitimately running more than one replica would
+# come back short, quietly, and the shortfall would look like a healthy
+# demo running at reduced load rather than an operator error.
+# ===========================================================================
+phase8_restore_producers() {
+  echo
+  echo "=== PHASE 8: restore producers to their original replica counts ==="
+  if $SKIP_PRODUCERS; then
+    skip_warning "PRODUCERS (restore)" \
+      "Nothing to restore — phase 2 never scaled anything down for this run."
+    # Still the end of the scale-down window: phase 4 may have quiesced and
+    # already restored the state consumers even with --skip-producers, and a
+    # red-check's non-zero phase 9 must not read as an emergency.
+    SCALES_RESTORED=true
+    return 0
+  fi
+  local d rc
+  for d in "${PRODUCER_DEPLOYS[@]}"; do
+    rc="${ORIG_REPLICAS[$d]:-}"
+    if [ -z "$rc" ]; then
+      echo "ERROR: no recorded original replica count for $d — refusing to guess" >&2
+      echo "       (this should be impossible unless phase 2 was skipped for" >&2
+      echo "       this deployment specifically; check discovery output above)." >&2
+      OVERALL_FAIL=1
+      continue
+    fi
+    maybe_run "scale $d back to $rc" \
+      kubectl scale deploy -n "$NS" "$d" --replicas="$rc"
+  done
+  # Every scale-down this run made has now been undone by its own phase, so a
+  # non-zero exit from phase 9 — which is what a --skip-* red-check SUCCEEDING
+  # looks like — must not print an emergency-rollback block over a cluster
+  # whose replica counts are already correct.
+  SCALES_RESTORED=true
+}
+
+# ===========================================================================
+# PHASE 9 — VERIFY. Re-read every §4 reading and print PREDICTED vs ACTUAL,
+# PASS/FAIL per line. Exits non-zero if anything fails.
+#
+# Skip flags do NOT soften this phase. A --skip-aggregator run is SUPPOSED
+# to fail its aggregator line — that failure is the red-check succeeding,
+# not the script malfunctioning (PREDICTION doc §5).
+#
+# Restate is re-checked TWICE: immediately, and again after one full
+# re-arm cadence. A check taken immediately after `state clear` cannot see
+# the only failure mode that matters here — the object re-arming on its own
+# next tick — because that tick has not happened yet.
+#
+# THE CADENCE IS MEASURED, NOT CARRIED (ROWS doc, call 2). An earlier revision
+# inferred 60s from a store's observed update interval. Read off a scheduled
+# invocation directly, the real re-arm is 30s:
+#
+#   scheduled_at        2026-09-27T04:09:18.650Z
+#   scheduled_start_at  2026-09-27T04:09:48.649Z     -> 30.0s
+#
+# i.e. the inference was 2x the truth. Here the error was in the safe
+# direction by luck; the same mistake the other way is the false-FROZEN bug
+# found earlier tonight — a check sampling faster than the thing it samples.
+# So measure_restate_cadence() reads the delta from the cluster and the wait
+# is floored at 2x it, for the same reason check-advancing.sh needs an
+# interval floor: one period is not enough to distinguish "did not re-arm"
+# from "has not re-armed yet".
+#
+# RESTATE_CADENCE_SECONDS still overrides, and is used as the fallback when
+# there is no scheduled invocation to measure (e.g. a cluster already at 0).
+# ===========================================================================
+RESTATE_CADENCE_SECONDS="${RESTATE_CADENCE_SECONDS:-30}"
+AGGREGATOR_POLL_TIMEOUT_SECONDS="${AGGREGATOR_POLL_TIMEOUT_SECONDS:-90}"
+AGGREGATOR_POLL_INTERVAL_SECONDS="${AGGREGATOR_POLL_INTERVAL_SECONDS:-10}"
+
+report() {
+  local component="$1" predicted="$2" actual="$3" status
+  if [ "$predicted" = "$actual" ]; then status=PASS; else status=FAIL; OVERALL_FAIL=1; fi
+  printf '  %-55s predicted=%-14s actual=%-14s %s\n' "$component" "$predicted" "$actual" "$status"
+}
+
+verify_stores() {
+  echo "--- stores: predicted 0 rows (audit_log predicted UNCHANGED) ---"
+  local pod table cnt base
+  for pod in "${POSTGRES_PODS[@]}"; do
+    for table in "${TABLES[@]}"; do
+      if pg_table_exists "$pod" "$table"; then
+        cnt="$(pg_count "$pod" "$table")"
+        report "stores $pod/$table" "0" "$cnt"
+      fi
+    done
+    if pg_table_exists "$pod" "audit_log"; then
+      cnt="$(pg_count "$pod" "audit_log")"
+      base="${BASE_AUDIT_COUNT[$pod]:-}"
+      if [ -z "$base" ]; then
+        printf '  %-55s no phase-1 baseline recorded (ran with --verify-only?) actual=%s\n' \
+          "stores $pod/audit_log (UNCHANGED?)" "$cnt"
+      else
+        report "stores $pod/audit_log (UNCHANGED)" "$base" "$cnt"
+      fi
+    fi
+  done
+}
+
+verify_topics() {
+  echo "--- topics: predicted log_start == high_watermark on every partition ---"
+  local pod topic part logstart hw
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic; do
+      [ -z "$topic" ] && continue
+      is_internal_topic "$topic" && continue
+      while read -r part logstart hw; do
+        [ -z "$part" ] && continue
+        report "topics $pod/$topic/p$part" "$hw" "$logstart"
+      done < <(topic_partitions "$pod" "$topic")
+    done < <(broker_topics "$pod")
+  done
+}
+
+verify_restate_once() {
+  local label="$1" pod keys rows sched
+  echo "--- restate ($label): predicted 0 object keys AND 0 state rows ---"
+  for pod in "${RESTATE_PODS[@]}"; do
+    # Both numbers asserted. On the lab these read 14 and 84 before a reset, so
+    # a predicted zero that names only one of them is only half a check.
+    keys="$(restate_count "$pod" "select count(distinct service_key) as n from state")"
+    rows="$(restate_count "$pod" "select count(*) as n from state")"
+    sched="$(restate_count "$pod" "select count(*) as n from sys_invocation where status = 'scheduled'")"
+    report "restate $pod object-keys ($label)" "0" "${keys:-0}"
+    report "restate $pod state-rows ($label)" "0" "${rows:-0}"
+    printf '  %-55s scheduled-invocations=%s (informational — the object re-arming\n' \
+      "restate $pod ($label)" "${sched:-0}"
+    printf '  %-55s   shows up as scheduled-invocations>0 alongside state-rows>0)\n' ""
+  done
+}
+verify_aggregator() {
+  echo "--- aggregator: predicted a FRESH rollup arrives carrying asset_count=0 ---"
+  # ==========================================================================
+  # JUDGMENT CALL 8 — found by the dry-run, and it invalidated the original
+  # check outright rather than merely breaking it.
+  #
+  # The original polled `rpk topic consume region-fleet-summary` and grepped the
+  # value for `"asset_count": N`. That can never match: region-fleet-summary
+  # carries PROTOBUF (openddil/regional/v1/region_fleet_summary.proto), not
+  # JSON. A live record off the lab is 93 bytes of wire format —
+  #
+  #   0a 0b "region-east"   field 1 (region_id)
+  #   10 05                 field 2 (nominal)         = 5
+  #   18 01                 field 3 (degraded)        = 1
+  #   30 06                 field 6 (asset_count)     = 6
+  #   3a 0c ...             field 7 (observed_at)
+  #
+  # — so the grep found nothing, `count` stayed empty, and the poll ran its full
+  # window and then declared UNMEASURED. The check would have reported a FAIL
+  # forever, on a correct reset, for a reason that had nothing to do with the
+  # aggregator. It was unfalsifiable, which is worse than absent.
+  #
+  # Rather than hand-roll a protobuf field walker in bash (wrong tool, and it
+  # would have to skip length-delimited fields correctly to stay right as the
+  # message grows), this reads the value where the REAL consumer has already
+  # decoded it: the projector UPSERTs each record into `region_fleet_summary`,
+  # whose `asset_count` column is that same field 6. That is a strictly stronger
+  # assertion than the topic read — it proves topic -> projector -> table, not
+  # just that bytes exist on a partition.
+  #
+  # FRESHNESS IS THE WHOLE TRICK. Phase 6 DELETEs this table, so "0 rows" alone
+  # proves only that the delete ran, not that the aggregator came back. The
+  # assertion is therefore: a row whose `updated_at` is later than this run's
+  # start exists, AND its asset_count is 0. That distinguishes the three cases
+  # the old check collapsed into one — no rollup arrived (UNMEASURED), a rollup
+  # arrived carrying the pre-reset count (FAIL, the §5 red-check), and a rollup
+  # arrived carrying 0 (PASS).
+  #
+  # THE WINDOW STAYS >2x THE EMIT PERIOD (call 3). The rollup is emitted by a 30s
+  # @app.timer (aggregator_app.py:160), not by input arrival, so 30s is its
+  # shortest possible advance interval by construction. The 90s default spans at
+  # least two emits. Do not lower it below 60s: sampling a 30s emitter over 10s
+  # is exactly how check-advancing.sh produced a false FROZEN.
+  # ==========================================================================
+  local pod fresh maxcount elapsed=0
+  pod="$(printf '%s\n' "${POSTGRES_PODS[@]}" | grep -E -- '-region-east(-[0-9]+)?$' | head -1 || true)"
+  if [ -z "$pod" ]; then
+    # Fall back to the hub, which also carries the projection.
+    pod="$(printf '%s\n' "${POSTGRES_PODS[@]}" | grep -E -- 'postgres-hq(-[0-9]+)?$' | head -1 || true)"
+  fi
+  if [ -z "$pod" ]; then
+    echo "  no region-east or hq postgres pod discovered — cannot read region_fleet_summary"
+    OVERALL_FAIL=1
+    return
+  fi
+  echo "  reading the decoded projection on $pod (rows newer than $RUN_STARTED_AT)"
+  while [ "$elapsed" -lt "$AGGREGATOR_POLL_TIMEOUT_SECONDS" ]; do
+    fresh="$(pg_query "$pod" \
+      "SELECT count(*) FROM region_fleet_summary WHERE updated_at > '${RUN_STARTED_AT}'::timestamptz" || true)"
+    if [ -n "$fresh" ] && [ "$fresh" != "0" ]; then
+      maxcount="$(pg_query "$pod" \
+        "SELECT coalesce(max(asset_count),-1) FROM region_fleet_summary WHERE updated_at > '${RUN_STARTED_AT}'::timestamptz" || true)"
+      echo "  $fresh fresh rollup row(s) landed since the run started"
+      report "aggregator region_fleet_summary asset_count (max over fresh rows)" \
+        "0" "${maxcount:--1}"
+      return
+    fi
+    sleep "$AGGREGATOR_POLL_INTERVAL_SECONDS"
+    elapsed=$((elapsed + AGGREGATOR_POLL_INTERVAL_SECONDS))
+  done
+  printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> FAIL\n' \
+    "aggregator region_fleet_summary asset_count"
+  echo "     no region_fleet_summary row with updated_at > ${RUN_STARTED_AT} appeared within" \
+       "${AGGREGATOR_POLL_TIMEOUT_SECONDS}s."
+  echo "     UNMEASURED, not zero: the prediction is 'a rollup arrives and carries 0', and an"
+  echo "     empty table does not verify it — phase 6 emptied it. Either the aggregator did not"
+  echo "     come back, the projector is not consuming, or the window was shorter than the 30s"
+  echo "     emit period."
+  OVERALL_FAIL=1
+}
+
+verify_electric() {
+  echo "--- electric: predicted a NEW shape handle and 0 rows per instance ---"
+  # RESOLVED BY MEASUREMENT (ROWS doc, call 4). An earlier revision substituted
+  # a weaker "is the pod gone" check because the port and table were unknown.
+  # Measured: the shape API answers, returns an `electric-handle` header and a
+  # JSON array body, `curl` is present in the pod, and — the reason a hardcoded
+  # port would have read one instance in four — THE PORT DIFFERS PER INSTANCE:
+  # 5133 on the hub, 3000 on all three tiers. So the port is read from each
+  # pod's own container spec, never assumed.
+  #
+  # This is the real §4 check: a new handle proves the shape log was discarded,
+  # and 0 rows proves the client that re-creates it sees an empty fleet.
+  local pod port handle rows
+  for pod in "${ELECTRIC_PODS[@]}"; do
+    if ! kubectl get pod -n "$NS" "$pod" -o name >/dev/null 2>&1; then
+      # The pod name changed, which is itself the mechanism working. Re-resolve
+      # by the same family prefix so the shape can still be read.
+      pod="$(kubectl get pods -n "$NS" --no-headers -o custom-columns='N:.metadata.name' 2>/dev/null \
+        | grep -E "^$(printf '%s' "$pod" | sed -E 's/-[a-z0-9]+-[a-z0-9]+$//')" | head -1 || true)"
+      [ -z "$pod" ] && continue
+    fi
+    port="$(electric_port "$pod")"
+    handle="$(electric_shape_handle "$pod" "$port")"
+    rows="$(electric_shape_rows "$pod" "$port")"
+    if [ -z "$handle" ]; then
+      printf '  %-55s PREDICTED=new-handle  ACTUAL=UNMEASURED -> FAIL\n' "electric $pod handle"
+      echo "     shape endpoint on port ${port:-?} did not answer. UNMEASURED, not zero."
+      OVERALL_FAIL=1
+      continue
+    fi
+    # A handle that differs from the pre-reset one is the pass condition. An
+    # unchanged handle means the shape log survived, which is the failure this
+    # phase exists to catch.
+    if [ "$handle" = "${BASE_ELECTRIC_HANDLE[$pod]:-}" ]; then
+      report "electric $pod shape-handle" "new handle" "UNCHANGED ($handle)"
+    else
+      report "electric $pod shape-handle" "new handle" "new handle ($handle)"
+    fi
+    report "electric $pod shape-rows" "0" "${rows:-0}"
+  done
+}
+
+phase9_verify() {
+  echo
+  echo "=== PHASE 9: verify (PREDICTED vs ACTUAL) ==="
+
+  if $SKIP_STORES; then
+    skip_warning "STORES (verify)" "stores were not reset; the lines below are expected to FAIL."
+  fi
+  verify_stores
+
+  if $SKIP_TOPICS; then
+    skip_warning "TOPICS (verify)" "topics were not trimmed; the lines below are expected to FAIL."
+  fi
+  verify_topics
+
+  if $SKIP_RESTATE; then
+    skip_warning "RESTATE (verify)" "restate was not reset; the lines below are expected to FAIL."
+  fi
+  verify_restate_once "immediate"
+
+  if $SKIP_AGGREGATOR; then
+    skip_warning "AGGREGATOR (verify)" \
+      "Faust was not restarted; this line is EXPECTED to FAIL — that is the red-check (PREDICTION doc §5)."
+  fi
+  verify_aggregator
+
+  if $SKIP_ELECTRIC; then
+    skip_warning "ELECTRIC (verify)" "electric pods were not deleted; the line below is expected to FAIL."
+  fi
+  verify_electric
+
+  if ! $SKIP_RESTATE; then
+    echo
+    local wait_s
+    wait_s=$(( $(measure_restate_cadence) * 2 ))
+    echo "waiting ${wait_s}s (2x the measured re-arm cadence) before re-checking" \
+         "restate — a check run immediately after 'state clear' cannot see the timer" \
+         "re-arming itself, because that tick has not fired yet, and ONE period" \
+         "cannot tell 'did not re-arm' from 'has not re-armed yet'"
+    sleep "$wait_s"
+    verify_restate_once "after ${wait_s}s (2x cadence)"
+  fi
+
+  echo
+  if [ "$OVERALL_FAIL" -eq 0 ]; then
+    echo "reset-scenario: ALL VERIFIED READINGS MATCH PREDICTION"
+  else
+    echo "reset-scenario: AT LEAST ONE READING DID NOT MATCH PREDICTION" >&2
+    echo "  If you passed a --skip-* flag, some FAILs above are the expected" >&2
+    echo "  residue that flag documents, not a bug in this run." >&2
+  fi
+  return "$OVERALL_FAIL"
+}
+
+# ===========================================================================
+# main
+# ===========================================================================
+if $BASELINE_ONLY; then
+  phase1_baseline
+  exit 0
+fi
+
+if $VERIFY_ONLY; then
+  # --verify-only skips phase 1, so it never gets the database-clock boundary,
+  # and the workstation value stamped at startup is LATER than any rollup this
+  # mode is meant to inspect — every row would look stale and the aggregator
+  # line would read UNMEASURED on a perfectly reset cluster. So this mode takes
+  # its own boundary: the DB clock, backed off by two emit periods, which is the
+  # narrowest window that is guaranteed to contain at least one rollup.
+  if [ "${#POSTGRES_PODS[@]}" -gt 0 ]; then
+    vo_now="$(pg_query "${POSTGRES_PODS[0]}" \
+      "SELECT now() - interval '$(( ${RESTATE_CADENCE_SECONDS:-30} * 2 )) seconds'" || true)"
+    if [ -n "$vo_now" ]; then
+      RUN_STARTED_AT="$vo_now"
+      RUN_STARTED_AT_SOURCE="database clock on ${POSTGRES_PODS[0]}, minus 2 emit periods (--verify-only)"
+    fi
+  fi
+  echo "run boundary: $RUN_STARTED_AT  [$RUN_STARTED_AT_SOURCE]"
+  phase9_verify
+  exit $?
+fi
+
+phase1_baseline
+phase2_quiesce
+phase3_restate
+phase4_topics
+phase5_aggregator
+phase6_stores
+phase7_electric
+phase8_restore_producers
+phase9_verify
+exit $?
