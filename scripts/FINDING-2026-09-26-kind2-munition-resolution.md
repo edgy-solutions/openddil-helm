@@ -9,6 +9,12 @@ tonight's no-eviction finding into a permanent effect.
 asset. Nothing anywhere warns. But the raw `kind=2` **does** survive to Silver,
 so the discriminator needed to fix this is already on the wire.
 
+**Confirmed end-to-end under compose (§8), not only read off the resolver.** One
+PDU in, one record out at a known offset, keyed `dis:1:1:2099`, decoding to
+`platform_variant='UNKNOWN'` with `kind=2` intact. One thing the decode added
+that reading the resolver had not: **`kind` is absent from the `asset_id`**, so
+no fleet query can exclude munitions by key — §8.3.
+
 ---
 
 ## 1. The claim that was on the books
@@ -138,46 +144,104 @@ The fix is one identifier. It is **not** a drive-by change: turning it on emits
 9 new startup warnings, so it wants to land deliberately, with either the
 `platform_reference` entries added or the warnings expected.
 
-## 8. The compose leg is blocked, and was not substituted
+## 8. The compose leg, run — Prediction 1 confirmed on the wire
 
-The dispatch asked for this "proven under compose". **It is not**, and I did not
-quietly run it somewhere else instead.
+**Updated 2026-09-26, after the daemon came up.** This section previously read
+*"the compose leg is blocked, and was not substituted"*. It is no longer
+blocked, and the probe has been run. The original blockage was a privileged
+Windows service (`com.docker.service` `Stopped`, `StartType: Manual`,
+`Start-Service` refused without elevation); I did not escalate unattended, and
+I did not substitute a different environment for the one the dispatch named.
 
-Docker Desktop's UI processes start, but the privileged Windows service
-`com.docker.service` is `Stopped` with `StartType: Manual`, the `docker-desktop`
-WSL distro is `Stopped`, and `Start-Service` returns
+### 8.1 Two preconditions, established before the send
+
+Neither is interesting on its own; without them the probe measures nothing.
+
+* **The container's ontology is byte-identical to the repo's.** `sha256` of
+  `/ontology/dis_entity_types.yaml` inside `redpanda-connect-01` equals the
+  `sha256` of `openddil-contracts/ontology/dis_entity_types.yaml`:
+  `bf3c6ef97558dae790b3c1aa994dbccc23a3ac28137da040e4548ff3558f4c4e`. Eleven
+  keys, all `1_*`, **zero** `2_*`. §4 asserted the single-source-of-truth
+  property from a `find`; this measures it.
+* **A clean offset floor.** `raw-sensor-stream` high-watermark **202** before
+  the send, log-start also 202 — so any new record is unambiguously the probe's.
+
+### 8.2 What was sent, and what arrived
+
+One Entity State PDU, the §3 tuple `2_1_225_1_1_2_0`, `entity=2099`, marking
+`MUNITION-X`. High-watermark went **202 → 203**: exactly one new record, key
+`dis:1:1:2099`, value 340 bytes, decoding cleanly as an `EntityTelemetryEvent`.
+
+| prediction | result |
+|---|---|
+| P1 event reaches Silver | **PASS** |
+| P2 `platform_variant == "UNKNOWN"` | **PASS** |
+| P3 `configuration_baseline` empty | **PASS** |
+| P4 `cbm_schema` empty | **PASS** |
+| P6 raw `kind` survives as `2` | **PASS** |
+
+(The probe script defines no P5; the numbering skips it.) Measured fields:
 
 ```
-Cannot open com.docker.service service on computer '.'
+asset_id               = dis:1:1:2099
+platform_variant       = 'UNKNOWN'
+platform_type          = 'Unrecognized DIS entity type - requires ontology curation'
+configuration_baseline = <absent>
+cbm_schema             = <absent>
+domain_authority       = <absent>
+dis_entity_type        = kind=2 domain=1 country=225 cat=1 sub=1 spec=2 extra=0
 ```
 
-— access denied; it needs elevation. I did not escalate unattended.
+**Prediction 1 was the open one and it is now closed:** delivery behaves as the
+resolver said. A munition-kind round is not dropped, not rejected, not logged as
+an error — it is admitted to the fleet as an asset with an unresolved variant,
+and the full decode is in `/c/tmp/rev51-run/31-kind2-decoded.txt`.
 
-**The probe is written and ready to run in one command** once the daemon is up:
+### 8.3 One thing the decode showed that the resolver reading did not
 
-```bash
-py -3 /c/tmp/rev51-run/kind2_probe.py
+**`kind` is not in the `asset_id`.** The key is `dis:1:1:2099` —
+`dis:<site>:<application>:<entity>`. The only place `kind=2` survives is inside
+`asset.dis_entity_type.kind`, and nothing downstream branches on it.
+
+Two consequences worth carrying:
+
+* **You cannot filter munitions out of a fleet query by key pattern.** There is
+  no prefix, suffix or field in the identifier that distinguishes a tracked
+  round from a tracked vehicle. Every "how many assets do we have" answer
+  includes them, and the only available discriminator requires decoding the
+  payload and reading a field no reader currently reads.
+* **A munition and a platform sharing site/application/entity would collide on
+  one key.** Not observed, and DIS numbering practice makes it unlikely rather
+  than impossible — but the identifier does not rule it out, and `kind` is
+  exactly the element that would have.
+
+This is the same shape as the finding in §5: the information needed to answer
+the question is present on the wire and absent from every place that would use
+it.
+
+### 8.4 What is still not proven, and why it is not about kind=2
+
+Whether an **`AssetLogistics` Virtual Object is created** for the round is
+**not** measured. `restate-server` is `Exited(255)` in this compose stack, and
+its final log lines show every Kafka subscription failing:
+
+```
+Decompression (codec 0x4) of message at 2 of 1051 bytes failed: Local: Not implemented
 ```
 
-It sends the §3 tuple with marker `entity=2099`, marking `MUNITION-X`, reads
-`raw-sensor-stream`, and checks P1–P6. It imports the repo's own
-`hero_scenario_v3/_helpers.py`, so the PDU layout and the Windows
-UDP-black-hole socat dodge are the ones the hero tests already use, and it
-lives in `/c/tmp/` so **nothing was added to the repo**. Minimal bring-up is
-the ingress leg only, not all 40 services:
+Codec `0x4` is **zstd** — an rdkafka-built-without-zstd condition that fails
+**every** asset in this compose stack, for any `kind`. It is a property of this
+stack, not of the probe and not of the munition question, so chasing it would
+have been new work rather than the item that was asked for. **It was not
+observed on the lab**, whose logistics path was producing current status
+throughout the night's measurements.
 
-```bash
-docker compose -f openddil-demo/docker-compose.yml up -d \
-  openddil-sensor-ingest-01 redpanda-connect-01
-```
-
-which pulls in `redpanda-edge-01`, `redpanda-init`, `toxiproxy` and
-`ontology-overlay` by `depends_on`.
-
-**What remains unproven without it:** that the transport behaves as the
-resolver says — that the event actually lands on `raw-sensor-stream`, and that
-an `AssetLogistics` object is actually created for the round. §4 proves the
-classification; it does not prove delivery. Prediction 1 is the open one.
+So the classification (§4) and the delivery (§8.2) are both measured; the
+timer-and-membership consequence in §9 still rests on reading
+`asset_logistics.py`, not on an observed object. §9's argument does not depend
+on it — a permanent `UNKNOWN` fleet member is already established by §8.2 —
+but the sentence *"a timer is scheduled for it"* remains code-read, not
+measured.
 
 ## 9. Why this matters at work specifically
 
@@ -219,6 +283,13 @@ lab tonight, arriving by a supported path rather than a spurious one.
 
 Everything in §4 and §7 was measured tonight against files in the working tree,
 by scripts kept in `/c/tmp/rev51-run/` (`kind2_resolver_proof.py`,
-`kind2_probe.py`). §1's claim is quoted, not adopted. §8 states plainly what was
-not run. Prediction written before measuring:
-`/c/tmp/rev51-run/27-PREDICTION-kind2.md`.
+`kind2_probe.py`). §1's claim is quoted, not adopted. Prediction written
+**before** measuring: `/c/tmp/rev51-run/27-PREDICTION-kind2.md`.
+
+§8 was added after the Docker daemon came up and is a live end-to-end
+measurement under compose, with the raw evidence kept beside the scripts:
+`31-kind2-verdicts.txt` (preconditions, offsets, P1–P6) and
+`31-kind2-decoded.txt` (the full protobuf decode of the single record). §8.4
+states plainly the one thing still **not** measured — the `AssetLogistics`
+object — and why that gap is a property of this compose stack rather than of
+`kind=2`. Nothing in this finding was run against the work cluster.

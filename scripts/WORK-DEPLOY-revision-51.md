@@ -81,6 +81,14 @@ Compare what it prints against the 11 keys in
 3. **`kind=2` entries appear too** — then the munition finding applies on top,
    and each tracked round becomes a **permanent** UNKNOWN fleet member, because
    the wipe flag is false here (§2.2) and there is no eviction path (§2.3).
+   **Proven end-to-end under compose 2026-09-26**, not inferred: one `kind=2`
+   PDU in, one asset out, `platform_variant='UNKNOWN'`, `kind=2` still intact in
+   the payload. And the part that bites on camera: **`kind` is not in the
+   `asset_id`** (`dis:<site>:<app>:<entity>`), so there is **no key pattern that
+   excludes munitions from a fleet count** — the only discriminator is a payload
+   field nothing reads. If this outcome occurs, the asset count on screen
+   includes every round fired, and it grows for the length of the recording.
+   `FINDING-2026-09-26-kind2-munition-resolution.md` §8.
 
 Full measurement, both ends of the path:
 `FINDING-2026-09-26-variant-resolution-is-broken.md`. Note also that `RCV-M`'s
