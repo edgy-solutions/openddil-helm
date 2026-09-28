@@ -1,0 +1,119 @@
+# LAB FIXTURE — one undeclared asset, `dis:1:1:1099`, at edge-03.
+#
+# WHAT THIS IS FOR
+# The egress gate refuses a record for two very different reasons and they must
+# never be read as one: `no_nation_overlap` (the record is labelled, and the
+# destination is not entitled to that label) and `unlabelled` (the record
+# carries no releasability label at all). Without a fixture the lab can only
+# produce the first -- every declared asset carries an originator_nation -- so
+# the `unlabelled` path is present, untested, and indistinguishable from broken.
+#
+# This deployment emits exactly one entity, `dis:1:1:1099`, which is pinned in
+# dis-sim's platform map and deliberately ABSENT from
+# openddil-demo/ontology/releasability.yaml.
+#
+# WHY EDGE-03 AND NOT EDGE-01
+# edge-03 is not tier-managed on this lab (`tierNode.tiers` is edge-01, edge-02,
+# region-east) and sits in region-west, which has no tier node either. It does
+# have an edge-hq bridge. So an asset introduced here reaches the hub and lands
+# in NO tier store, which keeps the tier baselines (8 / 6 / 14) exactly where
+# they were and moves only the hub count. A fixture that perturbed every store
+# would cost more to reason about than it is worth.
+#
+# WHY SITE 1
+# Site 1 is the ATL fleet's site. This id therefore looks like an asset that
+# belongs and was simply never declared, which is the case that actually occurs
+# in the field. Giving it a foreign site would test something easier, because a
+# reader would already expect that one to be refused. There is no id collision
+# with the site-1 sim at edge-01: that one emits 1000-1007, this one emits 1099.
+#
+# NOT APPLIED BY `tools/dis-sim/deploy.sh`, AND IT CARRIES ITS OWN SOURCE.
+#
+# That script belongs to the customer bundle EXAMPLE, whose two edges are
+# edge-northpoint and edge-capeverdant. Running it against this lab would
+# repoint the running sims at Services that do not exist here.
+#
+# It also refreshes the shared ConfigMap `dis-sim-src`, and on this lab that
+# ConfigMap is far older than the file in the repo -- old enough to predate the
+# platform pin map entirely. The two sims running here have been running that
+# older source for weeks. Refreshing it in place would not restart them, but it
+# would arm every one of their future restarts with code they have never run,
+# and it would do so in the middle of the measurement this fixture exists to
+# make. So the fixture mounts `dis-sim-src-fixture`, built from the repo file,
+# and leaves `dis-sim-src` untouched. Bringing those two older sims up to the
+# repo source is real and separate work; it is not a side effect of adding a
+# fixture.
+#
+#   kubectl -n openddil create configmap dis-sim-src-fixture \
+#     --from-file=dis_sim.py=openddil-customer-bundle-example/tools/dis-sim/dis_sim.py \
+#     --dry-run=client -o yaml | kubectl -n openddil apply -f -
+#   kubectl -n openddil apply -f openddil-helm/scripts/lab-fixture-undeclared-asset.yaml
+#
+# To remove the fixture, delete this Deployment. The asset does NOT disappear
+# from the stores when you do -- there is no eviction on silence by design, and
+# the retention pruner is the only thing that ever removes it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dis-sim-fixture-undeclared
+  labels:
+    app.kubernetes.io/name: dis-sim
+    app.kubernetes.io/component: dis-sim-fixture-undeclared
+    app.kubernetes.io/part-of: openddil
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: dis-sim-fixture-undeclared
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dis-sim
+        app.kubernetes.io/component: dis-sim-fixture-undeclared
+        app.kubernetes.io/part-of: openddil
+    spec:
+      containers:
+        - name: dis-sim
+          # Matches the two sims already running on this lab, which use a stock
+          # python image and install opendis at start rather than the pinned
+          # dis-sim image. Kept the same on purpose: a fixture that differed
+          # from its neighbours in runtime as well as in content would make any
+          # difference in the result ambiguous.
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              pip install --quiet --no-cache-dir opendis==1.0
+              exec python /src/dis_sim.py
+          env:
+            - name: DIS_TARGET_HOST
+              value: openddil-sensor-ingest-edge-03
+            - name: DIS_TARGET_PORT
+              value: "62042"
+            # The whole fixture. --entities is ignored when this is set.
+            - name: DIS_ENTITY_IDS
+              value: "1099"
+            - name: DIS_INTERVAL_S
+              value: "5.0"
+            - name: DIS_EXERCISE_ID
+              value: "1"
+            - name: DIS_PROTOCOL_VERSION
+              value: "7"
+            - name: DIS_SITE_ID
+              value: "1"
+            - name: DIS_APP_ID
+              value: "1"
+            - name: DIS_SEED
+              value: "1099"
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - name: src
+              mountPath: /src
+      volumes:
+        - name: src
+          configMap:
+            # Deliberately NOT the shared `dis-sim-src` -- see the header.
+            name: dis-sim-src-fixture
