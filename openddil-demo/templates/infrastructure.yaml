@@ -560,9 +560,25 @@ spec:
 # Runs as a post-install/post-upgrade Helm hook so it fires AFTER the
 # StatefulSets are scheduled but creates topics idempotently (rpk topic
 # create returns nonzero if topic exists — the || true swallows it).
+{{- /* BROKER LIST -- must match the StatefulSet loop's predicate exactly.
+
+       This ranged over `.Values.edges` + hq while the broker StatefulSets
+       range over `openddil.tierList` filtered by `kind == edge OR
+       isTierManaged`. A tier-managed region therefore GOT a broker and never
+       got topic-init: region-east's declared-compacted topics all read
+       `cleanup.policy=delete DEFAULT_CONFIG`, because they existed only
+       because auto-create invented them at broker defaults. A latest-state
+       topic retained by AGE rather than by KEY can drop an asset entirely.
+
+       The two loops are now derived from the same predicate rather than
+       maintained in parallel, which is the only form of this fix that cannot
+       silently drift again the next time a tier kind is added. */ -}}
 {{- $topicInitBrokers := list }}
-{{- range .Values.edges }}
-{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-%s:%d" $.Release.Name .id (int $.Values.redpandaEdge.internalPort)) }}
+{{- $tiTiers := include "openddil.tierList" . | fromYamlArray }}
+{{- range $tier := $tiTiers }}
+{{- if or (eq $tier.kind "edge") (include "openddil.isTierManaged" (dict "id" $tier.id "root" $)) }}
+{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-%s:%d" $.Release.Name $tier.id (int $.Values.redpandaEdge.internalPort)) }}
+{{- end }}
 {{- end }}
 {{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-hq:%d" .Release.Name (int .Values.redpandaHq.kafkaPort)) }}
 apiVersion: batch/v1
