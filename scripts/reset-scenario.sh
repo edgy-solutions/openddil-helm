@@ -94,6 +94,8 @@ SKIP_STORES=false
 SKIP_ELECTRIC=false
 SKIP_PRODUCERS=false
 RED_CHECK_TOPIC_CONFIG=false   # JUDGMENT CALL 10 red-check, see phase4_topics
+CENSUS_ONLY=false              # census-derived-quiesce read-only preview, see run_census_only
+RED_CHECK_QUIESCE=false        # census-derived-quiesce red-check, see run_red_check_quiesce
 
 usage() {
   cat <<'EOF'
@@ -129,6 +131,19 @@ FLAGS
                       post-recreate capture assertion notices before putting
                       it back. Self-repairing; touches exactly one topic.
                       See JUDGMENT CALL 10.
+  --census-only       Print the broker consumer census, the derived quiesce
+                      set with its provenance (census/restate/floor per
+                      workload), and the live-consumer assertion result
+                      against the pure-compact bucket, then exit. Runs the
+                      real phase 4 capture pass (a read) so it exercises the
+                      same code paths a real run would. MUTATES NOTHING.
+  --red-check-quiesce Capture, derive the quiesce set, quiesce every kind in
+                      it (including a throwaway DaemonSet this red-check
+                      creates itself, since fact 6 is that none exist in the
+                      namespace today), run the live-consumer assertion,
+                      restore everything, and exit. Touches NO topic. This
+                      is what proves the quiesce/restore path handles every
+                      kind in work item 3's table without risking a delete.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -150,6 +165,8 @@ while [ $# -gt 0 ]; do
     --skip-electric) SKIP_ELECTRIC=true ;;
     --skip-producers) SKIP_PRODUCERS=true ;;
     --red-check-topic-config) RED_CHECK_TOPIC_CONFIG=true ;;
+    --census-only) CENSUS_ONLY=true ;;
+    --red-check-quiesce) RED_CHECK_QUIESCE=true ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -263,23 +280,508 @@ mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
 mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
   "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^dis-sim-edge-")
 
-# JUDGMENT CALL 10 — state consumers, quiesced only around phase 4's
-# delete-and-recreate of pure-compact topics. Named by FAMILY, same
-# convention as every other mapfile here: projector-/tier-projector- (store
-# writers), cm-service/tier-cm- and logistics-fusion-service/tier-fusion-
-# (the CM and regional-fusion services), faust- (already discovered above,
-# by a narrower pattern, for the phase 5 restart — matched again here
-# because it is ALSO a consumer of its own changelog topic), edge-hq-
-# bridge-/tier-uplink- (the egress bridges). Any one of these touching a
-# just-deleted topic recreates it at broker defaults — see
-# auto_create_topics_enabled in the phase 4 header.
-mapfile -t STATE_CONSUMER_DEPLOYS < <(discover deploy \
-  "^${RELEASE}-(projector-|tier-projector-|cm-service\$|tier-cm-|logistics-fusion-service\$|tier-fusion-|faust-|edge-hq-bridge-|tier-uplink-)")
-
+# JUDGMENT CALL 10 — SUPERSEDED. This used to be a hand-written name-pattern
+# list of state consumers to quiesce around phase 4's delete-and-recreate of
+# pure-compact topics, in the same family-regex style as every mapfile
+# above. Run B's abort (see SPEC-census-quiesce.md's header) is what this
+# pattern actually costs: `asset-registry-service` was an ordinary
+# Deployment holding an offset on `telemetry-latest-state` and matched NONE
+# of the families below, so it was never quiesced, won the auto-create race
+# in the delete-to-create window, and the recreate failed with
+# TOPIC_ALREADY_EXISTS. A name pattern missing a consumer is not a bug in
+# the pattern, it is what a pattern does.
+#
+# The regex also over-quiesced: `cm-service`/`tier-cm-` and
+# `logistics-fusion-service`/`tier-fusion-` are Restate SINKS (fact 4) that
+# consume nothing directly — Restate holds the Kafka subscription — so
+# quiescing them was pure ceremony that happened to be harmless, not
+# correct.
+#
+# Replaced by derive_quiesce_set(), which builds the quiesce list per run
+# from three ACTUAL sources of truth (the broker consumer census, Restate's
+# own /subscriptions list, and a narrower documented floor for exactly the
+# case host resolution provably cannot see — proxy masking, fact 3) instead
+# of a hand-maintained regex. See phase4_topics and derive_quiesce_set.
 echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
      "redpanda=${#REDPANDA_PODS[@]} electric=${#ELECTRIC_PODS[@]}" \
-     "faust=${#FAUST_DEPLOYS[@]} producers=${#PRODUCER_DEPLOYS[@]}" \
-     "state-consumers=${#STATE_CONSUMER_DEPLOYS[@]}"
+     "faust=${#FAUST_DEPLOYS[@]} producers=${#PRODUCER_DEPLOYS[@]}"
+
+# ===========================================================================
+# CENSUS — derive the quiesce set for phase 4 from measured reality instead
+# of a name pattern. See SPEC-census-quiesce.md. All read-only.
+#
+# THE LOAD-BEARING IDEA: derivation below is best-effort — fact 3
+# (toxiproxy masks every real owner behind ONE Deployment name on the HQ
+# broker) proves owner resolution is SOMETIMES IMPOSSIBLE from the broker
+# side, no matter how carefully this is written. Detecting that a live
+# consumer exists needs no owner resolution at all: MEMBERS on the group
+# says so directly. So derivation feeds a best-effort scale-down list, and
+# assert_no_live_consumers (work item 4) is the actual safety gate — a
+# missed consumer now costs a stopped run, not a silently auto-created
+# topic.
+# ===========================================================================
+
+# census_groups POD — one broker's consumer census, read-only, two
+# tab-separated streams tagged in column 1:
+#
+#   MEMBERS  group  members_count  state  comma_separated_host_ips
+#   TOPIC    group  topic
+#
+# ONE `rpk group describe` call for every group on this broker (measured
+# fact 1: the flag accepts a list), not one call per group — the same
+# proven shape as census-probe.sh's measurement script, extended to also
+# read the STATE/MEMBERS header fields and to emit a TOPIC row for EVERY
+# topic in the block, including a zero-member group's rows (it still holds
+# committed offsets, per work item 1 — a group with MEMBERS 0 still
+# matters, it just has no host on this pass).
+#
+# `rpk group describe`'s per-group block is: a small header (GROUP,
+# COORDINATOR, STATE, BALANCER, MEMBERS <count>), then one table whose rows
+# carry TOPIC/PARTITION/.../MEMBER-ID/CLIENT-ID/HOST — HOST is the row's
+# last field when a member is actually assigned, and something else (never
+# IP-shaped) when it is not. Parsed by field NAME, never by fixed column
+# position, for the same reason topic_shape()/topic_partitions() above do:
+# a blank HOST on an unassigned partition does not shift every column after
+# it the way a genuinely variable-width field would, but nothing here
+# should assume the exact width is stable across rpk versions either.
+census_groups() {
+  local pod="$1"
+  local -a groups
+  mapfile -t groups < <(kubectl exec -n "$NS" "$pod" -c redpanda -- rpk group list 2>/dev/null \
+    | awk 'NR>1{print $2}')
+  [ "${#groups[@]}" -eq 0 ] && return 0
+
+  kubectl exec -n "$NS" "$pod" -c redpanda -- rpk group describe "${groups[@]}" 2>/dev/null | awk '
+    function flush() {
+      if (group != "") {
+        print "MEMBERS\t" group "\t" members "\t" state "\t" hostlist
+      }
+    }
+    BEGIN { FS = "[ \t]+" }
+    /^GROUP([ \t]|$)/ {
+      flush()
+      group = $2; state = ""; members = ""; hostlist = ""
+      delete hosts
+      next
+    }
+    group == "" { next }
+    $1 == "STATE" && NF == 2   { state = $2; next }
+    $1 == "MEMBERS" && NF == 2 { members = $2; next }
+    $1 == "COORDINATOR" || $1 == "BALANCER" || $1 == "TOTAL-LAG" { next }
+    $1 == "TOPIC" && $2 == "PARTITION" { next }   # the data table'\''s own header row
+    NF < 2 { next }                                # blank lines between sections
+    $1 ~ /__assignor/ { next }                     # Faust leader-election control topics
+    {
+      print "TOPIC\t" group "\t" $1
+      if ($NF ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !($NF in hosts)) {
+        hosts[$NF] = 1
+        hostlist = (hostlist == "" ? $NF : hostlist "," $NF)
+      }
+    }
+    END { flush() }
+  '
+}
+
+# Declared proxies. Exactly one, per measured fact 3: openddil-toxiproxy
+# masks every real consumer on the HQ broker behind its own Deployment name
+# and host IP — CLIENT-ID does not disambiguate (rdkafka or faust-0.15.3),
+# and two DIFFERENT real owners report the SAME host through it. A PROXY/*
+# result means UNRESOLVED, not found, and every caller below (derive_
+# quiesce_set, assert_no_live_consumers) treats it that way — it is never
+# added to the quiesce set, and it is never counted as a resolved owner in
+# the assertion's failure report.
+DECLARED_PROXY_DEPLOYS=("${RELEASE}-toxiproxy")
+
+_is_declared_proxy_name() {
+  local candidate="$1" p
+  for p in "${DECLARED_PROXY_DEPLOYS[@]}"; do
+    [ "$candidate" = "$p" ] && return 0
+  done
+  return 1
+}
+
+declare -A IP2POD             # built once, at first resolve_owner call
+IP2POD_BUILT=false
+declare -A OWNER_CACHE_BY_IP  # resolve_owner's own memo — an IP recurs dozens
+                               # of times across groups, each miss is a kubectl call
+declare -A OWNER_CACHE_BY_POD # shared with restate_subscriptions, which already
+                               # has a pod name and never needs the IP step at all
+
+_build_ip2pod_map() {
+  $IP2POD_BUILT && return 0
+  IP2POD_BUILT=true
+  local name ip
+  while IFS=$'\t' read -r name ip; do
+    [ -n "$ip" ] && IP2POD["$ip"]="$name"
+  done < <(kubectl get pods -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}' 2>/dev/null)
+}
+
+# _owner_of_pod POD -> Kind/Name (or PROXY/Name, per the declared-proxy
+# check above). pod -> ownerReferences[0] directly; a ReplicaSet owner is
+# walked one level further to the Deployment that owns IT; no owner
+# reference at all means an unowned pod, returned as Pod/<podname> — see
+# work item 3's table for why that case is a hard stop, not a quiesce
+# target.
+_owner_of_pod() {
+  local pod="$1" cached kind name rskind rsname result
+  cached="${OWNER_CACHE_BY_POD[$pod]:-}"
+  if [ -n "$cached" ]; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  read -r kind name < <(kubectl get pod -n "$NS" "$pod" \
+    -o jsonpath='{.metadata.ownerReferences[0].kind} {.metadata.ownerReferences[0].name}' 2>/dev/null)
+  if [ "${kind:-}" = "ReplicaSet" ]; then
+    read -r rskind rsname < <(kubectl get rs -n "$NS" "$name" \
+      -o jsonpath='{.metadata.ownerReferences[0].kind} {.metadata.ownerReferences[0].name}' 2>/dev/null)
+    result="${rskind:-ReplicaSet}/${rsname:-$name}"
+  elif [ -z "${kind:-}" ]; then
+    result="Pod/$pod"
+  else
+    result="$kind/$name"
+  fi
+  if _is_declared_proxy_name "${result#*/}"; then
+    result="PROXY/${result#*/}"
+  fi
+  OWNER_CACHE_BY_POD["$pod"]="$result"
+  printf '%s' "$result"
+}
+
+# resolve_owner IP -> Kind/Name, PROXY/Name, or UNRESOLVED-IP/ip. Memoised
+# by IP (work item 1) — the same handful of host IPs recurs across dozens
+# of groups in the census, and every cache miss here is a kubectl call.
+resolve_owner() {
+  local ip="$1" cached pod result
+  cached="${OWNER_CACHE_BY_IP[$ip]:-}"
+  if [ -n "$cached" ]; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  _build_ip2pod_map
+  pod="${IP2POD[$ip]:-}"
+  if [ -z "$pod" ]; then
+    result="UNRESOLVED-IP/$ip"
+  else
+    result="$(_owner_of_pod "$pod")"
+  fi
+  OWNER_CACHE_BY_IP["$ip"]="$result"
+  printf '%s' "$result"
+}
+
+# restate_subscriptions -> pod  topic  group_id  owner, one row per
+# subscription, across every runtime in RESTATE_PODS.
+#
+# RESOLVED BY MEASUREMENT, fact 5: Restate's OWN subscription list is
+# authoritative for Restate-mediated consumers, because Restate — not the
+# runtime's own visible consumer group — holds the Kafka subscription; the
+# broker-side census in census_groups() cannot see these at all (fact 4:
+# the CM and fusion services consume nothing directly, they are Restate
+# sinks).
+#
+# No jq (constraint) — `curl` is present in the runtime pod, `wget` is not
+# (also fact 5). `source` is `"kafka://<alias>/<topic>"`; the topic is
+# everything after the LAST `/`. `options.group.id` is a flat string field.
+# Both are pulled by position across the whole response (grep -oE for each
+# field name, in the order they appear) rather than by parsing nested
+# objects — a real JSON parser is the right tool for that and this script
+# deliberately has none (constraint), so this reads it the same way
+# json_field() already reads Restate's own --json output: a flat scalar
+# grep, not a walk. This assumes each subscription emits exactly one
+# `source` and one `group.id`, in the same relative order as every other
+# subscription's fields — true of every subscription list measured so far,
+# and the one assumption this function makes in exchange for not writing a
+# JSON parser in awk.
+restate_subscriptions() {
+  local pod raw owner
+  local -a sources groupids
+  local i n topic gid
+  for pod in "${RESTATE_PODS[@]}"; do
+    owner="$(_owner_of_pod "$pod")"
+    raw="$(kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
+      "curl -s -m 15 http://localhost:9070/subscriptions" 2>/dev/null)"
+    [ -z "$raw" ] && continue
+
+    mapfile -t sources < <(printf '%s' "$raw" \
+      | grep -oE '"source"[[:space:]]*:[[:space:]]*"kafka://[^"]*"' \
+      | sed -E 's#^"source"[[:space:]]*:[[:space:]]*"kafka://[^/]*/##; s/"$//')
+    mapfile -t groupids < <(printf '%s' "$raw" \
+      | grep -oE '"group\.id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed -E 's/^"group\.id"[[:space:]]*:[[:space:]]*"//; s/"$//')
+
+    n="${#sources[@]}"
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      topic="${sources[$i]}"
+      gid="${groupids[$i]:-}"
+      [ -n "$topic" ] && printf '%s\t%s\t%s\t%s\n' "$pod" "$topic" "$gid" "$owner"
+      i=$((i + 1))
+    done
+  done
+}
+
+# Work item 2's declared family floor. Kept BECAUSE OF fact 3 (proxy
+# masking is not mechanically resolvable from the broker side), and it is a
+# FLOOR, not the derivation — it exists to catch a proxy-masked consumer
+# that host resolution provably cannot see, chiefly openddil-projector-hq
+# (fact 7: it appears in the census ONLY as a toxiproxy-masked row).
+#
+# `cm-service`/`tier-cm-` and `logistics-fusion-service`/`tier-fusion-` are
+# DELIBERATELY ABSENT — fact 4 measured them as Restate sinks that consume
+# nothing directly, so quiescing them was never correct; see the removed
+# STATE_CONSUMER_DEPLOYS comment above discover_restate_runtimes() for the
+# full accounting of what changed and why.
+FLOOR_FAMILY_REGEX="^${RELEASE}-(projector-|tier-projector-|faust-|edge-hq-bridge-|tier-uplink-|asset-registry-service|redpanda-connect-|faust-regional-)"
+
+# derive_quiesce_set "pod|topic" ... -> sorted, unique Kind/Name lines on
+# stdout; a provenance line (source, then the workload) per entry on
+# stderr, so an operator reading the log can see that a workload came from
+# the census and not from a guess (work item 2).
+#
+# Arguments are "pod|topic" pairs — CAPTURED_TOPICS' own shape, not bare
+# topic names. Each tier runs its OWN Redpanda broker; the same topic NAME
+# on two different brokers is two unrelated topics with two unrelated
+# consumer censuses, so matching by name alone would blur an untouched
+# broker's topic into scope (or the reverse). Keeping the pod|topic pairing
+# end to end is what keeps that scoping exact for the census match (item
+# 1). Restate's own subscription list (item 2) has no such pairing to give
+# — fact 5's endpoint reports only `kafka://<alias>/<topic>`, no broker pod
+# — so that half of the union matches on topic NAME alone, over the union
+# of every target topic's bare name.
+derive_quiesce_set() {
+  local -a targets=("$@")
+  local -A is_target=() is_target_topicname=()
+  local t
+  for t in "${targets[@]}"; do
+    is_target["$t"]=1
+    is_target_topicname["${t#*|}"]=1
+  done
+
+  local -A found=()   # Kind/Name -> provenance source (first source wins)
+  local -a order=()   # first-seen order, for the provenance log
+
+  local -A producer_set=()
+  local p
+  for p in "${PRODUCER_DEPLOYS[@]}"; do producer_set["Deployment/$p"]=1; done
+
+  # --- item 1: census owners ----------------------------------------------
+  local pod tag f2 f3 f4 f5
+  local -A group_hosts=() group_is_target=()
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while IFS=$'\t' read -r tag f2 f3 f4 f5; do
+      [ -z "$tag" ] && continue
+      case "$tag" in
+        MEMBERS) group_hosts["$pod|$f2"]="$f5" ;;
+        TOPIC)
+          [ -n "${is_target[$pod|$f3]:-}" ] && group_is_target["$pod|$f2"]=1
+          ;;
+      esac
+    done < <(census_groups "$pod")
+  done
+
+  local key ip owner
+  for key in "${!group_is_target[@]}"; do
+    local -a hostips=()
+    IFS=',' read -ra hostips <<< "${group_hosts[$key]:-}"
+    for ip in "${hostips[@]}"; do
+      [ -z "$ip" ] && continue
+      owner="$(resolve_owner "$ip")"
+      case "$owner" in
+        PROXY/*) continue ;;   # unresolved, not found — never added, work item 1
+      esac
+      # Drop the Redpanda broker StatefulSets themselves (work item 2) —
+      # but NOT the redpanda-connect-* Deployments, which share the same
+      # "${RELEASE}-redpanda-" name prefix and ARE real consumers (fact 2,
+      # acceptance check 2). Matched on the bare name after the Kind/
+      # prefix, since the broker owner is a StatefulSet and connect is a
+      # Deployment but the prefix test must not depend on telling them
+      # apart by kind alone (REDPANDA_PODS itself only ever holds broker
+      # pods — connect pods are excluded from it above — so this is the
+      # one place that distinction has to be made by name instead).
+      case "${owner#*/}" in
+        "${RELEASE}"-redpanda-*)
+          case "${owner#*/}" in
+            *-connect-*) ;;   # connect deployments ARE real consumers, never dropped
+            *) continue ;;    # the broker StatefulSets themselves — drop
+          esac
+          ;;
+      esac
+      if [ -z "${found[$owner]:-}" ] && [ -z "${producer_set[$owner]:-}" ]; then
+        found["$owner"]="census"
+        order+=("$owner")
+      fi
+    done
+  done
+
+  # --- item 2: Restate runtimes whose subscription topic is a target -----
+  local rpod rtopic rgid rowner
+  while IFS=$'\t' read -r rpod rtopic rgid rowner; do
+    [ -z "$rpod" ] && continue
+    if [ -n "${is_target_topicname[$rtopic]:-}" ] \
+       && [ -z "${found[$rowner]:-}" ] && [ -z "${producer_set[$rowner]:-}" ]; then
+      found["$rowner"]="restate"
+      order+=("$rowner")
+    fi
+  done < <(restate_subscriptions)
+
+  # --- item 3: the declared family floor ----------------------------------
+  local -a floor_deploys=()
+  mapfile -t floor_deploys < <(discover deploy "$FLOOR_FAMILY_REGEX")
+  local fd fdname
+  for fd in "${floor_deploys[@]}"; do
+    fdname="Deployment/$fd"
+    if [ -z "${found[$fdname]:-}" ] && [ -z "${producer_set[$fdname]:-}" ]; then
+      found["$fdname"]="floor"
+      order+=("$fdname")
+    fi
+  done
+
+  local name
+  for name in "${order[@]}"; do
+    printf '%-8s %s\n' "${found[$name]}" "$name" >&2
+  done
+  for name in "${!found[@]}"; do
+    printf '%s\n' "$name"
+  done | sort -u
+}
+
+# assert_no_live_consumers "pod|topic" ... -> 0 if zero groups anywhere
+# hold a live (members_count > 0) offset on any of the given topics, 1
+# otherwise. THIS is the actual safety gate (work item 4), not derive_
+# quiesce_set above — call it with the topics about to be DELETED (the
+# pure-compact bucket), never the trimmed ones: a trim cannot auto-create a
+# topic, only a delete can, and only the delete is irreversible.
+#
+# Re-reads the census FRESH, every call — deliberately not reusing
+# derive_quiesce_set's earlier read, which was taken BEFORE the quiesce and
+# would assert against stale data (constraint: do not cache census reads
+# across phases).
+_scan_live_consumers() {
+  local -a targets=("$@")
+  [ "${#targets[@]}" -eq 0 ] && return 0
+  local -A is_target=()
+  local t
+  for t in "${targets[@]}"; do is_target["$t"]=1; done
+
+  local pod tag f2 f3 f4 f5
+  local -A group_members=() group_state=() group_hosts=() group_topic=()
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while IFS=$'\t' read -r tag f2 f3 f4 f5; do
+      [ -z "$tag" ] && continue
+      case "$tag" in
+        MEMBERS)
+          group_members["$pod|$f2"]="$f3"
+          group_state["$pod|$f2"]="$f4"
+          group_hosts["$pod|$f2"]="$f5"
+          ;;
+        TOPIC)
+          # Comma-appended, not overwritten: a single group can hold offsets
+          # on more than one target topic (e.g. several changelogs on the
+          # same broker), and overwriting would silently drop every target
+          # topic but the last one seen out of the LIVE CONSUMER report
+          # below — a diagnostic completeness bug, not a safety one (ok is
+          # still set false either way), but the report exists so an
+          # operator can act on it, and an incomplete list is a worse
+          # report than a slower one.
+          if [ -n "${is_target[$pod|$f3]:-}" ]; then
+            case ",${group_topic[$pod|$f2]:-}," in
+              *",$f3,"*) ;;
+              *) group_topic["$pod|$f2"]="${group_topic[$pod|$f2]:+${group_topic[$pod|$f2]},}$f3" ;;
+            esac
+          fi
+          ;;
+      esac
+    done < <(census_groups "$pod")
+  done
+
+  local ok=true key members grp gtopic hostcsv ip owner ownerlist
+  for key in "${!group_topic[@]}"; do
+    members="${group_members[$key]:-0}"
+    if [ "${members:-0}" -gt 0 ] 2>/dev/null; then
+      ok=false
+      pod="${key%%|*}"; grp="${key#*|}"
+      gtopic="${group_topic[$key]}"
+      hostcsv="${group_hosts[$key]:-}"
+      ownerlist=""
+      local -a hostips=()
+      IFS=',' read -ra hostips <<< "$hostcsv"
+      for ip in "${hostips[@]}"; do
+        [ -z "$ip" ] && continue
+        owner="$(resolve_owner "$ip")"
+        ownerlist="${ownerlist:+$ownerlist, }$owner"
+      done
+      echo "LIVE CONSUMER: group=$grp topics=$gtopic broker=$pod members=$members" \
+           "state=${group_state[$key]:-?}" >&2
+      echo "    hosts=${hostcsv:-none} owners=${ownerlist:-none}" >&2
+    fi
+  done
+
+  $ok
+}
+
+# ---------------------------------------------------------------------------
+# assert_no_live_consumers "pod|topic" ... — work item 4's gate, with the
+# patience the first version lacked.
+#
+# MEASURED 2026-09-27, and this is the whole reason this wrapper exists: a
+# consumer group does NOT drop its members when the pods go away. The
+# red-check quiesced every one of the 23 derived workloads, quiesce_workload_
+# set confirmed status.replicas=0 for all of them, and the census STILL
+# reported 34 groups at members>0 — because Redpanda holds a member until its
+# session times out. Timed on a fixture whose pods were deleted at t=0:
+#
+#     t=11s..44s  STATE=Stable  MEMBERS=6      (every pod already gone)
+#     t=49s       STATE=Empty   MEMBERS=0
+#
+# ~45s, i.e. a stock session timeout. The tell that those were stale members
+# rather than live consumers: their host IPs no longer resolved to any pod at
+# all. A one-shot read therefore fails EVERY time, on a correctly quiesced
+# cluster, and phase 4 would abort forever — a reset that never round-trips
+# for a reason that has nothing to do with consumers.
+#
+# So: poll. Fail only if a group is STILL holding members after the timeout,
+# which is a real missed consumer. Aborting late is cheap here (nothing has
+# been mutated yet, so the trap restores and the lab is untouched); aborting
+# wrongly is what costs a night.
+QUIESCE_EXPIRY_TIMEOUT="${QUIESCE_EXPIRY_TIMEOUT:-180}"
+QUIESCE_EXPIRY_INTERVAL="${QUIESCE_EXPIRY_INTERVAL:-5}"
+
+assert_no_live_consumers() {
+  [ "$#" -eq 0 ] && return 0
+
+  # The diagnostics are worth printing only for the read that actually
+  # decides, so each attempt's stderr is buffered and only the last one is
+  # shown. Every attempt runs in THIS shell, so resolve_owner's caches (and
+  # the IP->pod map) survive between attempts.
+  local buf; buf="$(mktemp)"
+  local waited=0 rc=0
+
+  while :; do
+    rc=0
+    _scan_live_consumers "$@" 2>"$buf" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      [ "$waited" -gt 0 ] && echo "ASSERTION: clear after ${waited}s of waiting" \
+        "for group members to expire." >&2
+      rm -f "$buf"
+      return 0
+    fi
+    if [ "$waited" -ge "$QUIESCE_EXPIRY_TIMEOUT" ]; then
+      break
+    fi
+    if [ "$waited" -eq 0 ]; then
+      echo "ASSERTION: groups still hold members; waiting up to" \
+           "${QUIESCE_EXPIRY_TIMEOUT}s for session timeouts to expire" \
+           "(measured ~45s on this cluster)." >&2
+    fi
+    sleep "$QUIESCE_EXPIRY_INTERVAL"
+    waited=$((waited + QUIESCE_EXPIRY_INTERVAL))
+  done
+
+  echo "ASSERTION: still holding members after ${waited}s — these are NOT" \
+       "stale members. Offenders, from the final census read:" >&2
+  cat "$buf" >&2
+  rm -f "$buf"
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # Stores — the table list and the one permanent exclusion.
@@ -641,7 +1143,19 @@ declare -A BASE_RESTATE_SCHED # key "pod" -> scheduled invocation count
 declare -A BASE_ELECTRIC_HANDLE # key "pod" -> shape handle before the reset (must CHANGE after)
 declare -A BASE_ELECTRIC_ROWS   # key "pod" -> shape row count before the reset
 declare -A BASE_TOPIC_HW      # key "pod|topic|partition" -> high watermark
-declare -A ORIG_REPLICAS      # key deployment name -> replica count before quiesce
+declare -A ORIG_REPLICAS      # key deployment name -> replica count before quiesce (producers only, phase 2)
+
+# Per-kind captured state for the DERIVED quiesce set (work item 3) —
+# separate from ORIG_REPLICAS above, which stays exactly as phase 2 always
+# used it (producers, keyed by bare deployment name). These are keyed by
+# the full "Kind/Name" the derived set already uses, because the derived
+# set can hold any of the four kinds in the work-item-3 table, not just
+# Deployments.
+declare -A QSTATE_REPLICAS     # key "Deployment|StatefulSet|ReplicaSet/name" -> replica count before quiesce
+declare -A QSTATE_NODESEL      # key "DaemonSet/name" -> captured nodeSelector, as JSON (via -o jsonpath-as-json; plain jsonpath prints Go map syntax, not JSON)
+declare -A QSTATE_NODESEL_HAD  # key "DaemonSet/name" -> set (to 1) iff nodeSelector existed pre-quiesce; its ABSENCE is what tells restore to remove the key rather than replace it with the captured value
+declare -A QSTATE_SUSPEND      # key "Job/name" -> captured .spec.suspend before quiesce
+declare -a QSTATE_QUIESCED=()  # ordered list of "Kind/Name" this run actually attempted to quiesce — restore and the EXIT trap walk THIS, not the derived set, for the same reason restore_state_consumers used to: an entry the quiesce loop never reached must not be "restored" from an empty capture
 
 phase1_baseline() {
   echo
@@ -761,6 +1275,14 @@ phase2_quiesce() {
   # Armed BEFORE the first scale, not after: a failure reading the very first
   # replica count must already be covered. See emergency_restore_scales.
   arm_scale_trap
+  # Build the IP->pod map BEFORE anything is scaled down, in THIS shell.
+  # derive_quiesce_set runs under `mapfile < <(...)`, i.e. in a subshell, so
+  # the map it built never reaches us — and if the first build happened after
+  # the quiesce, every scaled-down pod's IP would be gone and the assertion's
+  # report would read UNRESOLVED-IP for workloads WE just stopped. Measured
+  # exactly that in the 2026-09-27 red-check. Diagnostics only; the gate does
+  # not depend on it.
+  $DRY_RUN || _build_ip2pod_map
   local d rc
   for d in "${PRODUCER_DEPLOYS[@]}"; do
     rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
@@ -918,9 +1440,12 @@ phase3_restate() {
 # consumer group that is still running WILL win the race and hand this
 # script a topic to "recreate" that the broker already auto-created wrong.
 # That is exactly the state assert_topic_matches_capture exists to catch —
-# but catching it after the fact is a fallback, not a plan, so the state
-# consumers are scaled to zero before any delete happens at all (see
-# quiesce_state_consumers below). And because the danger window is "topic
+# but catching it after the fact is a fallback, not a plan, so the derived
+# quiesce set is scaled to zero (or otherwise quiesced — see work item 3's
+# per-kind table) before any delete happens at all, and the live-consumer
+# assertion (assert_no_live_consumers) is checked before the first delete
+# too — see quiesce_derived_set and phase4_topics below. And because the
+# danger window is "topic
 # does not exist yet", each pure-compact topic is deleted AND recreated
 # before the next one is even looked at — deleting all 53 first and creating
 # all 53 second would hold every one of them open to the auto-create race
@@ -939,35 +1464,185 @@ phase3_restate() {
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Consumer quiesce for the delete-and-recreate topics only (STATE_CONSUMER_
-# DEPLOYS, discovered above). Same shape as phase2_quiesce's producer
-# quiesce — read .spec.replicas, store it in the SAME ORIG_REPLICAS array
-# keyed by deployment name (producer and state-consumer deployment names do
-# not collide), scale to 0 through maybe_run — plus one thing phase 2 does
-# not need: a wait for the pods to actually be gone, because a Deployment
-# that still has a live pod mid-termination can still hold an open consumer
-# session against the very topic this phase is about to delete.
+# Consumer quiesce for the DERIVED set (derive_quiesce_set, above) — the
+# topics about to be deleted-and-recreated, not the trimmed ones. Same
+# shape phase2_quiesce's producer quiesce always had — read the live value,
+# capture it before mutating, scale/patch through maybe_run — generalised
+# across every kind in work item 3's table, because the derived set can
+# hold a StatefulSet (the Restate runtimes), a DaemonSet (only ever seen in
+# --red-check-quiesce today — fact 6, zero exist in the namespace), or a
+# Job, not only a Deployment.
 #
-# The EXIT trap is installed by the caller the moment it decides to call
-# this, not inside this function — the moment that matters is "consumers
-# are now being taken down", and phase4_topics knows that before this
-# function's first line runs.
+# The EXIT trap is installed by the caller (quiesce_workload_set) the
+# moment it decides to quiesce anything, not inside this function — same
+# reasoning as the superseded quiesce_state_consumers had: the moment that
+# matters is "something is now being taken down."
 # ---------------------------------------------------------------------------
-quiesce_state_consumers() {
-  echo "-- quiescing state consumers (recreate-eligible topics are about to" \
-       "be deleted; a live consumer would auto-create one back at broker" \
-       "defaults the instant it reconnects — see the phase 4 header) --"
-  local d rc
-  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
-    rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
-    ORIG_REPLICAS["$d"]="${rc:-1}"
-    if [ -z "$rc" ]; then
-      echo "WARNING: could not read current replica count for $d; recorded 1 as a" >&2
-      echo "         last resort. If that is wrong, the restore below will restore" >&2
-      echo "         it wrong." >&2
-    fi
-    maybe_run "scale $d to 0 (was ${ORIG_REPLICAS[$d]})" \
-      kubectl scale deploy -n "$NS" "$d" --replicas=0
+
+# _kind_arg KIND -> the kubectl resource-type argument for that kind. A
+# one-line lookup, not a case statement repeated at every call site.
+_kind_arg() {
+  case "$1" in
+    Deployment)  echo deploy ;;
+    StatefulSet) echo sts ;;
+    ReplicaSet)  echo rs ;;
+    DaemonSet)   echo ds ;;
+    Job)         echo job ;;
+    Pod)         echo pod ;;
+    *)           echo "$1" ;;
+  esac
+}
+
+# quiesce_derived_workload "Kind/Name" — dispatch by kind, work item 3's
+# table exactly. Captures the live value into the matching QSTATE_* map
+# BEFORE mutating (the same capture-then-restore-verbatim rule phase 4
+# already follows for topic configs), then appends to QSTATE_QUIESCED so
+# restore_derived_workload and the EXIT trap both know this entry was
+# actually touched.
+#
+# DaemonSet capture uses `-o jsonpath-as-json`, not plain `-o jsonpath`:
+# plain jsonpath prints a map as Go's `map[key:value]`, which is not valid
+# JSON and cannot be dropped into a JSON Patch `value` verbatim. `jsonpath-
+# as-json` (kubectl's own JSON-safe variant of the same query language)
+# returns a genuine JSON array of matches with no jq involved, so a single
+# `sed` strip of the surrounding `[`/`]` is enough to get the captured
+# value itself, or an empty string when nodeSelector was absent — which is
+# exactly the "captured-absent restores to null" case the table asks for,
+# and why QSTATE_NODESEL_HAD exists as a separate flag rather than trying
+# to tell "captured empty object" and "captured absent" apart from the
+# string alone.
+#
+# A bare Pod (no owner) is a hard stop, per the table — printed and
+# refused, not silently skipped, because a Pod surviving into the derived
+# set means owner resolution ran out of options for it.
+quiesce_derived_workload() {
+  local entry="$1" kind name karg rc nodesel_json
+  kind="${entry%%/*}"
+  name="${entry#*/}"
+  karg="$(_kind_arg "$kind")"
+
+  case "$kind" in
+    Deployment|StatefulSet|ReplicaSet)
+      rc="$(kubectl get "$karg" -n "$NS" "$name" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+      QSTATE_REPLICAS["$entry"]="${rc:-1}"
+      if [ -z "$rc" ]; then
+        echo "WARNING: could not read current replica count for $entry; recorded 1 as a" >&2
+        echo "         last resort. If that is wrong, the restore below will restore" >&2
+        echo "         it wrong." >&2
+      fi
+      maybe_run "scale $entry to 0 (was ${QSTATE_REPLICAS[$entry]})" \
+        kubectl scale "$karg" -n "$NS" "$name" --replicas=0
+      QSTATE_QUIESCED+=("$entry")
+      ;;
+    DaemonSet)
+      nodesel_json="$(kubectl get ds -n "$NS" "$name" -o jsonpath-as-json='{.spec.template.spec.nodeSelector}' 2>/dev/null \
+        | sed -e 's/^\[//' -e 's/\]$//')"
+      if [ -n "$nodesel_json" ] && [ "$nodesel_json" != "null" ]; then
+        QSTATE_NODESEL["$entry"]="$nodesel_json"
+        QSTATE_NODESEL_HAD["$entry"]=1
+      fi
+      maybe_run "quiesce $entry (merge-patch nodeSelector to add openddil.io/quiesced=true — no node carries this label, so every pod is evicted)" \
+        kubectl patch ds -n "$NS" "$name" --type merge \
+        -p '{"spec":{"template":{"spec":{"nodeSelector":{"openddil.io/quiesced":"true"}}}}}'
+      QSTATE_QUIESCED+=("$entry")
+      ;;
+    Job)
+      local suspend
+      suspend="$(kubectl get job -n "$NS" "$name" -o jsonpath='{.spec.suspend}' 2>/dev/null)"
+      QSTATE_SUSPEND["$entry"]="${suspend:-false}"
+      maybe_run "suspend $entry (was ${QSTATE_SUSPEND[$entry]})" \
+        kubectl patch job -n "$NS" "$name" --type merge -p '{"spec":{"suspend":true}}'
+      QSTATE_QUIESCED+=("$entry")
+      ;;
+    Pod)
+      echo "CANNOT QUIESCE: $entry has no owner — a bare Pod cannot be scaled," >&2
+      echo "  DaemonSet-patched, or Job-suspended. This is a hard stop for this" >&2
+      echo "  entry, per work item 3's table; it is not quiesced and not restored." >&2
+      return 1
+      ;;
+    *)
+      echo "WARNING: $entry — unrecognised kind '$kind', not quiesced." >&2
+      return 1
+      ;;
+  esac
+}
+
+# restore_derived_workload "Kind/Name" — the inverse of quiesce_derived_
+# workload, from the SAME QSTATE_* maps. Safe to call on an entry that was
+# never actually quiesced (all three maps miss, so the guard returns early)
+# — the normal case when this runs from the EXIT trap after the quiesce
+# loop died partway through its own list.
+#
+# DaemonSet restore is a JSON Patch (RFC 6902), not a merge patch like the
+# quiesce side: a merge patch can only ADD or overwrite keys, it cannot
+# REMOVE the one this function's quiesce step added when the original had
+# no nodeSelector at all — that needs an explicit `remove` op. When the
+# original DID have a nodeSelector, `replace` puts back the exact captured
+# JSON verbatim, openddil.io/quiesced included in whatever the merge patch
+# left behind and now overwritten away.
+restore_derived_workload() {
+  local entry="$1" kind name karg rc suspend
+  kind="${entry%%/*}"
+  name="${entry#*/}"
+  karg="$(_kind_arg "$kind")"
+
+  case "$kind" in
+    Deployment|StatefulSet|ReplicaSet)
+      rc="${QSTATE_REPLICAS[$entry]:-}"
+      [ -z "$rc" ] && return 0
+      maybe_run "restore $entry to $rc" \
+        kubectl scale "$karg" -n "$NS" "$name" --replicas="$rc"
+      ;;
+    DaemonSet)
+      if [ -n "${QSTATE_NODESEL_HAD[$entry]:-}" ]; then
+        maybe_run "restore $entry nodeSelector to captured value (verbatim)" \
+          kubectl patch ds -n "$NS" "$name" --type=json \
+          -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/nodeSelector\",\"value\":${QSTATE_NODESEL[$entry]}}]"
+      else
+        maybe_run "restore $entry nodeSelector (remove — captured-absent)" \
+          kubectl patch ds -n "$NS" "$name" --type=json \
+          -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]'
+      fi
+      ;;
+    Job)
+      suspend="${QSTATE_SUSPEND[$entry]:-}"
+      [ -z "$suspend" ] && return 0
+      maybe_run "restore $entry suspend=$suspend" \
+        kubectl patch job -n "$NS" "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+# quiesce_workload_set "Kind/Name" ... — arms the trap once, quiesces every
+# entry, then waits for the Deployment/StatefulSet/ReplicaSet entries'
+# live pods to actually terminate (a DaemonSet/Job entry has no equivalent
+# "status.replicas" to poll the same way, and is not polled here).
+#
+# THIS WAIT IS A COURTESY, NOT THE SAFETY GATE. assert_no_live_consumers
+# (work item 4), called by the caller after this returns, is what actually
+# decides whether a delete may proceed — it re-reads the census fresh
+# rather than trusting that a fixed 120s poll here caught everything. That
+# split is deliberate: this loop existed in the superseded quiesce_state_
+# consumers as a best-effort wait; making the CENSUS the gate instead of
+# the poll is exactly the fix work item 4 is for.
+quiesce_workload_set() {
+  local -a entries=("$@")
+  [ "${#entries[@]}" -eq 0 ] && return 0
+  arm_scale_trap
+  # Build the IP->pod map BEFORE anything is scaled down, in THIS shell.
+  # derive_quiesce_set runs under `mapfile < <(...)`, i.e. in a subshell, so
+  # the map it built never reaches us — and if the first build happened after
+  # the quiesce, every scaled-down pod's IP would be gone and the assertion's
+  # report would read UNRESOLVED-IP for workloads WE just stopped. Measured
+  # exactly that in the 2026-09-27 red-check. Diagnostics only; the gate does
+  # not depend on it.
+  $DRY_RUN || _build_ip2pod_map
+  local e
+  for e in "${entries[@]}"; do
+    quiesce_derived_workload "$e" || true
   done
 
   if $DRY_RUN; then
@@ -976,16 +1651,17 @@ quiesce_state_consumers() {
     return 0
   fi
 
-  # Polled by DEPLOYMENT NAME, never by label: these nine families
-  # (projector-, tier-projector-, cm-service, tier-cm-, logistics-fusion-
-  # service, tier-fusion-, faust-, edge-hq-bridge-, tier-uplink-) do not
-  # share a uniform label — the same reason discover() itself matches by
-  # name-pattern rather than by listing pods (see the discover() comment).
-  local i cur
-  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
+  local kind name karg i cur
+  for e in "${entries[@]}"; do
+    kind="${e%%/*}"
+    name="${e#*/}"
+    case "$kind" in
+      Deployment|StatefulSet|ReplicaSet) karg="$(_kind_arg "$kind")" ;;
+      *) continue ;;
+    esac
     i=0
     while [ "$i" -lt 60 ]; do
-      cur="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
+      cur="$(kubectl get "$karg" -n "$NS" "$name" -o jsonpath='{.status.replicas}' 2>/dev/null)"
       if [ -z "$cur" ] || [ "$cur" = "0" ]; then
         break
       fi
@@ -993,27 +1669,36 @@ quiesce_state_consumers() {
       i=$((i + 1))
     done
     if [ "$i" -ge 60 ]; then
-      echo "WARNING: $d still reports status.replicas=$cur after 120s of polling —" >&2
-      echo "         proceeding anyway. A pod that has not actually terminated yet" >&2
-      echo "         can still win the auto-create race against the recreate below." >&2
+      echo "WARNING: $e still reports status.replicas=$cur after 120s of polling —" >&2
+      echo "         proceeding anyway; assert_no_live_consumers re-checks the" >&2
+      echo "         actual census rather than trusting this poll." >&2
     fi
   done
 }
 
-restore_state_consumers() {
-  # Scale each state consumer back to what quiesce_state_consumers recorded.
-  # Safe to call twice: a maybe_run scale to an already-correct replica
-  # count is a no-op on the cluster. Safe to call on a deployment that was
-  # NEVER quiesced this run, too (ORIG_REPLICAS has no entry for it) — that
-  # is the normal case when this runs from the EXIT trap after quiesce_
-  # state_consumers dies partway through its own loop, and restoring an
-  # unrecorded count would be a guess, not a restore.
-  local d rc
-  for d in "${STATE_CONSUMER_DEPLOYS[@]}"; do
-    rc="${ORIG_REPLICAS[$d]:-}"
-    [ -z "$rc" ] && continue
-    maybe_run "restore $d to $rc" \
-      kubectl scale deploy -n "$NS" "$d" --replicas="$rc"
+# The real (non-red-check) entry point: derive the set from every captured
+# topic (trims included — work item 2 says derive from the full capture,
+# even though the LATER assertion is scoped to the delete bucket only, work
+# item 4), quiesce it, and remember exactly what was derived so the
+# restore call after the mutation pass has something to iterate.
+DERIVED_QUIESCE_SET=()
+
+quiesce_derived_set() {
+  local -a targets=("$@")
+  mapfile -t DERIVED_QUIESCE_SET < <(derive_quiesce_set "${targets[@]}")
+  echo "derived quiesce set: ${#DERIVED_QUIESCE_SET[@]} workload(s) (see provenance above)"
+  quiesce_workload_set "${DERIVED_QUIESCE_SET[@]}"
+}
+
+# restore_derived_set — walks QSTATE_QUIESCED, not DERIVED_QUIESCE_SET:
+# the former is what was actually attempted (see its declaration), which is
+# the same "safe on a never-quiesced entry, safe to call twice" contract
+# restore_state_consumers used to keep by checking ORIG_REPLICAS per entry.
+restore_derived_set() {
+  local e
+  for e in "${QSTATE_QUIESCED[@]:-}"; do
+    [ -z "$e" ] && continue
+    restore_derived_workload "$e"
   done
 }
 
@@ -1073,7 +1758,7 @@ emergency_restore_scales() {
   echo >&2
 
   local d rc
-  for d in "${PRODUCER_DEPLOYS[@]:-}" "${STATE_CONSUMER_DEPLOYS[@]:-}"; do
+  for d in "${PRODUCER_DEPLOYS[@]:-}"; do
     [ -z "$d" ] && continue
     rc="${ORIG_REPLICAS[$d]:-}"
     [ -z "$rc" ] && continue
@@ -1084,30 +1769,90 @@ emergency_restore_scales() {
       echo "     kubectl scale deploy -n $NS $d --replicas=$rc" >&2
     }
   done
+
+  # Second loop, extending this trap rather than duplicating it (work item
+  # 3): the derived-set quiesce (any kind in its table) restores from the
+  # QSTATE_* maps by walking QSTATE_QUIESCED — same "never fail, print the
+  # by-hand command" guard shape as the producer loop above, generalised
+  # across kind because a DaemonSet/Job entry has no `kubectl scale`
+  # equivalent.
+  local entry kind name karg suspend
+  for entry in "${QSTATE_QUIESCED[@]:-}"; do
+    [ -z "$entry" ] && continue
+    kind="${entry%%/*}"
+    name="${entry#*/}"
+    karg="$(_kind_arg "$kind")"
+    case "$kind" in
+      Deployment|StatefulSet|ReplicaSet)
+        rc="${QSTATE_REPLICAS[$entry]:-}"
+        [ -z "$rc" ] && continue
+        echo "-> emergency restore $entry to $rc" >&2
+        $DRY_RUN && continue
+        kubectl scale "$karg" -n "$NS" "$name" --replicas="$rc" >&2 || {
+          echo "   COULD NOT RESTORE $entry. Run this by hand:" >&2
+          echo "     kubectl scale $karg -n $NS $name --replicas=$rc" >&2
+        }
+        ;;
+      DaemonSet)
+        echo "-> emergency restore $entry nodeSelector" >&2
+        $DRY_RUN && continue
+        if [ -n "${QSTATE_NODESEL_HAD[$entry]:-}" ]; then
+          kubectl patch ds -n "$NS" "$name" --type=json \
+            -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/nodeSelector\",\"value\":${QSTATE_NODESEL[$entry]}}]" >&2 || {
+            echo "   COULD NOT RESTORE $entry. Run this by hand (verbatim captured JSON):" >&2
+            echo "     kubectl patch ds -n $NS $name --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/nodeSelector\",\"value\":${QSTATE_NODESEL[$entry]}}]'" >&2
+          }
+        else
+          kubectl patch ds -n "$NS" "$name" --type=json \
+            -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' >&2 || {
+            echo "   COULD NOT RESTORE $entry. Run this by hand:" >&2
+            echo "     kubectl patch ds -n $NS $name --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/nodeSelector\"}]'" >&2
+          }
+        fi
+        ;;
+      Job)
+        suspend="${QSTATE_SUSPEND[$entry]:-}"
+        [ -z "$suspend" ] && continue
+        echo "-> emergency restore $entry suspend=$suspend" >&2
+        $DRY_RUN && continue
+        kubectl patch job -n "$NS" "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}" >&2 || {
+          echo "   COULD NOT RESTORE $entry. Run this by hand:" >&2
+          echo "     kubectl patch job -n $NS $name --type merge -p '{\"spec\":{\"suspend\":$suspend}}'" >&2
+        }
+        ;;
+    esac
+  done
 }
 
-phase4_topics() {
-  echo
-  echo "=== PHASE 4: topics (capture, then trim or delete-and-recreate) ==="
-  if $SKIP_TOPICS; then
-    skip_warning "TOPICS" \
-      "No partition is trimmed, and no topic is deleted or recreated. Every\n    compacted topic — trim-eligible or pure-compact alike — keeps its full\n    latest-per-key contents, including the Faust changelog topics phase 5\n    depends on being empty — if phase 5 also runs, it will republish the\n    SAME pre-reset fleet from state that was expected to be empty."
-    return 0
-  fi
+# ---------------------------------------------------------------------------
+# phase4_capture_pass — the read-only capture half of phase 4, pulled into
+# its own function so --census-only (work item 6) runs the SAME capture
+# code a real run does instead of a second, driftable copy of it.
+# Populates the now-global CAPTURED_TOPICS / TOPIC_BUCKET / CAPTURE_TRIM_N /
+# CAPTURE_RECREATE_N — promoted from phase4_topics' own locals to globals
+# for exactly that reuse.
+#
+# ALL brokers, ALL non-internal topics, BEFORE any mutation. This has to be
+# a separate, complete pass rather than capture-then-mutate per topic,
+# because deciding whether to quiesce consumers at all needs the FULL tally
+# (specifically: is there anything recreate-eligible) before the mutation
+# pass — or --census-only's read-only preview — can begin.
+# ---------------------------------------------------------------------------
+CAPTURED_TOPICS=()
+declare -A TOPIC_BUCKET=()
+CAPTURE_TRIM_N=0
+CAPTURE_RECREATE_N=0
 
+phase4_capture_pass() {
   mkdir -p "$TOPIC_CAPTURE_DIR"
   echo "topic capture directory (kept after this run — evidence, not scratch): $TOPIC_CAPTURE_DIR"
 
-  # --- capture pass: ALL brokers, ALL non-internal topics, BEFORE any
-  # mutation. This has to be a separate, complete pass rather than
-  # capture-then-mutate per topic, because deciding whether to quiesce
-  # consumers at all needs the FULL tally (specifically: is there anything
-  # recreate-eligible) before the mutation pass can begin.
-  local pod topic policy shape dynamic capdir capfile
-  local -a CAPTURED_TOPICS=()
-  declare -A TOPIC_BUCKET=()
-  local trim_n=0 recreate_n=0
+  CAPTURED_TOPICS=()
+  TOPIC_BUCKET=()
+  CAPTURE_TRIM_N=0
+  CAPTURE_RECREATE_N=0
 
+  local pod topic policy shape dynamic capdir capfile
   for pod in "${REDPANDA_PODS[@]}"; do
     while read -r topic; do
       [ -z "$topic" ] && continue
@@ -1124,11 +1869,11 @@ phase4_topics() {
       case "$policy" in
         *delete*)
           TOPIC_BUCKET["$pod|$topic"]="trim"
-          trim_n=$((trim_n + 1))
+          CAPTURE_TRIM_N=$((CAPTURE_TRIM_N + 1))
           ;;
         compact)
           TOPIC_BUCKET["$pod|$topic"]="recreate"
-          recreate_n=$((recreate_n + 1))
+          CAPTURE_RECREATE_N=$((CAPTURE_RECREATE_N + 1))
           ;;
         *)
           # Covers both an empty read (rpk/awk found no cleanup.policy row)
@@ -1147,19 +1892,49 @@ phase4_topics() {
     done < <(broker_topics "$pod")
   done
 
-  echo "capture: $((trim_n + recreate_n)) topics ($trim_n trim-eligible, $recreate_n recreate-eligible)"
+  echo "capture: $((CAPTURE_TRIM_N + CAPTURE_RECREATE_N)) topics ($CAPTURE_TRIM_N trim-eligible, $CAPTURE_RECREATE_N recreate-eligible)"
+}
+
+phase4_topics() {
+  echo
+  echo "=== PHASE 4: topics (capture, then trim or delete-and-recreate) ==="
+  if $SKIP_TOPICS; then
+    skip_warning "TOPICS" \
+      "No partition is trimmed, and no topic is deleted or recreated. Every\n    compacted topic — trim-eligible or pure-compact alike — keeps its full\n    latest-per-key contents, including the Faust changelog topics phase 5\n    depends on being empty — if phase 5 also runs, it will republish the\n    SAME pre-reset fleet from state that was expected to be empty."
+    return 0
+  fi
+
+  phase4_capture_pass
 
   local quiesced=false
-  if [ "$recreate_n" -gt 0 ]; then
-    # Armed the moment the quiesce starts, and NOT disarmed by this phase —
+  if [ "$CAPTURE_RECREATE_N" -gt 0 ]; then
+    # quiesce_derived_set arms the trap itself (via quiesce_workload_set) —
     # see emergency_restore_scales for why a per-phase trap was the wrong
     # shape. `set -euo pipefail` with no trap is how this script has already
     # been shown (call 9) to die mid-mutation and leave a state nothing
-    # cleans up; consumers scaled to zero is exactly that kind of state, so
+    # cleans up; workloads scaled to zero is exactly that kind of state, so
     # the restore must not depend on this phase reaching its own last line.
-    arm_scale_trap
-    quiesce_state_consumers
+    quiesce_derived_set "${CAPTURED_TOPICS[@]}"
     quiesced=true
+
+    # Work item 4 — the ACTUAL safety gate, called after the quiesce and
+    # before the first delete, scoped to the delete bucket only (a trim
+    # cannot auto-create a topic; only a delete can, and only the delete is
+    # irreversible). Aborting here is a clean stop: nothing has been
+    # mutated yet, so the trap (still armed) leaves the restore to run
+    # below and the lab ends up where it started.
+    local -a delete_targets=()
+    local dpt
+    for dpt in "${CAPTURED_TOPICS[@]}"; do
+      [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
+    done
+    if ! assert_no_live_consumers "${delete_targets[@]}"; then
+      echo "PHASE 4 ABORTED: a live consumer still holds an offset on a topic" >&2
+      echo "about to be deleted (see LIVE CONSUMER lines above). Nothing has been" >&2
+      echo "deleted. Restoring the quiesced workloads and stopping cleanly." >&2
+      restore_derived_set
+      return 1
+    fi
   else
     echo "no recreate-eligible (pure-compact) topics found — skipping consumer quiesce"
   fi
@@ -1170,7 +1945,7 @@ phase4_topics() {
   # the auto-create race this phase exists to guard against, on the one
   # call site where getting a DIFFERENT topic list than the capture pass
   # saw would silently desync a topic from its own capture file.
-  local pt part logstart hw failure=""
+  local pod topic pt part logstart hw failure="" failure_reason=""
   local red_check_done=false
   for pt in "${CAPTURED_TOPICS[@]}"; do
     pod="${pt%%|*}"
@@ -1224,10 +1999,18 @@ phase4_topics() {
     # delete and could match (and delete) more than the one topic intended.
     # Not used here for exactly that reason.
     capfile="$TOPIC_CAPTURE_DIR/$pod/$topic.cap"
-    maybe_run "delete $topic on $pod (pure-compact — will be recreated from its capture)" \
+    # Work item 5: a failed delete used to abort straight through `set -e`
+    # with no capture-directory pointer and no record of which topic it
+    # was. Handled the same way a failed assertion already was: record the
+    # flag, break the loop, let the code after it print where to look.
+    if ! maybe_run "delete $topic on $pod (pure-compact — will be recreated from its capture)" \
       kubectl exec -n "$NS" "$pod" -c redpanda -- \
       timeout "${RPK_CMD_TIMEOUT:-60}" \
-      rpk topic delete "$topic"
+      rpk topic delete "$topic"; then
+      failure="$pt"
+      failure_reason="delete failed"
+      break
+    fi
 
     # Parse this topic's own capture back into create flags. `_` discards
     # the literal "shape" label the capture file's first line starts with.
@@ -1251,17 +2034,26 @@ phase4_topics() {
     # whole point of this path is that the topic must not already exist
     # when this runs. Masking a pre-existing topic would mask precisely the
     # auto-create race the assertion below exists to catch.
-    maybe_run "recreate $topic on $pod from capture ($cap_partitions partitions, $cap_replicas replicas)" \
+    # Work item 5: a failed create is worse than a failed delete — the
+    # topic is now gone AND not recreated. Same handling shape, but the
+    # reason says so explicitly, because that is exactly what an operator
+    # needs to know before touching anything else.
+    if ! maybe_run "recreate $topic on $pod from capture ($cap_partitions partitions, $cap_replicas replicas)" \
       kubectl exec -n "$NS" "$pod" -c redpanda -- \
       timeout "${RPK_CMD_TIMEOUT:-60}" \
       rpk topic create "$topic" --partitions "$cap_partitions" --replicas "$cap_replicas" \
-      "${create_configs[@]}"
+      "${create_configs[@]}"; then
+      failure="$pt"
+      failure_reason="create failed — topic is now DELETED and NOT recreated"
+      break
+    fi
 
     # Called unconditionally, dry-run or not — see the comment on this
     # function for why a dry run trivially (and correctly) passes here
     # rather than being special-cased out.
     if ! assert_topic_matches_capture "$pod" "$topic"; then
       failure="$pt"
+      failure_reason="recreated topic did not match its capture"
       break
     fi
 
@@ -1295,6 +2087,7 @@ phase4_topics() {
             timeout "${RPK_CMD_TIMEOUT:-60}" \
             rpk topic alter-config "$topic" --set cleanup.policy=compact
           failure="$pt"
+          failure_reason="red-check: assertion did not notice a perturbed cleanup.policy"
           break
         fi
 
@@ -1307,6 +2100,7 @@ phase4_topics() {
           echo "RED-CHECK: restoring cleanup.policy did not repair the assertion —" >&2
           echo "the probe could not put $topic back the way it found it." >&2
           failure="$pt"
+          failure_reason="red-check: could not restore cleanup.policy after perturbing it"
           break
         fi
         echo "  --red-check-topic-config: PASSED ($topic on $pod)"
@@ -1318,13 +2112,13 @@ phase4_topics() {
   # zero until phase 8, and disarming here would hand phases 5-8 the very gap
   # this trap was added to close.
   if $quiesced; then
-    restore_state_consumers
+    restore_derived_set
   fi
 
   if [ -n "$failure" ]; then
-    echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} did not match its" >&2
-    echo "captured configuration. The capture directory holds the expected" >&2
-    echo "form for every topic this run touched: $TOPIC_CAPTURE_DIR" >&2
+    echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} — ${failure_reason:-did not match its captured configuration}." >&2
+    echo "The capture directory holds the expected form for every topic this" >&2
+    echo "run touched: $TOPIC_CAPTURE_DIR" >&2
     return 1
   fi
 }
@@ -1657,6 +2451,179 @@ verify_electric() {
   done
 }
 
+# ---------------------------------------------------------------------------
+# run_census_only — work item 6's --census-only. Runs the REAL capture pass
+# (a read, so it exercises the same code paths a real run's phase 4 would),
+# then prints the raw broker census, Restate's own subscription list, the
+# derived quiesce set with its provenance, and the live-consumer assertion
+# result against the pure-compact (delete-eligible) bucket. MUTATES
+# NOTHING: every call this function makes is a read — no scale, no patch,
+# no topic touched (acceptance check 5).
+# ---------------------------------------------------------------------------
+run_census_only() {
+  echo "=== --census-only: broker consumer census (read-only) ==="
+  local pod tag f2 f3 f4 f5
+  for pod in "${REDPANDA_PODS[@]}"; do
+    echo "-- $pod --"
+    while IFS=$'\t' read -r tag f2 f3 f4 f5; do
+      [ -z "$tag" ] && continue
+      [ "$tag" = "MEMBERS" ] && printf '  group=%-40s members=%-4s state=%-10s hosts=%s\n' \
+        "$f2" "$f3" "$f4" "${f5:-none}"
+    done < <(census_groups "$pod")
+  done
+
+  echo
+  echo "=== --census-only: restate subscriptions (read-only) ==="
+  local rpod rtopic rgid rowner
+  while IFS=$'\t' read -r rpod rtopic rgid rowner; do
+    [ -z "$rpod" ] && continue
+    printf '  pod=%-40s topic=%-40s group.id=%-30s owner=%s\n' "$rpod" "$rtopic" "${rgid:-?}" "$rowner"
+  done < <(restate_subscriptions)
+
+  echo
+  echo "=== --census-only: capture pass (read-only) ==="
+  phase4_capture_pass
+
+  echo
+  echo "=== --census-only: derived quiesce set, with provenance ==="
+  local -a derived=()
+  mapfile -t derived < <(derive_quiesce_set "${CAPTURED_TOPICS[@]}")
+  echo "derived quiesce set: ${#derived[@]} workload(s)"
+  local w
+  for w in "${derived[@]}"; do
+    printf '  %s\n' "$w"
+  done
+
+  echo
+  echo "=== --census-only: live-consumer assertion (against the pure-compact/delete bucket) ==="
+  local -a delete_targets=()
+  local dpt
+  for dpt in "${CAPTURED_TOPICS[@]}"; do
+    [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
+  done
+  if assert_no_live_consumers "${delete_targets[@]}"; then
+    echo "ASSERTION: PASS — zero live members on any of the ${#delete_targets[@]} pure-compact topic(s)."
+  else
+    echo "ASSERTION: FAIL — see LIVE CONSUMER lines above."
+    echo "NOTE: this is expected on a live, unquiesced cluster — --census-only" \
+         "mutates nothing, so nothing has been scaled down. A FAIL here says" \
+         "which consumers are live RIGHT NOW, not that a real run would fail:" \
+         "phase 4 re-asserts AFTER its own quiesce, against the same bucket."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# run_red_check_quiesce — work item 6's --red-check-quiesce. Proves the
+# quiesce/restore path in quiesce_derived_workload/restore_derived_workload
+# handles EVERY kind in work item 3's table — including DaemonSet — without
+# risking a single topic delete: this function never calls `rpk topic
+# delete` or `rpk topic create`.
+#
+# Fact 6 measured ZERO DaemonSets in the namespace today, so the DaemonSet
+# branch has nothing real to exercise it against. This red-check creates
+# one throwaway DaemonSet of its own for exactly that reason — its exact
+# shape (name, image, tolerations) is this red-check's own choice, not
+# something the spec dictates, since nothing about it needs to resemble a
+# real workload: it only needs to exist long enough for merge-patch-then-
+# JSON-patch-restore to run against it. `registry.k8s.io/pause:3.9` is used
+# because it is the smallest image already trusted by every Kubernetes
+# control plane (it is the pod-infra-container image), so this red-check
+# pulls nothing project-specific. Deleted again before this function
+# returns, success or failure path alike.
+# ---------------------------------------------------------------------------
+REDCHECK_DS_NAME="${RELEASE}-redcheck-quiesce-probe"
+
+run_red_check_quiesce() {
+  echo "=== --red-check-quiesce: capture (read-only) ==="
+  phase4_capture_pass
+
+  echo
+  echo "=== --red-check-quiesce: creating throwaway DaemonSet ($REDCHECK_DS_NAME) ==="
+  echo "    (fact 6: zero DaemonSets exist in $NS today — this is the only way" \
+       "to exercise the DaemonSet branch of quiesce/restore short of waiting" \
+       "for one to be deployed for real)"
+  maybe_run "create red-check DaemonSet $REDCHECK_DS_NAME" \
+    bash -c "kubectl apply -n '$NS' -f - <<'DSEOF'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: $REDCHECK_DS_NAME
+  labels:
+    app.kubernetes.io/managed-by: reset-scenario-redcheck
+spec:
+  selector:
+    matchLabels:
+      app: $REDCHECK_DS_NAME
+  template:
+    metadata:
+      labels:
+        app: $REDCHECK_DS_NAME
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+DSEOF"
+
+  local -a derived=()
+  if ! $DRY_RUN; then
+    mapfile -t derived < <(derive_quiesce_set "${CAPTURED_TOPICS[@]}")
+    derived+=("DaemonSet/$REDCHECK_DS_NAME")
+    # Producers too — not because they are in the derived set (they are
+    # deliberately deduped OUT of it, phase 2 owns them), but because phase 4's
+    # real precondition is that phase 2 has ALREADY run. Without this the
+    # red-check asserts against a cluster the real run never sees:
+    # openddil-logistics-sim keeps consuming telemetry-latest-state, the
+    # assertion fails on it forever, and the red-check can never pass while
+    # reporting nothing wrong with the quiesce it is supposed to be testing.
+    # Measured 2026-09-27: that is exactly what it did.
+    local p
+    for p in "${PRODUCER_DEPLOYS[@]}"; do derived+=("Deployment/$p"); done
+  fi
+  echo
+  echo "=== --red-check-quiesce: derived set (+ the throwaway DaemonSet): ${#derived[@]} workload(s) ==="
+  local w
+  for w in "${derived[@]}"; do printf '  %s\n' "$w"; done
+
+  echo
+  echo "=== --red-check-quiesce: quiescing ==="
+  quiesce_workload_set "${derived[@]}"
+
+  echo
+  echo "=== --red-check-quiesce: live-consumer assertion (against the pure-compact/delete bucket) ==="
+  local -a delete_targets=()
+  local dpt assert_rc=0
+  for dpt in "${CAPTURED_TOPICS[@]}"; do
+    [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
+  done
+  assert_no_live_consumers "${delete_targets[@]}" || assert_rc=$?
+
+  echo
+  echo "=== --red-check-quiesce: restoring ==="
+  restore_derived_set
+
+  echo
+  echo "=== --red-check-quiesce: deleting throwaway DaemonSet ($REDCHECK_DS_NAME) ==="
+  maybe_run "delete red-check DaemonSet $REDCHECK_DS_NAME" \
+    kubectl delete ds -n "$NS" "$REDCHECK_DS_NAME" --ignore-not-found
+
+  echo
+  if [ "$assert_rc" -eq 0 ]; then
+    echo "ASSERTION: PASS — zero live members on any of the ${#delete_targets[@]} pure-compact topic(s), post-quiesce."
+  else
+    echo "ASSERTION: FAIL — see LIVE CONSUMER lines above. This is a live-cluster" >&2
+    echo "reading, not a defect in this red-check: it means a real run's own" >&2
+    echo "phase 4 gate would ALSO have aborted right here, before any delete." >&2
+  fi
+  echo "--red-check-quiesce: TOUCHED NO TOPIC. Confirm the restore with your own" \
+       "'kubectl get deploy,sts -n $NS' diff before/after (acceptance check 6)."
+}
+
 phase9_verify() {
   echo
   echo "=== PHASE 9: verify (PREDICTED vs ACTUAL) ==="
@@ -1716,6 +2683,16 @@ phase9_verify() {
 if $BASELINE_ONLY; then
   phase1_baseline
   exit 0
+fi
+
+if $CENSUS_ONLY; then
+  run_census_only
+  exit 0
+fi
+
+if $RED_CHECK_QUIESCE; then
+  run_red_check_quiesce
+  exit $?
 fi
 
 if $VERIFY_ONLY; then
