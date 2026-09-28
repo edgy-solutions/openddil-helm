@@ -187,6 +187,37 @@ spec:
             # kubectl port-forward debugging (advertise localhost so the
             # forwarded client can resolve).
             - PLAINTEXT://{{ $name }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://localhost:{{ $.Values.redpandaEdge.outsidePort }}
+            # NO AUTO-CREATED TOPICS.
+            #
+            # This is the FRESH-INSTALL path and it is deliberately not the only
+            # one. `redpanda start --set` seeds a CLUSTER property, and cluster
+            # properties live in the controller log -- seeded at first cluster
+            # formation and never re-read from the command line again. So on a
+            # cluster that already exists this line does NOTHING, and an
+            # existing deployment additionally needs, once per cluster:
+            #
+            #   rpk cluster config set auto_create_topics_enabled false
+            #
+            # (each broker here is its own single-node cluster, so that is once
+            # per broker, on the admin API -- 9644 for edges and regions, 19644
+            # for hq, NOT the Kafka port). Shipping only this flag and believing
+            # an existing lab changed is the trap: read the property back per
+            # broker and never infer it from this line being present.
+            #
+            # Why off: an auto-created topic is born at broker DEFAULTS -- 1
+            # partition, cleanup.policy=delete -- so a latest-state topic that
+            # must be retained by KEY silently becomes one retained by AGE, and
+            # can drop an asset entirely. topic-init declares every topic this
+            # system uses, so anything else appearing is a defect and should
+            # fail loudly rather than be invented looking plausible.
+            #
+            # Know the failure shape before turning this off: a produce to a
+            # topic that does not exist HANGS AND RETRIES SILENTLY (measured
+            # 2026-09-27). It does not fail fast naming the topic, so an
+            # operator expecting a clean error will look for the wrong thing
+            # and conclude the setting never applied.
+            - --set
+            - redpanda.auto_create_topics_enabled=false
           ports:
             - name: kafka
               containerPort: {{ $.Values.redpandaEdge.internalPort }}
@@ -342,6 +373,37 @@ spec:
             # PLAINTEXT advertises TOXIPROXY (load-bearing — see docker-compose
             # comment + ADR for rationale). OUTSIDE for kubectl port-forward.
             - PLAINTEXT://{{ .Release.Name }}-toxiproxy{{ include "openddil.svcDomain" . }}:{{ .Values.toxiproxy.apiPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}
+            # NO AUTO-CREATED TOPICS.
+            #
+            # This is the FRESH-INSTALL path and it is deliberately not the only
+            # one. `redpanda start --set` seeds a CLUSTER property, and cluster
+            # properties live in the controller log -- seeded at first cluster
+            # formation and never re-read from the command line again. So on a
+            # cluster that already exists this line does NOTHING, and an
+            # existing deployment additionally needs, once per cluster:
+            #
+            #   rpk cluster config set auto_create_topics_enabled false
+            #
+            # (each broker here is its own single-node cluster, so that is once
+            # per broker, on the admin API -- 9644 for edges and regions, 19644
+            # for hq, NOT the Kafka port). Shipping only this flag and believing
+            # an existing lab changed is the trap: read the property back per
+            # broker and never infer it from this line being present.
+            #
+            # Why off: an auto-created topic is born at broker DEFAULTS -- 1
+            # partition, cleanup.policy=delete -- so a latest-state topic that
+            # must be retained by KEY silently becomes one retained by AGE, and
+            # can drop an asset entirely. topic-init declares every topic this
+            # system uses, so anything else appearing is a defect and should
+            # fail loudly rather than be invented looking plausible.
+            #
+            # Know the failure shape before turning this off: a produce to a
+            # topic that does not exist HANGS AND RETRIES SILENTLY (measured
+            # 2026-09-27). It does not fail fast naming the topic, so an
+            # operator expecting a clean error will look for the wrong thing
+            # and conclude the setting never applied.
+            - --set
+            - redpanda.auto_create_topics_enabled=false
           ports:
             - name: kafka
               containerPort: {{ .Values.redpandaHq.kafkaPort }}
