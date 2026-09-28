@@ -1,4 +1,14 @@
-# Deploy package — revision 51
+# Deploy package — chart `openddil-demo-0.1.58`
+
+> **Named by chart version, not by helm revision.** A revision number is a
+> per-cluster counter: this same chart is revision 51 on the lab and will be
+> some other number at work, so the old name identified the document only on
+> one cluster and quietly misidentified it everywhere else. It also hid
+> multiplicity -- the next package after this one carried three chart versions
+> and three separate deploys under a single revision heading, which is exactly
+> the thing a file name should have made obvious. The chart version is the
+> same everywhere the chart is installed, so it is what the name now carries.
+
 
 > **EXECUTED ON THE LAB 2026-09-26 — this is now the work-deploy package.**
 > Revision 51 was deployed to `edgy-lab` by this procedure and measured against

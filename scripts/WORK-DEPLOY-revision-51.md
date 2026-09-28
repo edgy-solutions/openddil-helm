@@ -5,7 +5,7 @@ package**, so this file is the difference list: what the lab measured, what the
 lab *could not* measure, and what is different at work. Read it top to bottom
 before the first command.
 
-Companion files: `DEPLOY-PACKAGE-revision-51.md` (the procedure),
+Companion files: `DEPLOY-PACKAGE-chart-0.1.58.md` (the procedure),
 `PREDICTION-2026-09-26-rev51-lab.md` (what was predicted and what came back),
 `RECORDING-READINESS.md` §E (severance, re-rehearsed at 51), and the two
 findings files from the run.

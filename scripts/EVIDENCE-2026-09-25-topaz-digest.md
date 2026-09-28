@@ -1,6 +1,6 @@
 # Evidence — is the pinned Topaz digest actually tag 0.33.16?
 
-Raised by `DEPLOY-PACKAGE-revision-51.md` section 1.3 as "the one thing not
+Raised by `DEPLOY-PACKAGE-chart-0.1.58.md` section 1.3 as "the one thing not
 verifiable from here". Revision 51 makes five tier Topaz pods read
 `tierNode.topaz.image.digest` for the first time — the field held a real
 sha256 that had never been used — so if the digest named a different build,
