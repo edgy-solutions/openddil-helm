@@ -1054,10 +1054,15 @@ is_internal_topic() {
 # ---------------------------------------------------------------------------
 topic_dynamic_config() {
   # Sorted `key=value` lines, DYNAMIC_TOPIC_CONFIG rows only. DEFAULT_CONFIG
-  # rows are excluded on purpose: they come back on their own the moment a
-  # topic is recreated (auto_create_topics_enabled, measured fact 3), so
-  # capturing them would just be restating broker defaults as if they were
-  # part of this topic's identity.
+  # rows are excluded on purpose: a default is a default whoever creates the
+  # topic, so capturing them would just be restating broker defaults as if
+  # they were part of this topic's identity.
+  #
+  # This reasoning used to be stated as "they come back on their own the
+  # moment a topic is recreated (auto_create_topics_enabled, measured fact
+  # 3)". As of chart 0.1.61 auto-create is OFF on every broker, so nothing
+  # comes back on its own any more -- but the exclusion is still right, for
+  # the reason above rather than that one.
   local pod="$1" topic="$2"
   kubectl exec -n "$NS" "$pod" -c redpanda -- rpk topic describe "$topic" -c 2>/dev/null \
     | awk '$3=="DYNAMIC_TOPIC_CONFIG"{printf "%s=%s\n",$1,$2}' | sort || true
@@ -1431,9 +1436,28 @@ phase3_restate() {
 # on every recreated topic, every run.
 #
 # WHY CONSUMERS ARE QUIESCED, AND WHY THIS IS PER-TOPIC, NOT BULK.
-# auto_create_topics_enabled=true on every broker (measured 2026-09-27): the
-# instant ANY consumer or producer touches a topic that does not currently
-# exist, the broker recreates it with DEFAULT config — 1 partition,
+#
+# SUPERSEDED PREMISE, KEPT BECAUSE THE PRACTICE STILL STANDS. This paragraph
+# read "auto_create_topics_enabled=true on every broker (measured
+# 2026-09-27)". That was true when measured and is FALSE as of chart 0.1.61,
+# which sets the property false on all five brokers. The race described below
+# can therefore no longer happen by auto-creation, and quiescing is now
+# defence in depth rather than the only thing standing between a delete and a
+# wrong topic.
+#
+# Do NOT relax the quiesce on the strength of that. The failure mode did not
+# disappear, it changed shape: with auto-create off, a consumer or producer
+# touching a topic that does not currently exist does not get a wrong topic,
+# it HANGS AND RETRIES SILENTLY with no error (measured 2026-09-27). A
+# quiesced consumer cannot hang. And the property is a cluster setting that a
+# fresh install seeds but an existing cluster does not adopt from the chart,
+# so a lab that was never updated at runtime is still a lab where the
+# original race is live. The safe reading is: assume nothing about the
+# property here, quiesce anyway.
+#
+# The historical premise, for the record: with auto-create on, the instant ANY
+# consumer or producer touches a topic that does not currently exist, the
+# broker recreates it with DEFAULT config — 1 partition,
 # cleanup.policy=delete, none of the 53 topics' real settings. Every one of
 # these 53 topics has at least one live consumer group (measured fact 4), so
 # between this phase's `rpk topic delete` and its `rpk topic create`, a
