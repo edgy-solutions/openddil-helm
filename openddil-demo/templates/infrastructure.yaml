@@ -726,3 +726,39 @@ spec:
                 done
                 echo "INFO: Topics initialized on $B"
               done
+
+              # ---------------------------------------------------------
+              # HQ-ONLY TOPICS -- the release boundary
+              # ---------------------------------------------------------
+              # `egress-c2-status` is created on HQ and DELIBERATELY NOT on the
+              # edge or region brokers. A topic that exists on a tier is a
+              # topic something on that tier can produce to, and the egress
+              # gate's whole claim is that there is ONE boundary. Five copies
+              # of this topic would be five places a release decision could be
+              # asserted, four of them unreviewed -- so the placement is part
+              # of the control, not a deployment detail.
+              #
+              # The config MIRRORS `asset-logistics-status` exactly (compacted,
+              # 8 partitions, keyed by asset_id, retention.ms=-1) so that a
+              # difference between what the source holds and what this holds is
+              # A DECISION THE GATE MADE, never an artifact of how the two
+              # topics were configured. That diffability is the one property
+              # the gate's claim rests on, which is why this is compacted
+              # rather than retained by age: the per-record audit trail lives
+              # in the gate's own DECISION log, not in this topic's history.
+              #
+              # Kept byte-identical to the compose declaration so the two
+              # environments cannot disagree about what the boundary is.
+              # Ledger row LR-0043-C.
+              HQB={{ .Release.Name }}-redpanda-hq:{{ .Values.redpandaHq.kafkaPort }}
+              echo "INFO: Initializing HQ-only egress topics on $HQB"
+              for spec in                 "egress-c2-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"               ; do
+                topic="${spec%%|*}"
+                args="${spec##*|}"
+                rpk -X brokers=$HQB topic create $topic $args || true
+                setargs=$(printf ' %s' "$args" | sed -E 's/ -p [0-9]+//; s/ -r [0-9]+//; s/ -c / --set /g')
+                if [ -n "$setargs" ]; then
+                  rpk -X brokers=$HQB topic alter-config $topic $setargs || true
+                fi
+              done
+              echo "INFO: HQ-only egress topics initialized on $HQB"
