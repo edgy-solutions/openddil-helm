@@ -262,11 +262,15 @@ function Resolve-DesiredDigest {
         return $child.digest
     }
 
-    # Single-arch: top-level manifest digest.
-    $top = & docker buildx imagetools inspect $Ref --format '{{.Manifest.Digest}}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $top) {
-        return $top.Trim()
-    }
+    # Single-arch: top-level manifest digest, read from the Digest: line of
+    # the default text output. Not --format '{{.Manifest.Digest}}': the
+    # buildx versions that ignore it (see the note below) print the whole
+    # Name/MediaType/Digest block, and returning that verbatim produced a
+    # source reference of "<repo>@Name: ..." for every single-arch image.
+    $top = & docker buildx imagetools inspect $Ref 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $top) { return $null }
+    $m = [regex]::Match(($top -join "`n"), '(?m)^\s*Digest:\s*(sha256:[0-9a-f]{64})')
+    if ($m.Success) { return $m.Groups[1].Value }
     return $null
 }
 
