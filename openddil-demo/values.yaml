@@ -700,6 +700,32 @@ frontend:
     limits:   { cpu: 200m, memory: 256Mi }
   port: 80
 
+# --- Egress gate + its pane (ADR-0043 Arc 2 Slice 2, ledger row LR-0043-C) --
+# ONE image, TWO Deployments: the gate (image default command, main.py) and
+# the pane API (pane_api.py). Both import the same gate.py, so they cannot
+# disagree about what a decision means. Rendered only when releasability is
+# enabled -- the gate asks the hub's Topaz, and without it every record would
+# be refused `pdp_unavailable`, which is an outage presenting as a policy.
+#
+# HUB ONLY, like egress-c2-status itself: a gate on a tier would be a second
+# boundary, and the claim is that there is one.
+egress:
+  image:
+    name: egress
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  # The destination is a SUBJECT in the entitlements corpus. Absent from the
+  # corpus, the gate refuses every record `destination_unknown`.
+  destination: "system:c2-stand-in-atl"
+  sourceTopic: asset-logistics-status
+  sinkTopic: egress-c2-status
+  paneApi:
+    port: 8090
+  resources:
+    requests: { cpu: 50m,  memory: 128Mi }
+    limits:   { cpu: 300m, memory: 256Mi }
+
 # --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
 # Three small images referenced by chart templates rather than by service-
 # level definitions. Parameterized here so a private-registry deployment

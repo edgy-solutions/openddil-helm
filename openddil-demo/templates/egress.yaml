@@ -1,0 +1,133 @@
+{{- if .Values.releasability.enabled }}
+{{- /*
+===========================================================================
+egress — the releasability gate toward a C2, and the pane that shows it
+===========================================================================
+ADR-0043 Arc 2 Slice 2, ledger row LR-0043-C. Under compose both processes
+borrow the projector image and bind-mount ./egress; a pod cannot, so they
+run from the egress image, which bakes the code and the generated protos and
+refuses to build if the decision tests fail.
+
+ONE image, TWO Deployments. They are separate processes for the reason
+pane_api.py's docstring gives: the gate's loop is a blocking Kafka consumer
+and the pane is a synchronous HTTP server, and grafting one onto the other
+means one blocks the other.
+
+HUB ONLY. egress-c2-status is declared on the hub broker alone (topic-init),
+for the recorded reason that a topic on a tier is a topic something on that
+tier can produce to, and the gate's claim is that there is ONE boundary.
+*/}}
+{{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
+{{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
+    .Values.postgresHq.auth.username
+    .Values.postgresHq.auth.password
+    .Release.Name
+    (include "openddil.svcDomain" .)
+    (int .Values.postgresHq.port)
+    .Values.postgresHq.auth.database }}
+{{- $topazUrl := printf "http://%s-topaz-hq%s:8383" .Release.Name (include "openddil.svcDomain" .) }}
+{{- $image := include "openddil.image" (dict "name" .Values.egress.image.name "tag" .Values.egress.image.tag "digest" .Values.egress.image.digest "root" .) }}
+{{- $pullPolicy := include "openddil.pullPolicy" (dict "policy" .Values.egress.image.pullPolicy "root" .) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-gate-c2
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 4 }}
+spec:
+  # ONE REPLICA. The consumer group would split partitions between two, which
+  # is safe for the decision, but the per-record DECISION log is the audit
+  # trail and one process writing it is one place to read it.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # No command override: the image's default command IS the gate.
+        - name: gate
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          env:
+            - name: OPENDDIL_EGRESS_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: OPENDDIL_EGRESS_SOURCE_TOPIC
+              value: {{ .Values.egress.sourceTopic | quote }}
+            - name: OPENDDIL_EGRESS_SINK_TOPIC
+              value: {{ .Values.egress.sinkTopic | quote }}
+            - name: OPENDDIL_EGRESS_DESTINATION
+              value: {{ .Values.egress.destination | quote }}
+            - name: OPENDDIL_TOPAZ_URL
+              value: {{ $topazUrl | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-egress-pane-api
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.egress.paneApi.port }}
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "egress-pane-api" "root" .) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-pane-api
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-pane-api" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-pane-api" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-pane-api" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pane-api
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/pane_api.py"]
+          env:
+            - name: OPENDDIL_EGRESS_PANE_PORT
+              value: {{ .Values.egress.paneApi.port | quote }}
+            - name: OPENDDIL_EGRESS_DESTINATION
+              value: {{ .Values.egress.destination | quote }}
+            - name: OPENDDIL_TOPAZ_URL
+              value: {{ $topazUrl | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - name: http
+              containerPort: {{ .Values.egress.paneApi.port }}
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+{{- end }}
