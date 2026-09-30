@@ -450,6 +450,10 @@ spec:
 # The reachback closed in one object: KAFKA_BROKERS and POSTGRES_DSN both
 # point at this tier. Previously the second pointed at the root, which is why
 # a tier had no queryable surface over its own data.
+{{- $tierProjectorPairs := list }}
+{{- range include "openddil.tierProjectorGroupIds" (dict "tier" $tier "root" $root) | splitList " " }}
+{{- $tierProjectorPairs = append $tierProjectorPairs (printf "%s/%s" $tier.id .) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -457,6 +461,11 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 4 }}
+  annotations:
+    # Groups PARSED from openddil.tierProjectorConfig via
+    # openddil.tierProjectorGroupIds (_helpers.tpl), not re-typed -- so this
+    # can never disagree with the mapping set actually mounted below.
+    openddil.io/consumer-groups: {{ join " " $tierProjectorPairs | quote }}
 spec:
   replicas: 1
   selector:
@@ -1550,6 +1559,7 @@ data:
   connect.yaml: |
 {{- include "openddil.tierUplinkConnectYaml" (dict "tier" $tier "root" $root "broker" $broker) | nindent 4 }}
 ---
+{{- $tierUplinkGroup := (include "openddil.tierUplinkConnectYaml" (dict "tier" $tier "root" $root "broker" $broker) | fromYaml).input.kafka.consumer_group }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1557,6 +1567,10 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-uplink-%s" $tier.id) "root" $root) | nindent 4 }}
+  annotations:
+    # Group PARSED from the generated connect.yaml
+    # (openddil.tierUplinkConnectYaml in _helpers.tpl), not re-typed.
+    openddil.io/consumer-groups: {{ printf "%s/%s" $tier.id $tierUplinkGroup | quote }}
 spec:
   replicas: 1
   selector:

@@ -477,6 +477,10 @@ spec:
 #     values; older migrations would let the service start but every
 #     upsert would fail).
 #   - The asset-registry-events topic existing (topic-init creates it).
+{{- $assetRegistryPairs := list }}
+{{- range .Values.edges }}
+{{- $assetRegistryPairs = append $assetRegistryPairs (printf "%s/asset-registry-%s" .id .id) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -484,6 +488,12 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "asset-registry-service" "root" .) | nindent 4 }}
+  annotations:
+    # One group per edge -- SAME .Values.edges range as ASSET_REGISTRY_EDGES
+    # below, one composed Faust App per edge=broker pair. "asset-registry-"
+    # is a CODE DEFAULT group prefix (asset-registry-service), not visible
+    # in this chart.
+    openddil.io/consumer-groups: {{ join " " $assetRegistryPairs | quote }}
 spec:
   replicas: 1   # Single writer by design (ADR-0028). DO NOT scale up.
   strategy:
@@ -784,6 +794,10 @@ spec:
 # ===========================================================================
 # Same image as per-edge projector; different broker (hq), different
 # edge/region labels (unspecified), buffer monitor off.
+{{- $projectorHqPairs := list }}
+{{- range include "openddil.projectorGroupIds" . | splitList " " }}
+{{- $projectorHqPairs = append $projectorHqPairs (printf "hq/%s" .) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -791,6 +805,12 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 4 }}
+  annotations:
+    # 11-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # DEFAULT (projector_config.yaml in openddil-projector), not visible in
+    # this chart. Same set as the per-edge projector Deployments in
+    # edge.yaml, here on the hq broker.
+    openddil.io/consumer-groups: {{ join " " $projectorHqPairs | quote }}
 spec:
   replicas: 1
   selector:

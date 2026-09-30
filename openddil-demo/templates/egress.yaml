@@ -35,6 +35,13 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 4 }}
+  annotations:
+    # "egress-gate-c2" is a CODE DEFAULT group id (matches the gate's own
+    # component name; no group env var exists to derive from -- see the
+    # Problem section of SPEC-consumer-declarations.md, measured on the lab:
+    # this consumer reaches the hq broker through toxiproxy and resolved to
+    # PROXY/... under IP-based ownership, so a reset never quiesced it).
+    openddil.io/consumer-groups: "hq/egress-gate-c2"
 spec:
   # ONE REPLICA. The consumer group would split partitions between two, which
   # is safe for the decision, but the per-record DECISION log is the audit

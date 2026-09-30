@@ -38,6 +38,10 @@ metadata:
 data:
   config.yaml: |
     {{- toYaml $cfg.config | nindent 4 }}
+{{- $logisticsSimPairs := list }}
+{{- range .Values.edges }}
+{{- $logisticsSimPairs = append $logisticsSimPairs (printf "%s/logistics-sim-%s" .id .id) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,6 +50,11 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "logistics-sim" "root" .) | nindent 4 }}
+  annotations:
+    # One group per edge -- SAME .Values.edges range as
+    # LOGISTICS_SIM_EDGE_CLUSTERS above. "logistics-sim-" is the service's
+    # consumer_group_prefix CODE DEFAULT, not visible in this chart.
+    openddil.io/consumer-groups: {{ join " " $logisticsSimPairs | quote }}
 spec:
   replicas: 1
   strategy:

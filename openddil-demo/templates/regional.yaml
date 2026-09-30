@@ -16,6 +16,37 @@
 {{- end }}
 {{- end }}
 
+{{- /* Declared consumer groups (SPEC-consumer-declarations.md Part A).
+       "region-<id>-aggregator" / "-hq-source" / "-source-<sourceId>" are
+       FAUST-REGIONAL'S NAMES -- CODE DEFAULTS for the composed per-source
+       Faust Apps this service runs in-process, not visible in this chart.
+       Reuses the SAME $tierManaged flag and source list this Deployment
+       already computes below, so the declaration cannot name a source this
+       Deployment does not actually have.
+       - aggregator + hq-source read REGIONAL_HQ_BROKERS's target: the
+         region's own broker once tier-managed, hq otherwise (same cutover
+         as REGIONAL_HQ_BROKERS below).
+       - one "source-<id>" per REGIONAL_EDGES entry, on that source's own
+         broker (an edge's own broker normally; the region's own broker,
+         keyed by the region's own id, once tier-managed -- see
+         REGIONAL_EDGES below). */ -}}
+{{- $tierManaged := include "openddil.isTierManaged" (dict "id" $region.id "root" $root) }}
+{{- $aggHqBrokerId := "hq" }}
+{{- $sourceIds := list }}
+{{- if $tierManaged }}
+{{- $aggHqBrokerId = $region.id }}
+{{- $sourceIds = list $region.id }}
+{{- else }}
+{{- range $root.Values.edges }}
+{{- if eq .region $region.id }}
+{{- $sourceIds = append $sourceIds .id }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $regionalPairs := list (printf "%s/region-%s-aggregator" $aggHqBrokerId $region.id) (printf "%s/region-%s-hq-source" $aggHqBrokerId $region.id) }}
+{{- range $sourceIds }}
+{{- $regionalPairs = append $regionalPairs (printf "%s/region-%s-source-%s" . $region.id .) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,6 +54,8 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 4 }}
+  annotations:
+    openddil.io/consumer-groups: {{ join " " $regionalPairs | quote }}
 spec:
   replicas: 1
   selector:

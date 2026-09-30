@@ -167,6 +167,20 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 4 }}
+  annotations:
+    # openddil.io/consumer-groups (SPEC-consumer-declarations.md Part A) --
+    # declares (broker-id/group-id) pairs this WORKLOAD owns, on the
+    # WORKLOAD's own metadata (not spec.template: that would roll the pod on
+    # every annotation edit). reset-scenario.sh reads this instead of
+    # resolving ownership from connection source IP -- every consumer that
+    # reaches a broker through toxiproxy resolved to PROXY/... there and was
+    # silently skipped by a reset.
+    #
+    # "connect-dis-mapper" is a CODE DEFAULT baked into the DIS Bronze->Silver
+    # mapper's connect.yaml (demo/openddil-base-connect.yaml in the runtime
+    # bundle), not a value this chart sets -- identical across edges since
+    # only the broker differs per pod.
+    openddil.io/consumer-groups: {{ printf "%s/connect-dis-mapper" $edge.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -237,6 +251,10 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "faust-edge-%s" $edge.id) "root" $root) | nindent 4 }}
+  annotations:
+    # Group == the Faust app id, SAME expression as FAUST_APP_ID below
+    # (Faust defaults a consumer group to the app's own app_id).
+    openddil.io/consumer-groups: {{ printf "%s/openddil-%s" $edge.id $edge.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -356,6 +374,11 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "edge-hq-bridge-%s" $edge.id) "root" $root) | nindent 4 }}
+  annotations:
+    # Group PARSED from the generated connect.yaml (openddil.edgeBridgeConnectYaml
+    # in _helpers.tpl), not re-typed -- so this can never disagree with what
+    # the bridge actually commits under.
+    openddil.io/consumer-groups: {{ printf "%s/%s" $edge.id (include "openddil.edgeBridgeConnectYaml" (dict "edge" $edge "root" $root "edgeBroker" $edgeBroker) | fromYaml).input.kafka.consumer_group | quote }}
 spec:
   replicas: 1
   selector:
@@ -479,6 +502,10 @@ spec:
 # One writer per edge, and for a tier-managed edge that writer is behind
 # the bridge, so cutting the bridge is now visible at HQ.
 {{- if not (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) }}
+{{- $projectorPairs := list }}
+{{- range include "openddil.projectorGroupIds" $root | splitList " " }}
+{{- $projectorPairs = append $projectorPairs (printf "%s/%s" $edge.id .) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -486,6 +513,13 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 4 }}
+  annotations:
+    # 11-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # DEFAULT (projector_config.yaml in openddil-projector), not visible in
+    # this chart. This Deployment is the ROOT projector reading an
+    # untier-managed edge's own broker (see NOT DEPLOYED FOR A TIER-MANAGED
+    # EDGE below), so it carries the full root set, same as projector-hq.
+    openddil.io/consumer-groups: {{ join " " $projectorPairs | quote }}
 spec:
   replicas: 1
   selector:

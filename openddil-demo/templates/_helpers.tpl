@@ -823,6 +823,46 @@ it with more steps.
 {{- end }}
 
 {{/*
+openddil.projectorGroupIds -- the "openddil-projector" service's fixed
+11-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+
+CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
+non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
+"openddil-projector" image with no PROJECTOR_CONFIG override, so both fall
+back to the image's baked-in root config at
+/app/src/config/projector_config.yaml in the openddil-projector repo. That
+file is this list's source of truth; this is a mirror of it, written once so
+every caller shares one list instead of re-typing 11 names.
+
+Values measured from the live lab census (expected-declared.tsv), since the
+source file lives in a different repo this chart does not vendor.
+*/}}
+{{- define "openddil.projectorGroupIds" -}}
+projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-logistics-status projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+{{- end }}
+
+{{/*
+openddil.tierProjectorGroupIds -- a tier projector's consumer-group ids, as a
+space-separated list (SPEC-consumer-declarations.md Part A).
+
+PARSED FROM THE RENDERED CONFIG, not re-typed. openddil.tierProjectorConfig
+above already carries the authoritative `consumer_group` field per mapping
+(fed straight to the ConfigMap this Deployment mounts); this reads them back
+out with fromYaml so the declared-consumer-groups annotation and the running
+config can never disagree about what a tier-projector actually consumes.
+
+Usage: include "openddil.tierProjectorGroupIds" (dict "tier" $tier "root" $root)
+*/}}
+{{- define "openddil.tierProjectorGroupIds" -}}
+{{- $cfg := include "openddil.tierProjectorConfig" . | fromYaml -}}
+{{- $ids := list -}}
+{{- range $cfg.mappings -}}
+{{- $ids = append $ids .consumer_group -}}
+{{- end -}}
+{{- join " " $ids -}}
+{{- end }}
+
+{{/*
 openddil.tierProjectorConfig -- a tier projector's mapping set, as content.
 
 HASHED BY THE DEPLOYMENT THAT MOUNTS IT, for the reason recorded on
