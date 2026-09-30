@@ -76,7 +76,14 @@ set -euo pipefail
 # state for a living, and the one time a shortcut around the cluster check
 # would be reached for is exactly the wrong cluster, under time pressure.
 # ---------------------------------------------------------------------------
-. "$(dirname "$0")/lib/require-cluster.sh"
+# RESET_SCENARIO_SOURCE_ONLY (test-only escape hatch, see the matching guard
+# near the "main" dispatch below): skips the cluster assertion when this file
+# is sourced for its function definitions instead of run — the guard itself
+# calls `exit`, not `return`, so left unguarded it would kill the sourcing
+# shell (the test harness), not just this script.
+if [ "${RESET_SCENARIO_SOURCE_ONLY:-}" != 1 ]; then
+  . "$(dirname "$0")/lib/require-cluster.sh"
+fi
 
 NS="${NS:-openddil}"
 RELEASE="${RELEASE:-openddil}"
@@ -317,15 +324,22 @@ echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
 # CENSUS — derive the quiesce set for phase 4 from measured reality instead
 # of a name pattern. See SPEC-census-quiesce.md. All read-only.
 #
-# THE LOAD-BEARING IDEA: derivation below is best-effort — fact 3
-# (toxiproxy masks every real owner behind ONE Deployment name on the HQ
-# broker) proves owner resolution is SOMETIMES IMPOSSIBLE from the broker
-# side, no matter how carefully this is written. Detecting that a live
-# consumer exists needs no owner resolution at all: MEMBERS on the group
-# says so directly. So derivation feeds a best-effort scale-down list, and
-# assert_no_live_consumers (work item 4) is the actual safety gate — a
-# missed consumer now costs a stopped run, not a silently auto-created
-# topic.
+# SUPERSEDED BY SPEC-consumer-declarations.md (2026-09-30): derivation used
+# to resolve a group's owner from its member's connection-source IP (the
+# functions that walked IP -> pod -> owner are gone now) — fact 3 (toxiproxy
+# masks every real owner behind ONE Deployment name on the HQ broker) proved
+# that path SOMETIMES IMPOSSIBLE no matter how carefully it was written, and
+# `egress-gate-c2` was the measured cost: proxied, absent from FLOOR_FAMILY_
+# REGEX, never quiesced. Ownership is now read from the chart's own
+# `openddil.io/consumer-groups` annotation (declared_consumers, below) or
+# Restate's own subscription list (restate_subscriptions) — both name the
+# real owner directly, with no host in between for a proxy to sit in front
+# of. Detecting that a live consumer exists still needs no owner resolution
+# at all: MEMBERS on the group says so directly, which is why assert_no_
+# live_consumers (work item 4) and the new assert_consumers_declared
+# pre-flight (Part B item 4) both re-read the census fresh rather than
+# trusting derivation's list — an unresolvable owner is now a REFUSAL
+# (assert_consumers_declared), not a silent skip.
 # ===========================================================================
 
 # census_groups POD — one broker's consumer census, read-only, two
@@ -392,11 +406,16 @@ census_groups() {
 # Declared proxies. Exactly one, per measured fact 3: openddil-toxiproxy
 # masks every real consumer on the HQ broker behind its own Deployment name
 # and host IP — CLIENT-ID does not disambiguate (rdkafka or faust-0.15.3),
-# and two DIFFERENT real owners report the SAME host through it. A PROXY/*
-# result means UNRESOLVED, not found, and every caller below (derive_
-# quiesce_set, assert_no_live_consumers) treats it that way — it is never
-# added to the quiesce set, and it is never counted as a resolved owner in
-# the assertion's failure report.
+# and two DIFFERENT real owners report the SAME host through it.
+#
+# NARROWED SCOPE (SPEC-consumer-declarations.md): the only remaining caller
+# of _is_declared_proxy_name is _owner_of_pod, below, and _owner_of_pod's
+# only remaining caller is restate_subscriptions, which only ever passes it
+# a Restate runtime pod — never toxiproxy — so the PROXY branch cannot fire
+# in practice any more. Left in place because _owner_of_pod is still a
+# general pod->owner walk whose documented contract includes a PROXY result,
+# and a future caller of it (not just restate_subscriptions) should get that
+# contract honoured rather than silently dropped.
 DECLARED_PROXY_DEPLOYS=("${RELEASE}-toxiproxy")
 
 _is_declared_proxy_name() {
@@ -407,21 +426,8 @@ _is_declared_proxy_name() {
   return 1
 }
 
-declare -A IP2POD             # built once, at first resolve_owner call
-IP2POD_BUILT=false
-declare -A OWNER_CACHE_BY_IP  # resolve_owner's own memo — an IP recurs dozens
-                               # of times across groups, each miss is a kubectl call
-declare -A OWNER_CACHE_BY_POD # shared with restate_subscriptions, which already
-                               # has a pod name and never needs the IP step at all
-
-_build_ip2pod_map() {
-  $IP2POD_BUILT && return 0
-  IP2POD_BUILT=true
-  local name ip
-  while IFS=$'\t' read -r name ip; do
-    [ -n "$ip" ] && IP2POD["$ip"]="$name"
-  done < <(kubectl get pods -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}' 2>/dev/null)
-}
+declare -A OWNER_CACHE_BY_POD # restate_subscriptions already has a pod name
+                               # and never needs an IP->pod step at all
 
 # _owner_of_pod POD -> Kind/Name (or PROXY/Name, per the declared-proxy
 # check above). pod -> ownerReferences[0] directly; a ReplicaSet owner is
@@ -454,25 +460,108 @@ _owner_of_pod() {
   printf '%s' "$result"
 }
 
-# resolve_owner IP -> Kind/Name, PROXY/Name, or UNRESOLVED-IP/ip. Memoised
-# by IP (work item 1) — the same handful of host IPs recurs across dozens
-# of groups in the census, and every cache miss here is a kubectl call.
-resolve_owner() {
-  local ip="$1" cached pod result
-  cached="${OWNER_CACHE_BY_IP[$ip]:-}"
-  if [ -n "$cached" ]; then
-    printf '%s' "$cached"
+# declared_consumers -> "<broker-id>\t<group>\t<Kind>/<name>" per entry in
+# every Deployment/StatefulSet's `openddil.io/consumer-groups` annotation
+# (SPEC-consumer-declarations.md Part A), ONE kubectl call for the whole
+# namespace. This is the replacement for owner-by-connection-IP: the chart
+# writes the real owner onto the workload itself, so there is no host in
+# between for a proxy (fact 3) to stand in front of.
+#
+# The annotation key's embedded dot is escaped the same way kubectl's own
+# docs escape "kubernetes.io/created-by" in a jsonpath expression
+# (`{.metadata.annotations.kubernetes\.io/created-by}`) — the backslash
+# escapes only the literal dot inside the field name; the "/" needs no
+# escaping because jsonpath never treats "/" as a path separator.
+declared_consumers() {
+  local owner value pair
+  kubectl get deploy,statefulset -n "$NS" \
+    -o jsonpath='{range .items[*]}{.kind}{"/"}{.metadata.name}{"\t"}{.metadata.annotations.openddil\.io/consumer-groups}{"\n"}{end}' \
+    2>/dev/null \
+  | while IFS=$'\t' read -r owner value; do
+      [ -z "$value" ] && continue
+      for pair in $value; do
+        printf '%s\t%s\t%s\n' "${pair%%/*}" "${pair#*/}" "$owner"
+      done
+    done
+}
+
+# Ownership lookup, built once per shell (SPEC-consumer-declarations.md Part
+# B items 1-2):
+#   DECLARED_OWNER["<broker pod>|<group>"]       -> Kind/Name
+#   DECLARED_OWNER_DUPES["<broker pod>|<group>"] -> "<owner1> <owner2> ..."
+#     (set only when more than one workload declares the SAME pair — a
+#     chart bug, not a missing declaration, and assert_consumers_declared
+#     FAILs loudly on it rather than picking one)
+#   RESTATE_OWNER_BY_GROUP["<group>"]            -> Kind/Name
+#
+# Keyed by "<broker pod>|<group>", the SAME shape census_groups() already
+# emits ("$pod|$f2" in derive_quiesce_set/_scan_live_consumers/
+# assert_consumers_declared below) — broker-id (the annotation's own unit)
+# is turned into the broker pod name here, once, so every other caller can
+# look a census row's key up directly with no id->pod translation of its
+# own. Restate is keyed by group id alone, not "pod|group": fact 5's
+# /subscriptions endpoint reports no broker, and group ids are unique
+# across Restate runtimes (Part B item 2), so a group-id-only match is
+# exact, not a guess.
+declare -A DECLARED_OWNER=()
+declare -A DECLARED_OWNER_DUPES=()
+declare -A RESTATE_OWNER_BY_GROUP=()
+DECLARED_MAP_BUILT=false
+
+build_declared_owner_map() {
+  $DECLARED_MAP_BUILT && return 0
+  DECLARED_MAP_BUILT=true
+
+  local broker group owner pod key prev
+  while IFS=$'\t' read -r broker group owner; do
+    [ -z "$broker" ] && continue
+    pod="${RELEASE}-redpanda-${broker}-0"
+    key="$pod|$group"
+    prev="${DECLARED_OWNER[$key]:-}"
+    if [ -z "$prev" ]; then
+      DECLARED_OWNER["$key"]="$owner"
+    elif [ "$prev" != "$owner" ]; then
+      DECLARED_OWNER_DUPES["$key"]="${DECLARED_OWNER_DUPES[$key]:-$prev} $owner"
+    fi
+  done < <(declared_consumers)
+
+  local rpod rtopic rgid rowner
+  while IFS=$'\t' read -r rpod rtopic rgid rowner; do
+    [ -z "$rgid" ] && continue
+    RESTATE_OWNER_BY_GROUP["$rgid"]="$rowner"
+  done < <(restate_subscriptions)
+}
+
+declare -A WORKLOAD_PODS_CACHE=() # "Kind/Name" -> newline-joined pod names,
+                                   # built once per workload and reused for
+                                   # every group that workload owns
+
+# _pods_of_workload "Kind/Name" -> newline-separated pod names currently
+# matching that workload's OWN selector (Part B item 6, for _scan_live_
+# consumers's report). kubectl has no single verb for "list the pods this
+# Deployment/StatefulSet selects", so a cache miss costs two calls: read
+# .spec.selector.matchLabels back as a go-template join (no jq — the same
+# constraint restate_subscriptions above is written under) and then list
+# pods with that label selector. Cached per workload so a group's every
+# member host costs this once, not once per member.
+_pods_of_workload() {
+  local workload="$1" kind name selector pods
+  if [ -n "${WORKLOAD_PODS_CACHE[$workload]+set}" ]; then
+    printf '%s' "${WORKLOAD_PODS_CACHE[$workload]}"
     return 0
   fi
-  _build_ip2pod_map
-  pod="${IP2POD[$ip]:-}"
-  if [ -z "$pod" ]; then
-    result="UNRESOLVED-IP/$ip"
-  else
-    result="$(_owner_of_pod "$pod")"
+  kind="$(printf '%s' "${workload%%/*}" | tr '[:upper:]' '[:lower:]')"
+  name="${workload#*/}"
+  selector="$(kubectl get "$kind" -n "$NS" "$name" \
+    -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>/dev/null)"
+  selector="${selector%,}"
+  pods=""
+  if [ -n "$selector" ]; then
+    pods="$(kubectl get pods -n "$NS" -l "$selector" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
   fi
-  OWNER_CACHE_BY_IP["$ip"]="$result"
-  printf '%s' "$result"
+  WORKLOAD_PODS_CACHE["$workload"]="$pods"
+  printf '%s' "$pods"
 }
 
 # restate_subscriptions -> pod  topic  group_id  owner, one row per
@@ -526,11 +615,15 @@ restate_subscriptions() {
   done
 }
 
-# Work item 2's declared family floor. Kept BECAUSE OF fact 3 (proxy
-# masking is not mechanically resolvable from the broker side), and it is a
-# FLOOR, not the derivation — it exists to catch a proxy-masked consumer
-# that host resolution provably cannot see, chiefly openddil-projector-hq
-# (fact 7: it appears in the census ONLY as a toxiproxy-masked row).
+# Work item 2's declared family floor. Originally the only route past a
+# proxy-masked consumer (fact 3: proxy masking was not mechanically
+# resolvable from the broker side) — now a BACKSTOP, not the only route: the
+# chart's own openddil.io/consumer-groups annotation (SPEC-consumer-
+# declarations.md) names openddil-projector-hq's real groups directly
+# through item 1 below, proxy or no proxy. The floor stays because it is
+# NAME-pattern-derived and item 1 is DECLARATION-derived — a family member a
+# future chart change forgets to annotate still gets picked up here, same
+# as it always has.
 #
 # `cm-service`/`tier-cm-` and `logistics-fusion-service`/`tier-fusion-` are
 # DELIBERATELY ABSENT — fact 4 measured them as Restate sinks that consume
@@ -570,53 +663,48 @@ derive_quiesce_set() {
   local p
   for p in "${PRODUCER_DEPLOYS[@]}"; do producer_set["Deployment/$p"]=1; done
 
-  # --- item 1: census owners ----------------------------------------------
+  build_declared_owner_map
+
+  # --- item 1: declared/Restate owner of every census group holding a target
+  # topic ---------------------------------------------------------------
+  # REPLACES the old connection-source-IP owner walk (SPEC-consumer-
+  # declarations.md Part B item 3): a proxied consumer's real owner was
+  # never visible from its connection-source IP — every one of them reaches
+  # the broker through ${RELEASE}-toxiproxy and resolved to the SAME PROXY/
+  # openddil-toxiproxy name, which is exactly how egress-gate-c2 went
+  # unquiesced (see the Problem section this spec was written against). The
+  # chart's own annotation names the real owner directly, keyed by the SAME
+  # "broker pod|group" pair census_groups() already emits, so there is no
+  # host-resolution step left for a proxy to sit in front of. An undeclared
+  # group adds nothing here on purpose — assert_consumers_declared (item 4)
+  # is what refuses those, not a silent drop here. Dropping the Redpanda
+  # broker StatefulSets themselves is no longer needed either: the chart
+  # never annotates the broker's own StatefulSet, only real consumers.
   local pod tag f2 f3 f4 f5
-  local -A group_hosts=() group_is_target=()
+  local -A group_is_target=()
   for pod in "${REDPANDA_PODS[@]}"; do
     while IFS=$'\t' read -r tag f2 f3 f4 f5; do
       [ -z "$tag" ] && continue
-      case "$tag" in
-        MEMBERS) group_hosts["$pod|$f2"]="$f5" ;;
-        TOPIC)
-          [ -n "${is_target[$pod|$f3]:-}" ] && group_is_target["$pod|$f2"]=1
-          ;;
-      esac
+      [ "$tag" = "TOPIC" ] && [ -n "${is_target[$pod|$f3]:-}" ] && group_is_target["$pod|$f2"]=1
     done < <(census_groups "$pod")
   done
 
-  local key ip owner
+  local key group owner
   for key in "${!group_is_target[@]}"; do
-    local -a hostips=()
-    IFS=',' read -ra hostips <<< "${group_hosts[$key]:-}"
-    for ip in "${hostips[@]}"; do
-      [ -z "$ip" ] && continue
-      owner="$(resolve_owner "$ip")"
-      case "$owner" in
-        PROXY/*) continue ;;   # unresolved, not found — never added, work item 1
-      esac
-      # Drop the Redpanda broker StatefulSets themselves (work item 2) —
-      # but NOT the redpanda-connect-* Deployments, which share the same
-      # "${RELEASE}-redpanda-" name prefix and ARE real consumers (fact 2,
-      # acceptance check 2). Matched on the bare name after the Kind/
-      # prefix, since the broker owner is a StatefulSet and connect is a
-      # Deployment but the prefix test must not depend on telling them
-      # apart by kind alone (REDPANDA_PODS itself only ever holds broker
-      # pods — connect pods are excluded from it above — so this is the
-      # one place that distinction has to be made by name instead).
-      case "${owner#*/}" in
-        "${RELEASE}"-redpanda-*)
-          case "${owner#*/}" in
-            *-connect-*) ;;   # connect deployments ARE real consumers, never dropped
-            *) continue ;;    # the broker StatefulSets themselves — drop
-          esac
-          ;;
-      esac
-      if [ -z "${found[$owner]:-}" ] && [ -z "${producer_set[$owner]:-}" ]; then
-        found["$owner"]="census"
-        order+=("$owner")
+    group="${key#*|}"
+    owner="${DECLARED_OWNER[$key]:-}"
+    if [ -z "$owner" ]; then
+      owner="${RESTATE_OWNER_BY_GROUP[$group]:-}"
+    fi
+    [ -z "$owner" ] && continue
+    if [ -z "${found[$owner]:-}" ] && [ -z "${producer_set[$owner]:-}" ]; then
+      if [ -n "${DECLARED_OWNER[$key]:-}" ]; then
+        found["$owner"]="declared"
+      else
+        found["$owner"]="restate"
       fi
-    done
+      order+=("$owner")
+    fi
   done
 
   # --- item 2: Restate runtimes whose subscription topic is a target -----
@@ -700,7 +788,15 @@ _scan_live_consumers() {
     done < <(census_groups "$pod")
   done
 
-  local ok=true key members grp gtopic hostcsv ip owner ownerlist
+  build_declared_owner_map
+
+  # Owners come from the declared/Restate lookup (SPEC-consumer-
+  # declarations.md Part B item 6), not connection-source IP — a proxied
+  # consumer's host IP never told you who it really was (fact 3); the
+  # annotation does. The raw member host list is still shown (it is real,
+  # measured data), just relabelled: it is where the connection came FROM,
+  # not who owns it.
+  local ok=true key members grp gtopic hostcsv owner podlist
   for key in "${!group_topic[@]}"; do
     members="${group_members[$key]:-0}"
     if [ "${members:-0}" -gt 0 ] 2>/dev/null; then
@@ -708,19 +804,102 @@ _scan_live_consumers() {
       pod="${key%%|*}"; grp="${key#*|}"
       gtopic="${group_topic[$key]}"
       hostcsv="${group_hosts[$key]:-}"
-      ownerlist=""
-      local -a hostips=()
-      IFS=',' read -ra hostips <<< "$hostcsv"
-      for ip in "${hostips[@]}"; do
-        [ -z "$ip" ] && continue
-        owner="$(resolve_owner "$ip")"
-        ownerlist="${ownerlist:+$ownerlist, }$owner"
-      done
+
+      owner="${DECLARED_OWNER[$key]:-}"
+      [ -z "$owner" ] && owner="${RESTATE_OWNER_BY_GROUP[$grp]:-}"
+      [ -z "$owner" ] && owner="UNDECLARED"
+
+      podlist="none"
+      if [ "$owner" != "UNDECLARED" ]; then
+        podlist="$(_pods_of_workload "$owner" | tr '\n' ',')"
+        podlist="${podlist%,}"
+        [ -z "$podlist" ] && podlist="none"
+      fi
+
       echo "LIVE CONSUMER: group=$grp topics=$gtopic broker=$pod members=$members" \
            "state=${group_state[$key]:-?}" >&2
-      echo "    hosts=${hostcsv:-none} owners=${ownerlist:-none}" >&2
+      echo "    owners=$owner pods=$podlist" >&2
+      echo "    member hosts (connection source; not used for ownership)=${hostcsv:-none}" >&2
     fi
   done
+
+  $ok
+}
+
+# assert_consumers_declared "pod|topic" ... -> 0 if every consumer group
+# holding a target topic is declared (chart annotation or Restate's own
+# subscription list), 1 otherwise. THE pre-flight gate (SPEC-consumer-
+# declarations.md Part B item 4) — run BEFORE any mutation, so refusing
+# here costs a stopped run, never a wrongly-skipped quiesce: an undeclared
+# LIVE consumer is exactly the egress-gate-c2 case (toxiproxy-masked,
+# invisible to the old IP-based derive_quiesce_set/assert_no_live_
+# consumers). A members=0 group is reported (ORPHAN OFFSETS) but does not
+# fail — a dead group's leftover offsets are noise, not a coverage gap.
+#
+# Fresh census, same reasoning as _scan_live_consumers: must not reuse a
+# read taken before some other phase changed the cluster.
+assert_consumers_declared() {
+  local -a targets=("$@")
+  [ "${#targets[@]}" -eq 0 ] && return 0
+  local -A is_target=()
+  local t
+  for t in "${targets[@]}"; do is_target["$t"]=1; done
+
+  build_declared_owner_map
+
+  local pod tag f2 f3 f4 f5
+  local -A group_members=() group_topic=()
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while IFS=$'\t' read -r tag f2 f3 f4 f5; do
+      [ -z "$tag" ] && continue
+      case "$tag" in
+        MEMBERS) group_members["$pod|$f2"]="$f3" ;;
+        TOPIC)
+          if [ -n "${is_target[$pod|$f3]:-}" ]; then
+            case ",${group_topic[$pod|$f2]:-}," in
+              *",$f3,"*) ;;
+              *) group_topic["$pod|$f2"]="${group_topic[$pod|$f2]:+${group_topic[$pod|$f2]},}$f3" ;;
+            esac
+          fi
+          ;;
+      esac
+    done < <(census_groups "$pod")
+  done
+
+  local ok=true n=0 undeclared=0 key broker group topics members owner dup
+  for key in "${!group_topic[@]}"; do
+    n=$((n + 1))
+    broker="${key%%|*}"; group="${key#*|}"
+    topics="${group_topic[$key]}"
+    members="${group_members[$key]:-0}"
+
+    dup="${DECLARED_OWNER_DUPES[$key]:-}"
+    if [ -n "$dup" ]; then
+      ok=false
+      undeclared=$((undeclared + 1))
+      echo "DUPLICATE DECLARATION: group=$group broker=$broker topics=$topics" \
+           "owners=$dup" >&2
+      continue
+    fi
+
+    owner="${DECLARED_OWNER[$key]:-}"
+    [ -z "$owner" ] && owner="${RESTATE_OWNER_BY_GROUP[$group]:-}"
+    [ -n "$owner" ] && continue
+
+    if [ "${members:-0}" -gt 0 ] 2>/dev/null; then
+      ok=false
+      undeclared=$((undeclared + 1))
+      echo "UNDECLARED CONSUMER: group=$group broker=$broker topics=$topics members=$members" >&2
+    else
+      echo "ORPHAN OFFSETS (no members, not blocking): group=$group broker=$broker topics=$topics" >&2
+    fi
+  done
+
+  if $ok; then
+    echo "PRE-FLIGHT: PASS ($n groups on targets, $undeclared undeclared live)"
+  else
+    echo "PRE-FLIGHT: FAIL ($n groups on targets, $undeclared undeclared live)"
+  fi
 
   $ok
 }
@@ -749,6 +928,16 @@ _scan_live_consumers() {
 # which is a real missed consumer. Aborting late is cheap here (nothing has
 # been mutated yet, so the trap restores and the lab is untouched); aborting
 # wrongly is what costs a night.
+#
+# WALL-CLOCK, NOT SLEEP-SUM (SPEC-consumer-declarations.md Part C, measured
+# defect 2026-09-30): the deadline used to be `waited += QUIESCE_EXPIRY_
+# INTERVAL`, counting only the sleeps between scans, never the scan itself.
+# A scan is 5 brokers x `rpk group describe` + owner lookups, measured at
+# ~40s on the lab — so a "180s" budget of pure sleep-sum let the loop run
+# past 14 real minutes before anyone noticed it hadn't actually stopped at
+# 180s of wall-clock time. `$SECONDS` (bash's own elapsed-since-shell-start
+# counter) captured once at entry and re-read every iteration counts the
+# scan time too, so the budget means what it says.
 QUIESCE_EXPIRY_TIMEOUT="${QUIESCE_EXPIRY_TIMEOUT:-180}"
 QUIESCE_EXPIRY_INTERVAL="${QUIESCE_EXPIRY_INTERVAL:-5}"
 
@@ -757,34 +946,37 @@ assert_no_live_consumers() {
 
   # The diagnostics are worth printing only for the read that actually
   # decides, so each attempt's stderr is buffered and only the last one is
-  # shown. Every attempt runs in THIS shell, so resolve_owner's caches (and
-  # the IP->pod map) survive between attempts.
+  # shown. Every attempt runs in THIS shell, so the declared-owner cache
+  # (build_declared_owner_map) survives between attempts.
   local buf; buf="$(mktemp)"
-  local waited=0 rc=0
+  local start elapsed rc=0 announced=false
+  start="$SECONDS"
 
   while :; do
     rc=0
     _scan_live_consumers "$@" 2>"$buf" || rc=$?
+    elapsed=$((SECONDS - start))
     if [ "$rc" -eq 0 ]; then
-      [ "$waited" -gt 0 ] && echo "ASSERTION: clear after ${waited}s of waiting" \
+      $announced && echo "ASSERTION: clear after ${elapsed}s (wall-clock) of waiting" \
         "for group members to expire." >&2
       rm -f "$buf"
       return 0
     fi
-    if [ "$waited" -ge "$QUIESCE_EXPIRY_TIMEOUT" ]; then
+    if [ "$elapsed" -ge "$QUIESCE_EXPIRY_TIMEOUT" ]; then
       break
     fi
-    if [ "$waited" -eq 0 ]; then
+    if ! $announced; then
+      announced=true
       echo "ASSERTION: groups still hold members; waiting up to" \
-           "${QUIESCE_EXPIRY_TIMEOUT}s for session timeouts to expire" \
+           "${QUIESCE_EXPIRY_TIMEOUT}s (wall-clock) for session timeouts to expire" \
            "(measured ~45s on this cluster)." >&2
     fi
     sleep "$QUIESCE_EXPIRY_INTERVAL"
-    waited=$((waited + QUIESCE_EXPIRY_INTERVAL))
   done
 
-  echo "ASSERTION: still holding members after ${waited}s — these are NOT" \
-       "stale members. Offenders, from the final census read:" >&2
+  elapsed=$((SECONDS - start))
+  echo "ASSERTION: still holding members after ${elapsed}s (wall-clock) — these are" \
+       "NOT stale members. Offenders, from the final census read:" >&2
   cat "$buf" >&2
   rm -f "$buf"
   return 1
@@ -1287,14 +1479,9 @@ phase2_quiesce() {
   # Armed BEFORE the first scale, not after: a failure reading the very first
   # replica count must already be covered. See emergency_restore_scales.
   arm_scale_trap
-  # Build the IP->pod map BEFORE anything is scaled down, in THIS shell.
-  # derive_quiesce_set runs under `mapfile < <(...)`, i.e. in a subshell, so
-  # the map it built never reaches us — and if the first build happened after
-  # the quiesce, every scaled-down pod's IP would be gone and the assertion's
-  # report would read UNRESOLVED-IP for workloads WE just stopped. Measured
-  # exactly that in the 2026-09-27 red-check. Diagnostics only; the gate does
-  # not depend on it.
-  $DRY_RUN || _build_ip2pod_map
+  # No IP->pod map to build any more (SPEC-consumer-declarations.md): ownership
+  # comes from the chart's own annotation, not the scaled-down pod's own IP,
+  # so there is nothing here that a scale-to-zero could make unresolvable.
   local d rc
   for d in "${PRODUCER_DEPLOYS[@]}"; do
     rc="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
@@ -1663,14 +1850,9 @@ quiesce_workload_set() {
   local -a entries=("$@")
   [ "${#entries[@]}" -eq 0 ] && return 0
   arm_scale_trap
-  # Build the IP->pod map BEFORE anything is scaled down, in THIS shell.
-  # derive_quiesce_set runs under `mapfile < <(...)`, i.e. in a subshell, so
-  # the map it built never reaches us — and if the first build happened after
-  # the quiesce, every scaled-down pod's IP would be gone and the assertion's
-  # report would read UNRESOLVED-IP for workloads WE just stopped. Measured
-  # exactly that in the 2026-09-27 red-check. Diagnostics only; the gate does
-  # not depend on it.
-  $DRY_RUN || _build_ip2pod_map
+  # No IP->pod map to build any more (SPEC-consumer-declarations.md): ownership
+  # comes from the chart's own annotation, not the scaled-down pod's own IP,
+  # so there is nothing here that a scale-to-zero could make unresolvable.
   local e
   for e in "${entries[@]}"; do
     quiesce_derived_workload "$e" || true
@@ -2625,6 +2807,11 @@ run_census_only() {
   phase4_capture_pass
 
   echo
+  echo "=== --census-only: pre-flight (consumer ownership) ==="
+  local pf_rc=0
+  assert_consumers_declared "${CAPTURED_TOPICS[@]}" || pf_rc=$?
+
+  echo
   echo "=== --census-only: derived quiesce set, with provenance ==="
   local -a derived=()
   mapfile -t derived < <(derive_quiesce_set "${CAPTURED_TOPICS[@]}")
@@ -2650,6 +2837,13 @@ run_census_only() {
          "which consumers are live RIGHT NOW, not that a real run would fail:" \
          "phase 4 re-asserts AFTER its own quiesce, against the same bucket."
   fi
+
+  # Exit status reflects the pre-flight (undeclared-consumer) read, not the
+  # live-consumer assertion just above — that one is EXPECTED to fail on an
+  # unquiesced cluster (see the NOTE above) and must not make --census-only
+  # itself look broken. The pre-flight has no such "expected to fail" case:
+  # it is the same read a real run gates on.
+  return "$pf_rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -2676,6 +2870,15 @@ REDCHECK_DS_NAME="${RELEASE}-redcheck-quiesce-probe"
 run_red_check_quiesce() {
   echo "=== --red-check-quiesce: capture (read-only) ==="
   phase4_capture_pass
+
+  echo
+  echo "=== --red-check-quiesce: pre-flight (consumer ownership) ==="
+  if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
+    echo "--red-check-quiesce REFUSED: an undeclared live consumer exists on a" >&2
+    echo "target topic (see UNDECLARED CONSUMER lines above). A real run would" >&2
+    echo "abort here too, before any quiesce — this red-check does the same." >&2
+    return 1
+  fi
 
   echo
   echo "=== --red-check-quiesce: creating throwaway DaemonSet ($REDCHECK_DS_NAME) ==="
@@ -2817,6 +3020,18 @@ phase8_zero() {
   return "$OVERALL_FAIL"
 }
 
+# Test-only escape hatch (scripts/tests/test_reset_ownership.sh sources this
+# file to reuse its function definitions against stubbed kubectl/census_groups/
+# restate_subscriptions output). RESET_SCENARIO_SOURCE_ONLY is never set by
+# this script itself, only by a test harness that sets it before sourcing —
+# a normal invocation never reaches this branch. Stops before the cluster
+# guard has any effect on the outcome (it already ran, harmlessly, above:
+# see the matching guard around the require-cluster.sh source line) and
+# before main ever calls a phase.
+if [ "${RESET_SCENARIO_SOURCE_ONLY:-}" = 1 ]; then
+  return 0
+fi
+
 # ===========================================================================
 # main
 # ===========================================================================
@@ -2827,7 +3042,7 @@ fi
 
 if $CENSUS_ONLY; then
   run_census_only
-  exit 0
+  exit $?
 fi
 
 if $RED_CHECK_QUIESCE; then
@@ -2861,6 +3076,24 @@ if $VERIFY_ONLY; then
 fi
 
 phase1_baseline
+
+# --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
+# consumer group on a target topic must have a declared owner BEFORE
+# anything below scales a single workload down. Runs the real capture pass
+# early (phase4_topics' own capture, at line ~2113, re-runs it — cheap and
+# idempotent, not worth threading a "already captured" flag through for)
+# so CAPTURED_TOPICS reflects this run's actual topic set, not a stale or
+# guessed one. Unconditional in dry-run too: a dry run that "passes" over an
+# undeclared consumer would print a plan nobody should trust.
+phase4_capture_pass
+if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
+  echo "PRE-FLIGHT ABORTED: an undeclared live consumer exists on a target" >&2
+  echo "topic (see UNDECLARED CONSUMER lines above). Nothing has been" >&2
+  echo "mutated — no workload scaled, no topic touched. Add the missing" >&2
+  echo "openddil.io/consumer-groups declaration and re-run." >&2
+  exit 1
+fi
+
 phase2_quiesce
 phase3_restate
 phase4_topics
