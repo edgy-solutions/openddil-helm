@@ -135,3 +135,30 @@ jobs:
             exit 1
           fi
           echo "red-check green: pass 4 rejected the planted manifest image"
+
+      # Pass 5 has no values knob that drops a pull secret, so the plant is a
+      # copy of the chart with ONE imagePullSecrets block cut out of one
+      # template. The failure must come from pass 5, not from anything else.
+      - name: Mirror coverage red-check, pass 5
+        run: |
+          cp -r ./openddil-demo /tmp/planted-chart
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("/tmp/planted-chart/templates/releasability.yaml")
+          block = ("      {{- with $root.Values.global.imagePullSecrets }}\n"
+                   "      imagePullSecrets:\n"
+                   "        {{- toYaml . | nindent 8 }}\n"
+                   "      {{- end }}\n")
+          text = p.read_text(encoding="utf-8")
+          assert block in text, "plant target not found: the red-check would test nothing"
+          p.write_text(text.replace(block, "", 1), encoding="utf-8")
+          PY
+          if OPENDDIL_CHART=/tmp/planted-chart ./scripts/check-mirror-coverage.sh > /tmp/pass5-red.log 2>&1; then
+            cat /tmp/pass5-red.log
+            echo "RED CHECK FAILED: a pod spec without its pull secret passed"
+            exit 1
+          fi
+          cat /tmp/pass5-red.log
+          grep -q "FAIL \[pass 5 pullable\]" /tmp/pass5-red.log \
+            || { echo "RED CHECK FAILED: the check failed, but not in pass 5"; exit 1; }
+          echo "red-check green: pass 5 rejected the pod spec with its pull secret removed"

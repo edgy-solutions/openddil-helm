@@ -40,8 +40,16 @@
 #      else, and an air-gapped site gets a stack with nothing arriving at it
 #      -- which presents as a pipeline fault, not a missing image.
 #
+#   5. PULLABLE. In the pass-3 render, every pod spec -- Deployments,
+#      StatefulSets, DaemonSets, Jobs, CronJobs, hook Pods -- carries every
+#      imagePullSecret values-artifactory.yaml declares. A redirected image
+#      behind an authenticated mirror is still unpullable without the secret.
+#      Measured 2026-09-30: 53 of 106 pod specs (all of releasability.yaml and
+#      tier-node.yaml) carried none, and every pass above was green.
+#
 # Pass 1 is coverage; 2 and 3 are the reasons coverage is worth having; 4 is
-# there because the chart render is not the whole deploy.
+# there because the chart render is not the whole deploy; 5 is there because
+# the right image at the right registry still has to be allowed through.
 #
 # Pass 4 reads k8s manifests only. `docker-compose.customer.yml` in that repo
 # names two more images (a connect and a rabbitmq) and they are deliberately
@@ -70,7 +78,9 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-CHART="./openddil-demo"
+# Overridable only so CI can red-check pass 5 against a copy of the chart with
+# one pull-secret block removed; nothing else should point it elsewhere.
+CHART="${OPENDDIL_CHART:-./openddil-demo}"
 MIRROR_SCRIPT="./scripts/mirror-to-artifactory.ps1"
 ARTIFACTORY_VALUES="./values-artifactory.yaml"
 
@@ -321,6 +331,48 @@ if (tmp / "pass4.yaml").exists():
                     else "mirrored at a different tag than the manifest deploys")
             findings.append(("4 not-only-the-chart", ref, hint))
 
+# Pass 5: the pass-3 render is the one an air-gapped site installs, so it is
+# the one whose pod specs must carry the mirror's pull secret. Needs a YAML
+# parser to find pod specs by structure; CI installs pyyaml before this step.
+try:
+    import yaml
+except ImportError:
+    sys.exit("pass 5 needs PyYAML (pip install pyyaml)")
+
+declared = {s.get("name") for s in
+            ((yaml.safe_load(tmp.joinpath("artifactory.yaml").read_text(encoding="utf-8"))
+              or {}).get("global", {}).get("imagePullSecrets") or [])}
+if not declared:
+    findings.append(("5 pullable", "values-artifactory.yaml",
+                     "declares no global.imagePullSecrets: this pass has nothing to hold the render to"))
+
+def pod_spec(doc):
+    kind, spec = doc.get("kind"), doc.get("spec") or {}
+    if kind == "Pod":
+        return spec
+    if kind in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"):
+        return (spec.get("template") or {}).get("spec")
+    if kind == "CronJob":
+        return (((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec")
+    return None
+
+pod_specs = 0
+for doc in yaml.safe_load_all(tmp.joinpath("pass3.yaml").read_text(encoding="utf-8")):
+    if not isinstance(doc, dict):
+        continue
+    ps = pod_spec(doc)
+    if ps is None:
+        continue
+    pod_specs += 1
+    carried = {s.get("name") for s in ps.get("imagePullSecrets") or []}
+    missing = declared - carried
+    if missing:
+        findings.append(("5 pullable", f"{doc['kind']}/{doc['metadata']['name']}",
+                         "pod spec lacks imagePullSecrets " + ", ".join(sorted(missing))))
+if pod_specs == 0:
+    findings.append(("5 pullable", "(no pod spec found)",
+                     "the pass-3 render has no workloads: this pass is reading the wrong file"))
+
 counts = {p: len(images(f"pass{i}.yaml")) for i, p in
           ((1, "coverage"), (2, "pinnable"), (3, "redirectable"))}
 print(f"inventory: {len(inventory)} images")
@@ -330,6 +382,7 @@ if pass4_state == "skipped":
           "(set OPENDDIL_BUNDLE_EXAMPLE)")
 else:
     print(f"pass 4:    {pass4_state} from the bundle example's k8s manifests")
+print(f"pass 5:    {pod_specs} pod specs held to imagePullSecrets {sorted(declared)}")
 
 if findings:
     print()
