@@ -162,8 +162,10 @@ FLAGS
   --red-check-electric
                       Read every Electric shape handle, then run the phase 8
                       electric check WITHOUT deleting any pod. Read-only.
-                      Every handle line must FAIL (UNCHANGED); exits 0 only
-                      if they all did, i.e. only if the check can fail.
+                      Every handle line must FAIL (UNCHANGED) and, on a
+                      populated fleet, every rows line must FAIL (non-zero);
+                      exits 0 only if they all did, i.e. only if the check
+                      can fail.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -1218,12 +1220,38 @@ electric_instance() {
 }
 
 electric_shape_rows() {
-  # Count JSON objects in the array body by their `"key":` members, which is
-  # one per row in Electric's shape response. Header lines are excluded by
-  # taking only from the first bracket onwards.
-  electric_shape "$1" "$2" \
-    | sed -n '/^[[:space:]]*\[/,$p' \
-    | { grep -o '"key":' || true; } | wc -l | tr -d ' '
+  # What a client that syncs the shape now would hold: the whole log replayed
+  # to Electric's up-to-date marker, inserts minus deletes. NOT the first
+  # chunk of offset=-1. That chunk is the snapshot taken when the shape was
+  # created, and every change since lives in later chunks, so on a populated
+  # lab it read 0 on all four instances and the rows line could never fail.
+  #
+  # The replay runs inside the pod: the log is ~10 MB per chunk, and only the
+  # two counts cross kubectl exec. Counting `"operation":"insert"` by grep is
+  # exact because a JSON string cannot hold an unescaped quote. Updates do not
+  # change the row count. Empty output means UNMEASURED (a non-200, a lost
+  # handle, or more than 2000 chunks), never 0.
+  local pod="$1" port="$2"
+  [ -z "$port" ] && return 0
+  kubectl exec -i -n "$NS" "$pod" -- sh -s "$port" "$ELECTRIC_SHAPE_TABLE" 2>/dev/null <<'REPLAY' || true
+u="http://127.0.0.1:$1/v1/shape?table=$2"; off=-1; h=""; ins=0; del=0; n=0
+b=/tmp/shape-rows.$$.b; hd=/tmp/shape-rows.$$.h
+while :; do
+  n=$((n + 1)); [ "$n" -gt 2000 ] && break
+  q="$u&offset=$off"; [ -n "$h" ] && q="$q&handle=$h"
+  code=$(curl -s -m 60 -o "$b" -D "$hd" -w '%{http_code}' "$q")
+  [ "$code" = 200 ] || break
+  ins=$((ins + $(grep -o '"operation":"insert"' "$b" | wc -l)))
+  del=$((del + $(grep -o '"operation":"delete"' "$b" | wc -l)))
+  if grep -qi '^electric-up-to-date' "$hd" || grep -q '"control":"up-to-date"' "$b"; then
+    echo $((ins - del)); break
+  fi
+  h=$(sed -n 's/^electric-handle: *//Ip' "$hd" | tr -d '\r')
+  off=$(sed -n 's/^electric-offset: *//Ip' "$hd" | tr -d '\r')
+  { [ -n "$h" ] && [ -n "$off" ]; } || break
+done
+rm -f "$b" "$hd"
+REPLAY
 }
 
 # ---------------------------------------------------------------------------
@@ -1410,9 +1438,9 @@ baseline_electric() {
       echo "  WARNING: two electric pods reduce to instance '$inst'; the second overwrites the first baseline" >&2
     fi
     BASE_ELECTRIC_HANDLE["$inst"]="$ehandle"
-    BASE_ELECTRIC_ROWS["$inst"]="${erows:-0}"
+    BASE_ELECTRIC_ROWS["$inst"]="${erows:-UNMEASURED}"
     printf '  %-52s port=%-5s rows=%-4s handle=%s\n' \
-      "$inst" "$eport" "${erows:-0}" "${ehandle:-UNMEASURED}"
+      "$inst" "$eport" "${erows:-UNMEASURED}" "${ehandle:-UNMEASURED}"
   done
 }
 
@@ -2791,6 +2819,7 @@ verify_electric() {
   # and 0 rows proves the client that re-creates it sees an empty fleet.
   local pod inst base port handle rows
   ELECTRIC_HANDLE_UNCHANGED=0
+  ELECTRIC_ROWS_NONZERO=0
   for pod in "${ELECTRIC_PODS[@]}"; do
     inst="$(electric_instance "$pod")"
     if ! kubectl get pod -n "$NS" "$pod" -o name >/dev/null 2>&1; then
@@ -2827,7 +2856,9 @@ verify_electric() {
       report "electric $inst shape-handle" "new-handle" "new-handle"
     fi
     printf '     handle before=%s after=%s\n' "${base:-none}" "$handle"
-    report "electric $inst shape-rows" "0" "${rows:-0}"
+    # Empty is UNMEASURED, not 0: an unreadable shape must not pass as empty.
+    [ -n "$rows" ] && [ "$rows" != 0 ] && ELECTRIC_ROWS_NONZERO=$((ELECTRIC_ROWS_NONZERO + 1))
+    report "electric $inst shape-rows" "0" "${rows:-UNMEASURED}"
   done
 }
 
@@ -3141,12 +3172,16 @@ if $RED_CHECK_ELECTRIC; then
   echo "=== RED-CHECK: electric shape handle (no pod is deleted) ==="
   baseline_electric
   verify_electric || true
+  # Rows: on a populated fleet every shape holds rows, so every rows line
+  # must read FAIL against phase 8's 0. Run this on an empty fleet and it
+  # cannot, which is reported, not excused.
   if [ "${#ELECTRIC_PODS[@]}" -gt 0 ] \
-     && [ "$ELECTRIC_HANDLE_UNCHANGED" -eq "${#ELECTRIC_PODS[@]}" ]; then
-    echo "--red-check-electric: PASSED (${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} handle lines FAILED as they must)"
+     && [ "$ELECTRIC_HANDLE_UNCHANGED" -eq "${#ELECTRIC_PODS[@]}" ] \
+     && [ "$ELECTRIC_ROWS_NONZERO" -eq "${#ELECTRIC_PODS[@]}" ]; then
+    echo "--red-check-electric: PASSED (handle ${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} UNCHANGED, rows ${ELECTRIC_ROWS_NONZERO}/${#ELECTRIC_PODS[@]} non-zero; every line FAILED as it must)"
     exit 0
   fi
-  echo "--red-check-electric: FAILED (${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} handle lines read UNCHANGED; every one must)" >&2
+  echo "--red-check-electric: FAILED (handle ${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} UNCHANGED, rows ${ELECTRIC_ROWS_NONZERO}/${#ELECTRIC_PODS[@]} non-zero; every one must be both)" >&2
   exit 1
 fi
 
