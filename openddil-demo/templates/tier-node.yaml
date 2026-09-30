@@ -1424,6 +1424,12 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-topaz-%s" $tier.id) "root" $root) | nindent 8 }}
+      # Same content roll as the tier PEP it answers. Without it this pod never
+      # rolled on upgrade: measured 2026-09-30, all three tier Topaz pods were
+      # still on the 2026-09-26 bundle digest while their PEPs had just pulled
+      # 2026-09-30's (policy files happened to be identical that night).
+      annotations:
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
     spec:
       {{- if $root.Values.releasability.enabled }}
       # THE SEAT IS OCCUPIED. Until 2026-09-05 this Topaz loaded an EMPTY
