@@ -907,6 +907,15 @@ spec:
             # deployment having a gate with nothing behind it.
             - name: OPENDDIL_SESSION_GATE
               value: {{ ternary "on" "off" .Values.releasability.oidc.enabled | quote }}
+            # THE EGRESS ADMISSION PANE, HUB-ONLY. egress.yaml renders
+            # egress-pane-api under this same `releasability.enabled`
+            # condition, so the two arrive together. Not set on tier-node.yaml
+            # frontends: nginx there substitutes the __EGRESS_PANE_OFF__ 404
+            # branch instead, because the pane does not exist at that tier.
+            - name: OPENDDIL_EGRESS_PANE_UPSTREAM
+              value: {{ printf "%s-egress-pane-api" .Release.Name | quote }}
+            - name: OPENDDIL_EGRESS_PANE_PORT
+              value: {{ .Values.egress.paneApi.port | quote }}
           {{- end }}
           ports:
             - name: http
