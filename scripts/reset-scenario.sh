@@ -113,8 +113,15 @@ FLAGS
                       (baseline, discovery, high-watermarks, verify) still
                       run, because you need real numbers to print a real plan.
   --baseline-only     Run phase 1 (record every §4 count) and exit. No writes.
-  --verify-only       Run phase 9 (re-read every §4 count, PASS/FAIL) and
-                      exit with that phase's exit code. No writes.
+  --verify-only       Run phase 8 alone (re-read every §4 count, PASS/FAIL)
+                      against whatever the cluster already is, and exit with
+                      that phase's exit code. No writes, no quiesce, no
+                      restore — phases 2-7 and 9 do not run. Against a LIVE,
+                      UNRESET cluster this is the red check: every populated
+                      store and topic reads non-zero against phase 8's
+                      "predicted 0" lines, so this MUST exit non-zero. If it
+                      passes against a live cluster, the check is broken, not
+                      the cluster.
   --skip-restate      Do not cancel invocations or clear Restate state.
   --skip-topics       Do not trim any topic partition.
   --skip-aggregator   Do not restart the Faust deployments. THIS IS THE
@@ -147,7 +154,7 @@ FLAGS
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
---skip-* does NOT soften the phase 9 verification: the point of the flag is
+--skip-* does NOT soften the phase 8 zero assertion: the point of the flag is
 to make a partial reset visibly, provably partial, not to hide the
 consequence of using it.
 EOF
@@ -1141,7 +1148,7 @@ assert_topic_matches_capture() {
 # counts") is only checkable if there IS a first-run baseline on record.
 # ===========================================================================
 declare -A BASE_STORE_COUNT   # key "pod|table" -> count
-declare -A BASE_AUDIT_COUNT   # key "pod" -> audit_log count (never deleted, re-checked unchanged in phase 9)
+declare -A BASE_AUDIT_COUNT   # key "pod" -> audit_log count (never deleted, re-checked unchanged in phase 8)
 declare -A BASE_RESTATE_KEYS  # key "pod" -> DISTINCT Virtual Object keys (14 on the lab)
 declare -A BASE_RESTATE_ROWS  # key "pod" -> state ROWS. NOT derivable from keys: measured 84/14 on hq but 59/8, 43/6, 98/14 on the tiers, so entries-per-key is ragged and both numbers are asserted separately.
 declare -A BASE_RESTATE_SCHED # key "pod" -> scheduled invocation count
@@ -1195,7 +1202,7 @@ phase1_baseline() {
     if pg_table_exists "$pod" "audit_log"; then
       cnt="$(pg_count "$pod" "audit_log")"
       BASE_AUDIT_COUNT["$pod"]="$cnt"
-      printf '  %-28s %-28s %s   (EXCLUDED — recorded only to confirm UNCHANGED in phase 9)\n' \
+      printf '  %-28s %-28s %s   (EXCLUDED — recorded only to confirm UNCHANGED in phase 8)\n' \
         "$pod" "audit_log" "$cnt"
     fi
   done
@@ -1204,7 +1211,7 @@ phase1_baseline() {
   # TWO numbers, deliberately. Measured 2026-09-27: 14 Virtual Object keys hold
   # 84 state rows (6 entries each), so "how much state is there" has two correct
   # answers and a predicted zero that names neither is unverifiable. Both are
-  # recorded and both are asserted in phase 9.
+  # recorded and both are asserted in phase 8.
   local keys rows sched
   for pod in "${RESTATE_PODS[@]}"; do
     keys="$(restate_count "$pod" "select count(distinct service_key) as n from state")"
@@ -1267,7 +1274,7 @@ phase1_baseline() {
 # resetting into a live feed re-fills what the rest of this script is about
 # to empty, so nothing downstream can be trusted until producers are down.
 # Original replica counts are captured HERE, not assumed to be 1, because
-# phase 8 restores exactly what was recorded here.
+# phase 9 restores exactly what was recorded here.
 # ===========================================================================
 phase2_quiesce() {
   echo
@@ -1294,7 +1301,7 @@ phase2_quiesce() {
     ORIG_REPLICAS["$d"]="${rc:-1}"
     if [ -z "$rc" ]; then
       echo "WARNING: could not read current replica count for $d; recorded 1 as a" >&2
-      echo "         last resort. If that is wrong, phase 8 will restore it wrong." >&2
+      echo "         last resort. If that is wrong, phase 9 will restore it wrong." >&2
     fi
     maybe_run "scale $d to 0 (was ${ORIG_REPLICAS[$d]})" \
       kubectl scale deploy -n "$NS" "$d" --replicas=0
@@ -1735,12 +1742,12 @@ restore_derived_set() {
 # function that checks its status. Under `set -euo pipefail` that means a
 # `return 1` from any phase aborts the whole script on the spot — so
 # phase4_topics' new failure path (a topic that did not match its capture)
-# would abort BEFORE phase8_restore_producers ever ran, leaving the producers
+# would abort BEFORE phase9_restore_producers ever ran, leaving the producers
 # phase 2 scaled to zero still at zero. That is precisely the half state this
 # script exists to prevent, and phase 4's own `trap 'restore_state_consumers'
 # EXIT` could not prevent it: it rescued the consumers and left the producers
 # down, and its matching `trap - EXIT` would have disarmed any script-wide
-# trap for phases 5 through 8 as a side effect. Two traps on EXIT are one
+# trap for phases 5 through 9 as a side effect. Two traps on EXIT are one
 # trap; the second silently wins.
 #
 # So: ONE trap, armed the first time anything is scaled down, restoring
@@ -1750,9 +1757,9 @@ restore_derived_set() {
 #   * it cannot be allowed to fail. Each scale is guarded individually and
 #     prints the exact by-hand command on failure, because a trap that dies
 #     halfway leaves the operator with no list of what is still down.
-#   * it must not fire on a clean run. SCALES_RESTORED is set by phase 8, and
+#   * it must not fire on a clean run. SCALES_RESTORED is set by phase 9, and
 #     a zero exit status returns immediately — otherwise a legitimately
-#     non-zero phase 9 (a --skip-* red-check SUCCEEDING) would print an
+#     non-zero phase 8 (a --skip-* red-check SUCCEEDING) would print an
 #     alarming emergency block over an already-correct cluster.
 #   * it must respect --dry-run. A dry run that mutates the cluster from its
 #     error path is not a dry run.
@@ -2133,7 +2140,7 @@ phase4_topics() {
   done
 
   # The normal restore. The trap stays ARMED: phase 2's producers are still at
-  # zero until phase 8, and disarming here would hand phases 5-8 the very gap
+  # zero until phase 9, and disarming here would hand phases 5-9 the very gap
   # this trap was added to close.
   if $quiesced; then
     restore_derived_set
@@ -2163,7 +2170,7 @@ phase5_aggregator() {
   echo "=== PHASE 5: aggregator (restart Faust, after topics are trimmed) ==="
   if $SKIP_AGGREGATOR; then
     skip_warning "AGGREGATOR" \
-      "Faust deployments are NOT restarted. THIS IS THE DOCUMENTED RED-CHECK\n    (PREDICTION doc §5): expect every store to read 0 and every topic to\n    read trimmed, while the regional rollup (region-fleet-summary) keeps\n    serving the PRE-RESET asset_count from the in-memory Faust table that\n    was never asked to reload. If phase 9 does NOT show that residue, the\n    aggregator step was never load-bearing and this red-check has failed."
+      "Faust deployments are NOT restarted. THIS IS THE DOCUMENTED RED-CHECK\n    (PREDICTION doc §5): expect every store to read 0 and every topic to\n    read trimmed, while the regional rollup (region-fleet-summary) keeps\n    serving the PRE-RESET asset_count from the in-memory Faust table that\n    was never asked to reload. If phase 8 does NOT show that residue, the\n    aggregator step was never load-bearing and this red-check has failed."
     return 0
   fi
   local d
@@ -2220,20 +2227,30 @@ phase7_electric() {
 }
 
 # ===========================================================================
-# PHASE 8 — RESTORE PRODUCERS. Scale back to what phase 2 recorded, never to
+# PHASE 9 — RESTORE PRODUCERS. Scale back to what phase 2 recorded, never to
 # an assumed 1 — a producer legitimately running more than one replica would
 # come back short, quietly, and the shortfall would look like a healthy
 # demo running at reduced load rather than an operator error.
+#
+# DELIBERATELY LAST. This used to run BEFORE the verify phase (old phase 8,
+# then phase 9 verify) — which meant the "0 rows" / "0 keys" assertions were
+# re-read AFTER the live feed was already back on, so a slow verify pass (or
+# just an unlucky tick) could read genuine post-reset refill and PASS a check
+# that had already stopped proving anything about the reset itself (the
+# 2026-09-28 morning card's finding: "the check ran after the thing that
+# invalidated it"). Producers now stay at zero all the way through phase 8
+# and only come back here, the last mutation in the script. See phase 8's own
+# header for the per-reading soundness argument this reordering rests on.
 # ===========================================================================
-phase8_restore_producers() {
+phase9_restore_producers() {
   echo
-  echo "=== PHASE 8: restore producers to their original replica counts ==="
+  echo "=== PHASE 9: restore producers to their original replica counts ==="
   if $SKIP_PRODUCERS; then
     skip_warning "PRODUCERS (restore)" \
       "Nothing to restore — phase 2 never scaled anything down for this run."
     # Still the end of the scale-down window: phase 4 may have quiesced and
     # already restored the state consumers even with --skip-producers, and a
-    # red-check's non-zero phase 9 must not read as an emergency.
+    # red-check's non-zero phase 8 must not read as an emergency.
     SCALES_RESTORED=true
     return 0
   fi
@@ -2251,19 +2268,118 @@ phase8_restore_producers() {
       kubectl scale deploy -n "$NS" "$d" --replicas="$rc"
   done
   # Every scale-down this run made has now been undone by its own phase, so a
-  # non-zero exit from phase 9 — which is what a --skip-* red-check SUCCEEDING
+  # non-zero exit from phase 8 — which is what a --skip-* red-check SUCCEEDING
   # looks like — must not print an emergency-rollback block over a cluster
   # whose replica counts are already correct.
+  #
+  # A restore failure here (the ERROR path above, OVERALL_FAIL=1) must still
+  # make the script's own exit status non-zero even when phase 8 itself
+  # PASSED cleanly — main exits on OVERALL_FAIL, not on phase 8's captured
+  # return value alone, exactly so a producer left at zero cannot be mistaken
+  # for a successful reset.
   SCALES_RESTORED=true
 }
 
 # ===========================================================================
-# PHASE 9 — VERIFY. Re-read every §4 reading and print PREDICTED vs ACTUAL,
-# PASS/FAIL per line. Exits non-zero if anything fails.
+# PHASE 8 — ZERO ASSERTION. Re-read every §4 reading and print PREDICTED vs
+# ACTUAL, PASS/FAIL per line, WHILE STILL QUIESCED — producers have been at
+# zero since phase 2 and do not come back until phase 9, strictly AFTER this
+# phase returns. Exits non-zero if anything fails.
+#
+# THIS REPLACES THE OLD PHASE 9 (verify), WHICH RAN AFTER PRODUCERS WERE
+# RESTORED (old phase 8). The 2026-09-28 morning card named the defect
+# precisely: reading "0 rows" / "0 keys" at a moment when the live feed is
+# already back on proves nothing — nothing was PREVENTING refill at the
+# instant of the read, so a PASS there is not a round-trip proof, it is a
+# race this script happened to win. Moving the read to before producers come
+# back does not change what each reading measures; it changes whether
+# anything could have refilled it by the time the reading happens.
+#
+# PER-READING SOUNDNESS, decided by asking one question of each: with
+# producers at zero (phase 2) and topics/restate/stores/electric already
+# reset (phases 3-7), is anything STILL RUNNING between this phase and each
+# reading's own reset action that could put the count back above zero?
+#
+#   verify_stores (incl. audit_log UNCHANGED)
+#       VALID. Every store table's only writer is a Kafka/Restate consumer
+#       (the projector family — projector-/tier-projector-/redpanda-connect-
+#       /etc., restored at the end of phase 4 and running throughout phases
+#       5-7), and none of those consumers has anything left to consume:
+#       input topics were trimmed/recreated empty in phase 4, Restate state
+#       was cleared in phase 3, and the producers that would put new
+#       messages on those topics are the one thing phase 2 already turned
+#       off and phase 9 has not yet turned back on.
+#       CAVEAT, not a reason to move or drop this reading: region_fleet_
+#       summary (it is in TABLES, so it gets the same blanket "0 rows"
+#       prediction as every other store) is written by the Faust
+#       aggregator's UNCONDITIONAL 30s @app.timer (aggregator_app.py:160,
+#       see verify_aggregator below), which fires on a clock, not on input
+#       arrival, and has been running since phase 5. A genuinely correct
+#       reset can show a fresh row here purely from that timer and read as a
+#       FALSE FAIL against this reading's blanket zero prediction. This is
+#       not introduced by this reorder — phase 5 already ran before this
+#       reading in the old order too — and fixing it (excluding one table
+#       from a shared per-table loop, or making this check freshness-aware
+#       the way verify_aggregator already is) is a separate, larger change.
+#       Flagged here, not silently patched.
+#
+#   verify_topics
+#       VALID, same reasoning and the SAME caveat: the region-fleet-summary
+#       TOPIC (not just its table) is the aggregator's own output topic, so
+#       its high watermark can advance past log_start after phase 4's trim
+#       purely from the 30s timer, independent of producers or quiescence.
+#       Every other topic (carrier topics and changelogs the aggregator does
+#       not itself emit into) has no writer left running once producers are
+#       off, so log_start == high_watermark holds for them.
+#
+#   verify_restate_once "immediate" and "after Nx cadence"
+#       VALID, and this pair is the actual bug fix. In the old order both
+#       reads ran AFTER phase 8 (old) restored producers — if a producer's
+#       traffic reaches Restate directly (derive_quiesce_set item 2: some
+#       Restate runtimes subscribe straight to a carrier topic), a resumed
+#       producer could feed a NEW object key into Restate during or before
+#       either read, and "0 object keys AND 0 state rows" would be measuring
+#       fresh, legitimate data, not residue. With producers still at zero
+#       for both reads, the only thing either read can possibly observe is
+#       Restate's OWN re-arm timer — the one failure mode this pair exists
+#       to catch (asset_logistics.py:477) — never producer refill.
+#
+#   verify_aggregator
+#       VALID, and independent of quiescence by construction: the predicted
+#       fresh row is emitted by Faust's 30s timer, "not by input arrival"
+#       (see the JUDGMENT CALL 8 comment on this function), so it needs
+#       Faust running (phase 5) and real time to pass — nothing from
+#       producers. Reading it BEFORE producers return is actually SAFER than
+#       the old order: in the old order, real telemetry could already be
+#       flowing back in during this function's up-to-90s poll window, and a
+#       correctly-working aggregator could pick up a fresh row carrying a
+#       real asset_count instead of 0 — a FALSE FAIL for a reset that worked.
+#
+#   verify_electric
+#       VALID. Scoped to ELECTRIC_SHAPE_TABLE (default telemetry_latest_
+#       state, see electric_shape()) — a table populated only by producer-
+#       driven telemetry ingestion, never by the aggregator's timer, so it
+#       carries none of the region_fleet_summary caveat above. With
+#       producers off, nothing writes it between phase 7's pod delete and
+#       this read.
+#
+# VERDICT: all six readings are KEPT here, unmoved. The defect was entirely
+# about WHEN this phase ran relative to producer restore, not about any
+# individual reading being invalid even while quiesced — with one standing
+# exception (region_fleet_summary the table, region-fleet-summary the topic)
+# that quiescing producers cannot fix, because its writer was never a
+# producer in the first place.
 #
 # Skip flags do NOT soften this phase. A --skip-aggregator run is SUPPOSED
 # to fail its aggregator line — that failure is the red-check succeeding,
 # not the script malfunctioning (PREDICTION doc §5).
+#
+# --verify-only runs THIS phase alone, against whatever the cluster already
+# is, and does nothing else (see the flag's own usage text and `main`,
+# below). On a live, unreset cluster every populated store and topic reads
+# non-zero against this phase's "predicted 0" lines — that FAIL is
+# --verify-only's red check: if it does not fail against a live, unreset
+# deployment, the check is not checking anything.
 #
 # Restate is re-checked TWICE: immediately, and again after one full
 # re-arm cadence. A check taken immediately after `state clear` cannot see
@@ -2648,9 +2764,9 @@ DSEOF"
        "'kubectl get deploy,sts -n $NS' diff before/after (acceptance check 6)."
 }
 
-phase9_verify() {
+phase8_zero() {
   echo
-  echo "=== PHASE 9: verify (PREDICTED vs ACTUAL) ==="
+  echo "=== PHASE 8: zero assertion (PREDICTED vs ACTUAL, while still quiesced) ==="
 
   if $SKIP_STORES; then
     skip_warning "STORES (verify)" "stores were not reset; the lines below are expected to FAIL."
@@ -2735,7 +2851,12 @@ if $VERIFY_ONLY; then
     fi
   fi
   echo "run boundary: $RUN_STARTED_AT  [$RUN_STARTED_AT_SOURCE]"
-  phase9_verify
+  # --verify-only runs phase 8 ALONE, against whatever the cluster already is
+  # — no quiesce, no clear, no restore. On a live, unreset deployment this is
+  # the red check: every populated store/topic line above reads non-zero
+  # against phase 8's "predicted 0", so this exits non-zero. See phase 8's
+  # own header for the full per-reading argument.
+  phase8_zero
   exit $?
 fi
 
@@ -2746,6 +2867,14 @@ phase4_topics
 phase5_aggregator
 phase6_stores
 phase7_electric
-phase8_restore_producers
-phase9_verify
-exit $?
+# phase 8 runs BEFORE producers come back (that ordering is the whole point
+# of this reorder — see phase 8's header). Guarded with `|| true` so a FAIL
+# here (OVERALL_FAIL=1, a non-zero return) does not let `set -e` skip straight
+# to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
+# get its producers back, exactly like a passing one does.
+phase8_zero || true
+phase9_restore_producers
+echo "reset-scenario: producers restored. This script asserts zero at rest" \
+     "only — confirming the reset holds under a live refill is" \
+     "check-advancing.sh's job, not this script's; run it separately."
+exit "$OVERALL_FAIL"
