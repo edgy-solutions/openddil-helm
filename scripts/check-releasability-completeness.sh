@@ -4,9 +4,19 @@
 #   ./scripts/check-releasability-completeness.sh [-n NAMESPACE] [-p POD]
 #
 # Exit 0 = every populated labelled table is fully labelled in THIS
-#          deployment. Enforcement may be enabled here.
-# Exit 1 = it is not, OR the gate could not answer. Those two are reported
-#          differently and never conflated.
+#          deployment, apart from assets DECLARED unlabelled (named on the
+#          PASS line). Enforcement may be enabled here.
+# Exit 1 = it is not. GATE FAILS.
+# Exit 3 = the gate could not answer. GATE NOT RUN. Any exit other than 0 or
+#          1 (78 from the cluster guard, 2 for a bad argument, 126/127 for a
+#          self-call that could not execute) means the same thing.
+#
+# NOT RUN IS ITS OWN VERDICT. Until 2026-09-29 a gate that could not answer
+# exited 1 like a gate that found leaks, and the every-store summary said
+# "AT LEAST ONE STORE FAILS" after checking no store at all (the self-call
+# could not execute when invoked as `bash <name>.sh`). A reader cannot act on
+# a verdict that means two opposite things: one says fix the data, the other
+# says the data was never looked at.
 #
 # LABEL FIRST, ENFORCE SECOND, NEVER THE REVERSE.
 # Deny-unlabeled blanks legitimate data when it meets a partially-labelled
@@ -63,12 +73,13 @@ set -uo pipefail
 # WHICH CLUSTER. Asserted, never inherited. See lib/require-cluster.sh for
 # why this is a mechanism rather than a line in the README.
 #
-# The `|| exit 1` is load-bearing: these scripts run under `set -u` without
+# The `|| exit 3` is load-bearing: these scripts run under `set -u` without
 # `-e`, so a missing or unreadable helper would otherwise print a warning and
 # let the script continue UNGUARDED -- a guard that fails open is worse than
-# none, because it is also reassuring.
+# none, because it is also reassuring. It is 3 (NOT RUN), not 1: nothing was
+# checked.
 # ---------------------------------------------------------------------------
-. "$(dirname "$0")/lib/require-cluster.sh" || exit 1
+. "$(dirname "$0")/lib/require-cluster.sh" || exit 3
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +111,9 @@ PGDB="${OPENDDIL_PG_DB:-openddil}"
 # Where the deployment declares which labelled tables it expects to be empty.
 # Defaults to the overlay beside this checkout; override for another layout.
 EXPECTED_EMPTY="${OPENDDIL_EXPECTED_EMPTY:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)/openddil-demo/ontology/expected-empty.yaml}"
+# Where the deployment declares assets it keeps unlabelled on purpose (a lab
+# fixture). Scoped to one kube-context inside the file; see its header.
+DECLARED_UNLABELLED_FILE="${OPENDDIL_DECLARED_UNLABELLED:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lab-declared-unlabelled.yaml}"
 
 # --- which store? -----------------------------------------------------------
 # ONE GATE PER STORE, AND EVERY TIER HAS ONE.
@@ -160,39 +174,75 @@ if [ "$ALL_TIERS" -eq 1 ]; then
   # Discover tiers from the cluster rather than from a list. Same rule as the
   # table enumeration below: ask the running system, because a hardcoded list
   # answers a question about the schema of record instead of the deployment.
-  self="$0"
+  # Resolved to an absolute path and run through bash, so the self-call works
+  # however this was invoked. `self="$0"` broke under `bash <name>.sh`: $0 is
+  # then a bare name, the exec fails with 127, and that 127 used to be
+  # reported as a failing store.
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   tiers="$(kubectl get pods -n "$NS" -o name 2>/dev/null \
             | sed -n 's|^pod/.*-tier-pg-\(.*\)-0$|\1|p' | sort -u)"
   echo "gating the root store and $(printf '%s' "$tiers" | grep -c .) tier store(s)"
   echo
-  rc=0
+  failed=""; notrun=""; declared_all=""
+  sub_out="$(mktemp)"
+  # One store: stream its report, keep a copy to read its declared-unlabelled
+  # line, and sort its exit into PASS / FAIL / NOT RUN.
+  run_store() {
+    local label="$1"; shift
+    bash "$self" "$@" 2>&1 | tee "$sub_out"
+    local s="${PIPESTATUS[0]}"
+    case "$s" in
+      0) : ;;
+      1) failed="$failed $label" ;;
+      *) notrun="$notrun $label(exit $s)" ;;
+    esac
+    declared_all="$declared_all $(sed -n 's/^DECLARED-UNLABELLED-EXCUSED://p' "$sub_out")"
+  }
   # --root-only is REQUIRED here: the default is now every store, so a bare
   # self-call would recurse until something ran out.
-  "$self" -n "$NS" --root-only || rc=1
+  run_store root -n "$NS" --root-only
   for t in $tiers; do
     echo
     echo "=============================================================="
-    "$self" -n "$NS" --tier "$t" || rc=1
+    run_store "$t" -n "$NS" --tier "$t"
   done
+  rm -f "$sub_out"
   echo
   n_tiers="$(printf '%s' "$tiers" | grep -c .)"
-  if [ "$rc" -eq 0 ]; then
-    if [ "$n_tiers" -eq 0 ]; then
-      # "ALL STORES PASS" over zero tier stores is a true statement that
-      # reads as a claim about tiers. It is not one. A deployment with
-      # tierNode disabled has exactly one store, and saying so is the
-      # difference between a result and an impression.
-      echo "THE ROOT STORE PASSES. No tier store exists in this deployment,"
-      echo "so this says NOTHING about per-tier enforcement — there is none"
-      echo "to say anything about."
-    else
-      echo "ALL $((n_tiers + 1)) STORES PASS (root + $n_tiers tier)."
-    fi
-  else
-    echo "AT LEAST ONE STORE FAILS — enforcement must not be enabled there." >&2
+  declared_ids="$(printf '%s\n' $declared_all | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  n_declared="$(printf '%s\n' $declared_all | sed '/^$/d' | sort -u | grep -c . || true)"
+  if [ -n "$failed" ]; then
+    echo "AT LEAST ONE STORE FAILS:$failed — enforcement must not be enabled there." >&2
     echo "Every store is reported above; the first failure is not the only one." >&2
+    [ -n "$notrun" ] && echo "ALSO NOT RUN (no verdict about these):$notrun" >&2
+    exit 1
   fi
-  exit "$rc"
+  if [ -n "$notrun" ]; then
+    echo "GATE NOT RUN on:$notrun" >&2
+    echo "Those stores were NOT CHECKED. This is the absence of an answer about" >&2
+    echo "them -- not a pass, and not a failure of their data." >&2
+    exit 3
+  fi
+  if [ "$n_tiers" -eq 0 ]; then
+    # "ALL STORES PASS" over zero tier stores is a true statement that
+    # reads as a claim about tiers. It is not one. A deployment with
+    # tierNode disabled has exactly one store, and saying so is the
+    # difference between a result and an impression.
+    echo "THE ROOT STORE PASSES. No tier store exists in this deployment,"
+    echo "so this says NOTHING about per-tier enforcement — there is none"
+    echo "to say anything about."
+  else
+    echo "ALL $((n_tiers + 1)) STORES PASS (root + $n_tiers tier)."
+  fi
+  # The excuse is part of the verdict, so it is printed with it -- never only
+  # in a per-store section someone may have scrolled past.
+  if [ "$n_declared" -gt 0 ]; then
+    echo "$n_declared declared unlabelled asset(s), excused by declaration: $declared_ids"
+    echo "  ($DECLARED_UNLABELLED_FILE)"
+  else
+    echo "0 declared unlabelled assets."
+  fi
+  exit 0
 fi
 
 # WHICH CLUSTER AM I ABOUT TO ASSERT ABOUT?
@@ -204,8 +254,8 @@ fi
 CTX="$(kubectl config current-context 2>/dev/null)" || CTX=""
 if [ -z "$CTX" ]; then
   echo "cannot determine kubectl context — refusing to report on an" >&2
-  echo "unidentified cluster." >&2
-  exit 1
+  echo "unidentified cluster. GATE NOT RUN." >&2
+  exit 3
 fi
 echo "ADR-0029 completeness gate"
 echo "  context:   $CTX"
@@ -313,6 +363,74 @@ is_declared_empty() {
 }
 
 # ---------------------------------------------------------------------------
+# DECLARED-UNLABELLED ASSETS: a deliberate unlabelled fixture, named
+# ---------------------------------------------------------------------------
+# See lab-declared-unlabelled.yaml's header for the whole argument. In short:
+# a lab that keeps one asset unlabelled on purpose had a gate that was red on
+# every run, and a gate that is always red is not read. A declared asset's
+# values -- THAT ASSET's, matched on the key column -- are subtracted from the
+# count; every other unlabelled value fails exactly as before. The excused
+# assets are named on the verdict line, and a declared asset that is NOT
+# unlabelled in a store it is declared for FAILS the gate (stale excuse).
+#
+# SCOPED TO ONE CLUSTER: the file's `context:` must equal this run's context.
+DECLARED_UNLABELLED=""
+if [ -f "$DECLARED_UNLABELLED_FILE" ]; then
+  du_ctx="$(sed -n 's/^context:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$DECLARED_UNLABELLED_FILE" | head -1)"
+  if [ "$du_ctx" = "$CTX" ]; then
+    DECLARED_UNLABELLED="$(sed -n '/^declared_unlabelled:/,$p' "$DECLARED_UNLABELLED_FILE" | awk -v store="$THIS_STORE" -v tier="$TIER" -v kind="$TIER_KIND" '
+      /^  "[^"]+":[[:space:]]*$/ {
+        if (id != "") emit()
+        id = $1; gsub(/"/, "", id); sub(/:$/, "", id); scopes = ""
+        next
+      }
+      /^    stores:[[:space:]]*\[/ {
+        scopes = $0
+        sub(/^[^[]*\[/, "", scopes); sub(/\].*$/, "", scopes); gsub(/[ \t"]/, "", scopes)
+        next
+      }
+      END { if (id != "") emit() }
+      function emit(   n, a, i) {
+        if (scopes == "") { print id; return }
+        n = split(scopes, a, ",")
+        for (i = 1; i <= n; i++)
+          if (a[i] == store || (tier != "" && a[i] == tier) \
+              || (kind != "" && a[i] == kind)) { print id; return }
+      }')"
+    echo "  declared-unlabelled: $(printf '%s' "${DECLARED_UNLABELLED:-NONE in scope}" | tr '\n' ' ')"
+    echo "                  (from $DECLARED_UNLABELLED_FILE, context $du_ctx)"
+  else
+    echo "  declared-unlabelled: NONE — $DECLARED_UNLABELLED_FILE is for context"
+    echo "                  '${du_ctx:-<unset>}', this run is '$CTX'; the whole file is ignored."
+  fi
+else
+  echo "  declared-unlabelled: NONE — no $DECLARED_UNLABELLED_FILE"
+fi
+echo
+# SQL list of the declared ids, for `key IN (...)`. Ids are checked against a
+# conservative charset first: they are spliced into SQL by hand.
+DU_SQL=""
+for id in $DECLARED_UNLABELLED; do
+  if ! grep -qE '^[A-Za-z0-9:._-]+$' <<<"$id"; then
+    echo "declared-unlabelled id '$id' has characters outside [A-Za-z0-9:._-]." >&2
+    echo "Refusing to splice it into SQL. GATE NOT RUN." >&2
+    exit 3
+  fi
+  DU_SQL="${DU_SQL:+$DU_SQL,}'$id'"
+done
+
+# The key column a table's rows are named by: asset_id, else subject, else
+# region_id, else empty. Shared by the declared-unlabelled subtraction and
+# the findings list, so the two cannot disagree about which rows an id names.
+key_column() {
+  local cand n
+  for cand in asset_id subject region_id; do
+    n="$(q "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='$1' AND column_name='$cand';")"
+    if [ "${n:-0}" = "1" ]; then echo "$cand"; return; fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # THE THIRD TERM: is the producer alive?
 # ---------------------------------------------------------------------------
 # `tactical_events` at the root is empty most of the time and that is CORRECT:
@@ -384,7 +502,7 @@ if grep -qiE "error|refused|not found|Unable to connect" <<<"$TABLES"; then
   echo "could not read information_schema — the gate DID NOT RUN." >&2
   echo "This is the absence of an answer, not a pass and not a fail:" >&2
   printf '%s\n' "$TABLES" | sed 's/^/    /' >&2
-  exit 1
+  exit 3
 fi
 if [ -z "$TABLES" ]; then
   echo "no table in this deployment carries originator_nation." >&2
@@ -504,7 +622,7 @@ ROWS="$(q "$SQL ORDER BY t;")"
 if grep -qiE "^ERROR|refused|Unable to connect" <<<"$ROWS"; then
   echo "counting query failed — the gate DID NOT RUN:" >&2
   printf '%s\n' "$ROWS" | sed 's/^/    /' >&2
-  exit 1
+  exit 3
 fi
 
 # --- step 3: report ---------------------------------------------------------
@@ -535,6 +653,8 @@ is_aggregate() { case "$AGGREGATE_TABLES" in *" $1 "*) return 0 ;; *) return 1 ;
 
 unlabelled=0
 aggregate_ok=0
+du_values=0
+du_found=""
 empty_tables=""
 declared_tables=""
 undeclared_tables=""
@@ -577,6 +697,30 @@ while IFS='|' read -r t n nn nr; do
   fi
   populated=$((populated + 1))
   mark=""
+  # Declared-unlabelled subtraction: THAT asset's NULLs, on this table's key
+  # column, and nothing else. Aggregates key on region_id and hold no asset,
+  # so no asset declaration can excuse a rollup.
+  du_note=""
+  if [ -n "$DU_SQL" ] && ! is_aggregate "$t"; then
+    du_key="$(key_column "$t" </dev/null)"
+    case "$du_key" in
+      asset_id|subject)
+        while IFS='|' read -r du_id du_nn du_nr; do
+          [ -n "$du_id" ] || continue
+          case "$du_nn$du_nr" in *[!0-9]*)
+            echo "declared-unlabelled count on '$t' returned: $du_id|$du_nn|$du_nr" >&2
+            echo "GATE NOT RUN." >&2
+            exit 3 ;;
+          esac
+          [ $((du_nn + du_nr)) -gt 0 ] || continue
+          nn=$((nn - du_nn)); nr=$((nr - du_nr))
+          du_values=$((du_values + du_nn + du_nr))
+          du_found="$du_found $du_id"
+          du_note="$du_note   ($((du_nn + du_nr)) DECLARED: $du_id)"
+        done < <(q "SELECT $du_key, count(*) FILTER (WHERE originator_nation IS NULL), count(*) FILTER (WHERE releasable_to IS NULL) FROM \"$t\" WHERE $du_key IN ($DU_SQL) GROUP BY $du_key;" </dev/null)
+        ;;
+    esac
+  fi
   if is_aggregate "$t"; then
     if [ "$nr" -gt 0 ]; then
       mark="   <-- NOT COMPOSED"
@@ -593,7 +737,9 @@ while IFS='|' read -r t n nn nr; do
     mark="   <-- UNLABELLED"
     unlabelled=$((unlabelled + nn + nr))
   fi
-  printf '%-28s %8s %12s %16s%s\n' "$t" "$n" "$nn" "$nr" "$mark"
+  # NULL_NATION / NULL_RELEASABLE are printed AFTER the subtraction: the
+  # columns show what fails, and du_note shows what was excused.
+  printf '%-28s %8s %12s %16s%s%s\n' "$t" "$n" "$nn" "$nr" "$mark" "$du_note"
 done <<< "$ROWS"
 
 # ---------------------------------------------------------------------------
@@ -624,6 +770,32 @@ phantom_sql="$phantom_sql AND f.asset_count >= (SELECT COALESCE(sum(g.asset_coun
 phantom_sql="$phantom_sql FROM region_fleet_summary g WHERE g.region_id = f.region_id"
 phantom_sql="$phantom_sql AND length(g.releasability_class) > 0);"
 phantoms="$(q "$phantom_sql")"
+# A DECLARED UNLABELLED ASSET PRODUCES THIS SHAPE HONESTLY. An unlabelled
+# contributor composes into the empty class, and a region whose only assets
+# are declared-unlabelled has no labelled partial beside it -- so the
+# correlate fires on a current rollup, not a replayed one. Found 2026-09-29:
+# the lab fixture is region-west's only asset, and this detector was the
+# eighth "unlabelled value" every pre-flight had been attributing to it.
+#
+# EXCUSED ONLY ON AN EXACT MATCH: the empty-class partial's asset_count must
+# EQUAL the number of declared-unlabelled assets that asset_logistics_status
+# places in that region (the observed placement the rollup composes from; the
+# registry holds an undeclared asset as region-unspecified). One more asset in
+# that partial than was declared, and it is reported as a phantom as before.
+if [ -n "$phantoms" ] && [ -n "$DU_SQL" ]; then
+  still=""
+  for r in $phantoms; do
+    ec="$(q "SELECT asset_count FROM region_fleet_summary WHERE region_id='$r' AND length(releasability_class)=0;")"
+    dn="$(q "SELECT count(*) FROM asset_logistics_status WHERE region_id='$r' AND asset_id IN ($DU_SQL);")"
+    if [ -n "$ec" ] && [ "$ec" = "$dn" ] && [ "${dn:-0}" != "0" ] 2>/dev/null; then
+      echo "empty-class partial in region $r holds $ec asset(s) = $dn declared unlabelled asset(s) there   (DECLARED, not a phantom)"
+      du_values=$((du_values + 1))
+    else
+      still="$still $r"
+    fi
+  done
+  phantoms="$(printf '%s\n' $still | sed '/^$/d')"
+fi
 if [ -n "$phantoms" ]; then
   echo "PHANTOM PARTIAL(S) - legacy rollups replayed from before the partition:" >&2
   printf "%s
@@ -642,8 +814,28 @@ if [ "$populated" -eq 0 ]; then
   exit 1
 fi
 
+# STALE DECLARATION: a declared asset that is not unlabelled in a store it is
+# declared for. The excuse no longer matches anything, so it can only explain
+# away whatever arrives next -- and for a fixture it means the asset vanished
+# or was labelled, which are findings in their own right.
+du_stale=""
+for id in $DECLARED_UNLABELLED; do
+  grep -qw -- "$id" <<<"$du_found" || du_stale="$du_stale $id"
+done
+if [ -n "$du_stale" ]; then
+  echo "GATE FAILS: declared-unlabelled asset(s) NOT unlabelled in this store:$du_stale"
+  echo "  Declared in $DECLARED_UNLABELLED_FILE for this store, but no labelled"
+  echo "  table here holds an unlabelled value for them. Either the asset"
+  echo "  vanished (which a fixture must not do), it was labelled, or the"
+  echo "  declaration's scope is wrong. Fix the cause or remove the row."
+  exit 1
+fi
+du_ids="$(printf '%s\n' $du_found | sed '/^$/d' | sort -u | tr '\n' ' ')"
+du_n="$(printf '%s\n' $du_found | sed '/^$/d' | sort -u | grep -c . || true)"
+
 if [ "$unlabelled" -gt 0 ]; then
   echo "GATE FAILS: $unlabelled unlabelled value(s) across $populated populated table(s)."
+  [ "$du_n" -gt 0 ] && echo "  (not counting $du_values value(s) of $du_n declared unlabelled asset(s): $du_ids)"
   echo
   echo "Subjects missing a declaration (table-qualified):"
   # NOT EVERY LABELLED TABLE IS ASSET-KEYED. The rollups key on region_id and
@@ -686,11 +878,15 @@ if [ "$unlabelled" -gt 0 ]; then
     else
       pred="originator_nation IS NULL OR releasable_to IS NULL"
     fi
-    key=""
-    for cand in asset_id subject region_id; do
-      n="$(q "SELECT count(*) FROM information_schema.columns WHERE table_name='$t' AND column_name='$cand';")"
-      if [ "${n:-0}" = "1" ]; then key="$cand"; break; fi
-    done
+    key="$(key_column "$t")"
+    # A declared asset was already subtracted from the count, so it must not
+    # be named here either: a findings list that includes the excused asset
+    # would send the operator to "fix" the fixture.
+    if [ -n "$DU_SQL" ] && ! is_aggregate "$t"; then
+      case "$key" in
+        asset_id|subject) pred="($pred) AND $key NOT IN ($DU_SQL)" ;;
+      esac
+    fi
     if [ -z "$key" ]; then
       # Say so, rather than dropping the table silently. An unlabelled row in
       # a table with no usable key is still a finding; it just cannot be
@@ -747,7 +943,17 @@ if [ -n "$undeclared_tables" ]; then
   exit 1
 fi
 
-echo "GATE PASSES: $populated populated table(s), zero unlabelled values."
+if [ "$du_n" -gt 0 ]; then
+  echo "GATE PASSES: $populated populated table(s), zero undeclared unlabelled values."
+  echo "  $du_n declared unlabelled asset(s) excused: $du_ids($du_values value(s))"
+  echo "  $(printf '%s' "$du_ids" | tr ' ' '\n' | sed '/^$/d' | while read -r id; do
+          sed -n "/^  \"$id\":/,/^  \"/p" "$DECLARED_UNLABELLED_FILE" | sed -n '/reason:/,$p' | sed '1d;/^  "/d' | tr '\n' ' ' | tr -s ' '
+        done | cut -c1-200)"
+else
+  echo "GATE PASSES: $populated populated table(s), zero unlabelled values."
+fi
+# Machine-readable, for the every-store summary: the ids excused HERE.
+echo "DECLARED-UNLABELLED-EXCUSED:$du_ids"
 if [ -n "$declared_tables" ]; then
   echo
   echo "Empty by declaration, and excluded from that result:"

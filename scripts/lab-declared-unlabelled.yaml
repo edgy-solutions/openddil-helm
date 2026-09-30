@@ -1,0 +1,53 @@
+# =============================================================================
+# Declared-unlabelled assets — ADR-0029 §7, completeness gate
+# =============================================================================
+# WHY THIS EXISTS
+#
+# The lab carries one asset that is unlabelled ON PURPOSE: `dis:1:1:1099`, the
+# fixture in lab-fixture-undeclared-asset.yaml, which is what gives the egress
+# gate an `unlabelled` refusal to exercise. The completeness gate is right to
+# count its values, and until this file it had no way to tell that fixture
+# from a leak. So the lab's pre-flight read 4 of 5 every run, and a check that
+# is red every run stops being read -- the next real unlabelled value would
+# have arrived inside a failure everybody already expected.
+#
+# WHAT A ROW HERE MEANS
+#
+# "This asset is unlabelled here, deliberately, for the named reason." The
+# gate then:
+#   * subtracts THAT ASSET's unlabelled values, and only those, from the count;
+#     any other unlabelled value still fails the gate exactly as before;
+#   * reports every excused asset by name ("1 declared") on the PASS line, so
+#     an excuse is never silent;
+#   * FAILS if a declared asset is NOT unlabelled in a store it is declared
+#     for. A declaration that no longer matches has become a way to explain
+#     away whatever arrives next, and for this fixture it also means the asset
+#     vanished or was labelled -- both of which are findings.
+#
+# NOT THE ONTOLOGY. releasability.yaml must never gain this asset: labelling it
+# there would remove the very case the fixture exists to produce. This file is
+# a claim about a deployment, not about the fleet, which is why it lives beside
+# the fixture and not in openddil-demo/ontology/.
+#
+# SCOPED TO ONE CLUSTER. `context` must equal kubectl's current-context or the
+# whole file is ignored (and the gate says so). A lab excuse must not be able
+# to reach another cluster's gate by being copied with the scripts.
+#
+# `stores` works as in expected-empty.yaml: root, tier, leaf, intermediate, or
+# a tier id. No `stores` key means every store -- do not use that here; the
+# fixture reaches the root only (edge-03 is not tier-managed).
+# =============================================================================
+
+version: 1
+
+context: edgy-lab
+
+declared_unlabelled:
+
+  "dis:1:1:1099":
+    stores: [root]
+    reason: >-
+      Lab fixture (lab-fixture-undeclared-asset.yaml): one entity at edge-03,
+      deliberately absent from releasability.yaml, so the egress gate has an
+      `unlabelled` refusal to produce. It reaches the root store only.
+      Declared 2026-09-29.
