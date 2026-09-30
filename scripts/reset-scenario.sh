@@ -102,6 +102,7 @@ SKIP_ELECTRIC=false
 SKIP_PRODUCERS=false
 RED_CHECK_TOPIC_CONFIG=false   # JUDGMENT CALL 10 red-check, see phase4_topics
 CENSUS_ONLY=false              # census-derived-quiesce read-only preview, see run_census_only
+RED_CHECK_ELECTRIC=false       # electric shape-handle red-check, see the RED-CHECK block before phase1_baseline
 RED_CHECK_QUIESCE=false        # census-derived-quiesce red-check, see run_red_check_quiesce
 
 usage() {
@@ -158,6 +159,11 @@ FLAGS
                       restore everything, and exit. Touches NO topic. This
                       is what proves the quiesce/restore path handles every
                       kind in work item 3's table without risking a delete.
+  --red-check-electric
+                      Read every Electric shape handle, then run the phase 8
+                      electric check WITHOUT deleting any pod. Read-only.
+                      Every handle line must FAIL (UNCHANGED); exits 0 only
+                      if they all did, i.e. only if the check can fail.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -181,6 +187,7 @@ while [ $# -gt 0 ]; do
     --red-check-topic-config) RED_CHECK_TOPIC_CONFIG=true ;;
     --census-only) CENSUS_ONLY=true ;;
     --red-check-quiesce) RED_CHECK_QUIESCE=true ;;
+    --red-check-electric) RED_CHECK_ELECTRIC=true ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -1008,6 +1015,23 @@ TABLES=(
 )
 EXCLUDED_TABLES=(audit_log)  # ADR-0029 decision log. PERMANENT. See header.
 
+# Declared heartbeats: deleted in phase 6 like every table above, but NOT
+# predicted 0 in phase 8. edge_buffer_status is one row the projector upserts
+# every EDGE_BUFFER_PROBE_INTERVAL_S (2s, openddil-projector
+# src/edge_buffer_monitor.py) from a live link probe, not from any topic, so
+# it is back within seconds of the DELETE whether or not producers are
+# quiesced. Predicting 0 for it was wrong on all four instances. Predicted
+# instead: no row older than the run boundary. That fails on a row nothing
+# writes any more; it cannot tell a deleted-and-rewritten row from one that
+# was never deleted, because the heartbeat refreshes both.
+HEARTBEAT_TABLES=(edge_buffer_status)
+
+is_heartbeat_table() {
+  local t
+  for t in "${HEARTBEAT_TABLES[@]}"; do [ "$t" = "$1" ] && return 0; done
+  return 1
+}
+
 # pg_query POD SQL — every call reads $POSTGRES_USER / $POSTGRES_DB from the
 # POD'S OWN ENVIRONMENT AT RUNTIME. Never hardcoded: hq's container runs
 # POSTGRES_USER=postgres, the tier instances run POSTGRES_USER=openddil, and
@@ -1184,6 +1208,15 @@ electric_shape_handle() {
     | { grep -i '^electric-handle:' || true; } | head -1 | sed -E 's/^[^:]+:[[:space:]]*//; s/[[:space:]]*$//'
 }
 
+# The pod name is not an identity: phase 7 deletes the pod, and its
+# replacement has a new name. The baseline is keyed by the name with the
+# ReplicaSet and pod hashes stripped, and verify looks it up the same way.
+# Keyed by pod name, the lookup after phase 7 always read empty, so the
+# UNCHANGED branch could never fire.
+electric_instance() {
+  printf '%s' "$1" | sed -E 's/-[a-z0-9]+-[a-z0-9]+$//'
+}
+
 electric_shape_rows() {
   # Count JSON objects in the array body by their `"key":` members, which is
   # one per row in Electric's shape response. Header lines are excluded by
@@ -1344,8 +1377,8 @@ declare -A BASE_AUDIT_COUNT   # key "pod" -> audit_log count (never deleted, re-
 declare -A BASE_RESTATE_KEYS  # key "pod" -> DISTINCT Virtual Object keys (14 on the lab)
 declare -A BASE_RESTATE_ROWS  # key "pod" -> state ROWS. NOT derivable from keys: measured 84/14 on hq but 59/8, 43/6, 98/14 on the tiers, so entries-per-key is ragged and both numbers are asserted separately.
 declare -A BASE_RESTATE_SCHED # key "pod" -> scheduled invocation count
-declare -A BASE_ELECTRIC_HANDLE # key "pod" -> shape handle before the reset (must CHANGE after)
-declare -A BASE_ELECTRIC_ROWS   # key "pod" -> shape row count before the reset
+declare -A BASE_ELECTRIC_HANDLE # key electric_instance(pod) -> shape handle before the reset (must CHANGE after)
+declare -A BASE_ELECTRIC_ROWS   # key electric_instance(pod) -> shape row count before the reset
 declare -A BASE_TOPIC_HW      # key "pod|topic|partition" -> high watermark
 declare -A ORIG_REPLICAS      # key deployment name -> replica count before quiesce (producers only, phase 2)
 
@@ -1360,6 +1393,28 @@ declare -A QSTATE_NODESEL      # key "DaemonSet/name" -> captured nodeSelector, 
 declare -A QSTATE_NODESEL_HAD  # key "DaemonSet/name" -> set (to 1) iff nodeSelector existed pre-quiesce; its ABSENCE is what tells restore to remove the key rather than replace it with the captured value
 declare -A QSTATE_SUSPEND      # key "Job/name" -> captured .spec.suspend before quiesce
 declare -a QSTATE_QUIESCED=()  # ordered list of "Kind/Name" this run actually attempted to quiesce — restore and the EXIT trap walk THIS, not the derived set, for the same reason restore_state_consumers used to: an entry the quiesce loop never reached must not be "restored" from an empty capture
+
+baseline_electric() {
+  echo "--- electric (shape handle + rows, per instance) ---"
+  local pod inst eport ehandle erows
+  for pod in "${ELECTRIC_PODS[@]}"; do
+    inst="$(electric_instance "$pod")"
+    eport="$(electric_port "$pod")"
+    if [ -z "$eport" ]; then
+      printf '  %-52s port=UNMEASURED (no containerPort in spec — not guessed)\n' "$pod"
+      continue
+    fi
+    ehandle="$(electric_shape_handle "$pod" "$eport")"
+    erows="$(electric_shape_rows "$pod" "$eport")"
+    if [ -n "${BASE_ELECTRIC_HANDLE[$inst]+x}" ]; then
+      echo "  WARNING: two electric pods reduce to instance '$inst'; the second overwrites the first baseline" >&2
+    fi
+    BASE_ELECTRIC_HANDLE["$inst"]="$ehandle"
+    BASE_ELECTRIC_ROWS["$inst"]="${erows:-0}"
+    printf '  %-52s port=%-5s rows=%-4s handle=%s\n' \
+      "$inst" "$eport" "${erows:-0}" "${ehandle:-UNMEASURED}"
+  done
+}
 
 phase1_baseline() {
   echo
@@ -1421,21 +1476,7 @@ phase1_baseline() {
   printf '  re-arm cadence (measured from scheduled_at -> scheduled_start_at): %ss\n' \
     "$(measure_restate_cadence)"
 
-  echo "--- electric (shape handle + rows, per instance) ---"
-  local eport ehandle erows
-  for pod in "${ELECTRIC_PODS[@]}"; do
-    eport="$(electric_port "$pod")"
-    if [ -z "$eport" ]; then
-      printf '  %-52s port=UNMEASURED (no containerPort in spec — not guessed)\n' "$pod"
-      continue
-    fi
-    ehandle="$(electric_shape_handle "$pod" "$eport")"
-    erows="$(electric_shape_rows "$pod" "$eport")"
-    BASE_ELECTRIC_HANDLE["$pod"]="$ehandle"
-    BASE_ELECTRIC_ROWS["$pod"]="${erows:-0}"
-    printf '  %-52s port=%-5s rows=%-4s handle=%s\n' \
-      "$pod" "$eport" "${erows:-0}" "${ehandle:-UNMEASURED}"
-  done
+  baseline_electric
 
   echo "--- topics (per broker, per partition) ---"
   local topic line part logstart hw
@@ -2602,8 +2643,13 @@ verify_stores() {
   for pod in "${POSTGRES_PODS[@]}"; do
     for table in "${TABLES[@]}"; do
       if pg_table_exists "$pod" "$table"; then
-        cnt="$(pg_count "$pod" "$table")"
-        report "stores $pod/$table" "0" "$cnt"
+        if is_heartbeat_table "$table"; then
+          cnt="$(pg_query "$pod" "SELECT count(*) FROM $table WHERE updated_at < '$RUN_STARTED_AT'::timestamptz" || true)"
+          report "stores $pod/$table (heartbeat, rows older than boundary)" "0" "${cnt:-UNMEASURED}"
+        else
+          cnt="$(pg_count "$pod" "$table")"
+          report "stores $pod/$table" "0" "$cnt"
+        fi
       fi
     done
     if pg_table_exists "$pod" "audit_log"; then
@@ -2743,33 +2789,45 @@ verify_electric() {
   #
   # This is the real §4 check: a new handle proves the shape log was discarded,
   # and 0 rows proves the client that re-creates it sees an empty fleet.
-  local pod port handle rows
+  local pod inst base port handle rows
+  ELECTRIC_HANDLE_UNCHANGED=0
   for pod in "${ELECTRIC_PODS[@]}"; do
+    inst="$(electric_instance "$pod")"
     if ! kubectl get pod -n "$NS" "$pod" -o name >/dev/null 2>&1; then
       # The pod name changed, which is itself the mechanism working. Re-resolve
-      # by the same family prefix so the shape can still be read.
+      # by instance so the shape can still be read.
       pod="$(kubectl get pods -n "$NS" --no-headers -o custom-columns='N:.metadata.name' 2>/dev/null \
-        | grep -E "^$(printf '%s' "$pod" | sed -E 's/-[a-z0-9]+-[a-z0-9]+$//')" | head -1 || true)"
-      [ -z "$pod" ] && continue
+        | while read -r n; do [ "$(electric_instance "$n")" = "$inst" ] && echo "$n"; done | head -1 || true)"
+      if [ -z "$pod" ]; then
+        printf '  %-55s PREDICTED=new-handle  ACTUAL=UNMEASURED (no pod for instance) -> FAIL\n' "electric $inst handle"
+        OVERALL_FAIL=1
+        continue
+      fi
     fi
     port="$(electric_port "$pod")"
     handle="$(electric_shape_handle "$pod" "$port")"
     rows="$(electric_shape_rows "$pod" "$port")"
     if [ -z "$handle" ]; then
-      printf '  %-55s PREDICTED=new-handle  ACTUAL=UNMEASURED -> FAIL\n' "electric $pod handle"
+      printf '  %-55s PREDICTED=new-handle  ACTUAL=UNMEASURED -> FAIL\n' "electric $inst handle"
       echo "     shape endpoint on port ${port:-?} did not answer. UNMEASURED, not zero."
       OVERALL_FAIL=1
       continue
     fi
-    # A handle that differs from the pre-reset one is the pass condition. An
-    # unchanged handle means the shape log survived, which is the failure this
-    # phase exists to catch.
-    if [ "$handle" = "${BASE_ELECTRIC_HANDLE[$pod]:-}" ]; then
-      report "electric $pod shape-handle" "new handle" "UNCHANGED ($handle)"
+    base="${BASE_ELECTRIC_HANDLE[$inst]:-}"
+    if [ -z "$base" ]; then
+      # No baseline means no comparison: "differs from nothing" is not a pass.
+      printf '  %-55s PREDICTED=new-handle  ACTUAL=UNMEASURED (no baseline handle) -> FAIL\n' "electric $inst handle"
+      OVERALL_FAIL=1
+    elif [ "$handle" = "$base" ]; then
+      # An unchanged handle means the shape log survived, which is the
+      # failure this phase exists to catch.
+      ELECTRIC_HANDLE_UNCHANGED=$((ELECTRIC_HANDLE_UNCHANGED + 1))
+      report "electric $inst shape-handle" "new-handle" "UNCHANGED"
     else
-      report "electric $pod shape-handle" "new handle" "new handle ($handle)"
+      report "electric $inst shape-handle" "new-handle" "new-handle"
     fi
-    report "electric $pod shape-rows" "0" "${rows:-0}"
+    printf '     handle before=%s after=%s\n' "${base:-none}" "$handle"
+    report "electric $inst shape-rows" "0" "${rows:-0}"
   done
 }
 
@@ -3073,6 +3131,23 @@ if $VERIFY_ONLY; then
   # own header for the full per-reading argument.
   phase8_zero
   exit $?
+fi
+
+if $RED_CHECK_ELECTRIC; then
+  # Read-only. Baseline, then the phase 8 electric check with NO pod deleted:
+  # every handle is unchanged, so every handle line must read FAIL. If any
+  # reads PASS, the check cannot tell a surviving shape log from a discarded
+  # one, and phase 8's electric PASS means nothing.
+  echo "=== RED-CHECK: electric shape handle (no pod is deleted) ==="
+  baseline_electric
+  verify_electric || true
+  if [ "${#ELECTRIC_PODS[@]}" -gt 0 ] \
+     && [ "$ELECTRIC_HANDLE_UNCHANGED" -eq "${#ELECTRIC_PODS[@]}" ]; then
+    echo "--red-check-electric: PASSED (${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} handle lines FAILED as they must)"
+    exit 0
+  fi
+  echo "--red-check-electric: FAILED (${ELECTRIC_HANDLE_UNCHANGED}/${#ELECTRIC_PODS[@]} handle lines read UNCHANGED; every one must)" >&2
+  exit 1
 fi
 
 phase1_baseline
