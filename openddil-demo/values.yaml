@@ -189,6 +189,31 @@ redpandaHq:
   outsidePort: 19093
   adminPort: 19644
 
+# --- Redpanda auto-create-topics enforcement ---------------------------------
+# See openddil-contracts/decisions/FOLLOW-UPS.md, "OPEN 2026-09-27 —
+# auto_create_topics_enabled=false, as a revision 52 chart change": Redpanda's
+# default (true, by omission) lets a misdirected/racing client silently
+# materialise a topic instead of failing loudly (the frozen HQ/region-east
+# changelog twin; the reset-scenario TOPIC_ALREADY_EXISTS recreate-race).
+#
+# TWO PATHS, not one, because neither covers both cluster ages: the
+# redpanda-edge/redpanda-hq StatefulSets also carry
+# `--set redpanda.auto_create_topics_enabled=false` on `redpanda start`
+# (fresh-install path — a cluster property seeded once at first formation,
+# inert on a cluster that already existed). This flag gates
+# hook-redpanda-auto-create-off.yaml, a post-install/post-upgrade Job that
+# runs `rpk cluster config set` + a read-back against every broker's Admin
+# API on every install/upgrade — the path that reaches a cluster already
+# running on a PVC that predates the StatefulSet flag.
+#
+# EMPTYDIR: with persistence.redpandaUseEmptyDir=true a broker restart loses
+# its controller log and re-forms the cluster, and the start arg seeds false
+# again at that formation (measured 2026-09-29: the lab had re-formed on
+# emptyDir and read false on 5/5 before this Job existed). So on emptyDir the
+# start arg is the path that holds; this Job is for clusters that persist.
+redpandaAutoCreateTopics:
+  enforceOff: true
+
 # --- Postgres HQ ------------------------------------------------------------
 postgresHq:
   image:

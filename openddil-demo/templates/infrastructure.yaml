@@ -193,16 +193,22 @@ spec:
             # one. `redpanda start --set` seeds a CLUSTER property, and cluster
             # properties live in the controller log -- seeded at first cluster
             # formation and never re-read from the command line again. So on a
-            # cluster that already exists this line does NOTHING, and an
-            # existing deployment additionally needs, once per cluster:
+            # cluster that already existed BEFORE this line shipped (a PVC-backed
+            # cluster, as opposed to a fresh install or a fresh
+            # persistence.redpandaUseEmptyDir reform), this line does NOTHING.
             #
-            #   rpk cluster config set auto_create_topics_enabled false
-            #
-            # (each broker here is its own single-node cluster, so that is once
-            # per broker, on the admin API -- 9644 for edges and regions, 19644
-            # for hq, NOT the Kafka port). Shipping only this flag and believing
-            # an existing lab changed is the trap: read the property back per
-            # broker and never infer it from this line being present.
+            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade hook Job
+            # {{ $.Release.Name }}-redpanda-auto-create-off
+            # (templates/hook-redpanda-auto-create-off.yaml, gated by
+            # .Values.redpandaAutoCreateTopics.enforceOff): it runs
+            # `rpk cluster config set auto_create_topics_enabled false` plus a
+            # read-back against every broker's Admin API -- 9644 for edges and
+            # regions, 19644 for hq, NOT the Kafka port -- on every
+            # install/upgrade, so a cluster this `--set` arg cannot reach still
+            # gets corrected. Shipping only this arg and believing an existing
+            # lab changed is the trap the hook Job exists to close: it reads the
+            # property back per broker and never infers it from this arg being
+            # present.
             #
             # Why off: an auto-created topic is born at broker DEFAULTS -- 1
             # partition, cleanup.policy=delete -- so a latest-state topic that
@@ -379,16 +385,22 @@ spec:
             # one. `redpanda start --set` seeds a CLUSTER property, and cluster
             # properties live in the controller log -- seeded at first cluster
             # formation and never re-read from the command line again. So on a
-            # cluster that already exists this line does NOTHING, and an
-            # existing deployment additionally needs, once per cluster:
+            # cluster that already existed BEFORE this line shipped (a PVC-backed
+            # cluster, as opposed to a fresh install or a fresh
+            # persistence.redpandaUseEmptyDir reform), this line does NOTHING.
             #
-            #   rpk cluster config set auto_create_topics_enabled false
-            #
-            # (each broker here is its own single-node cluster, so that is once
-            # per broker, on the admin API -- 9644 for edges and regions, 19644
-            # for hq, NOT the Kafka port). Shipping only this flag and believing
-            # an existing lab changed is the trap: read the property back per
-            # broker and never infer it from this line being present.
+            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade hook Job
+            # {{ .Release.Name }}-redpanda-auto-create-off
+            # (templates/hook-redpanda-auto-create-off.yaml, gated by
+            # .Values.redpandaAutoCreateTopics.enforceOff): it runs
+            # `rpk cluster config set auto_create_topics_enabled false` plus a
+            # read-back against every broker's Admin API -- 9644 for edges and
+            # regions, 19644 for hq, NOT the Kafka port -- on every
+            # install/upgrade, so a cluster this `--set` arg cannot reach still
+            # gets corrected. Shipping only this arg and believing an existing
+            # lab changed is the trap the hook Job exists to close: it reads the
+            # property back per broker and never infers it from this arg being
+            # present.
             #
             # Why off: an auto-created topic is born at broker DEFAULTS -- 1
             # partition, cleanup.policy=delete -- so a latest-state topic that

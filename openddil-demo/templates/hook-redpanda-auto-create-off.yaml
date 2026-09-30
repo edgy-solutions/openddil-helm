@@ -1,0 +1,103 @@
+{{- /*
+=============================================================================
+hook-redpanda-auto-create-off.yaml — enforce auto_create_topics_enabled=false
+on every broker, for clusters the broker start arg cannot reach
+=============================================================================
+See openddil-contracts/decisions/FOLLOW-UPS.md, "OPEN 2026-09-27 —
+auto_create_topics_enabled=false, as a revision 52 chart change." Redpanda's
+default (true, by omission) let a misdirected/racing client silently
+materialise a topic instead of failing loudly — the frozen HQ/region-east
+changelog twin, and the reset-scenario TOPIC_ALREADY_EXISTS recreate-race,
+both traced back to auto-create.
+
+THE TWO-PATH SPLIT (do not collapse them; each covers what the other cannot).
+infrastructure.yaml's redpanda-edge/redpanda-hq StatefulSets carry
+`--set redpanda.auto_create_topics_enabled=false` on `redpanda start`. That
+is a CLUSTER property, seeded once at first cluster formation and never
+re-read from the command line again — so it is the FRESH-INSTALL path (a
+brand-new cluster, or one on the persistence.redpandaUseEmptyDir escape
+hatch that just lost its volume and reformed). It does NOTHING for a
+cluster that already exists on a PVC that predates the flag: the arg
+renders, the pod restarts, and the property is still whatever it was.
+
+THIS JOB is that other path: `rpk cluster config set` at RUNTIME, against
+every broker's Admin API, on every install/upgrade — so a long-lived
+PVC-backed cluster gets corrected even though the StatefulSet's `--set`
+line was inert for it. It is deliberately a hook Job rather than an
+addition to the broker args for exactly that reason: the two mechanisms
+apply to disjoint cluster ages, not to the same one twice.
+
+Modelled on the topic-init Job above: same broker-list derivation (the
+tierList/isTierManaged predicate, not a hand-maintained loop that can drift
+from the StatefulSets — see that Job's own comment on how a hand-parallel
+loop went stale for region-east), same image/pull-secrets/resources/labels,
+same bounded-wait-then-act shape.
+
+SCRIPT SOURCE. The actual logic lives in one place,
+scripts/redpanda-auto-create-off.sh, read in here with `.Files.Get` rather
+than duplicated inline — so the hook's behavior and the standalone
+kubectl-exec red-check documented at the top of that file are, byte for
+byte, the same script. BROKERS is supplied here from the chart's own
+tier-list derivation; ASSERT_ONLY is left unset (0) for the enforcing run —
+the script also supports ASSERT_ONLY=1 (skip the `set`, read-back + report
+only) for a standalone red-check against brokers suspected still at `true`.
+
+Hook weight "6": after topic-init ("5", so topics exist before this
+Job even considers what created them) and before hub.yaml's bootstrap Jobs
+("20"/"21", so any bootstrap that could race a produce against auto-create
+runs after this is enforced). Delete policy is before-hook-creation,
+hook-succeeded ONLY — no hook-failed — so a failed run is left in place for
+kubectl logs/describe instead of vanishing with the failure.
+
+EMPTYDIR. With persistence.redpandaUseEmptyDir=true a broker restart re-forms
+its cluster, and the start arg seeds false at that formation (measured
+2026-09-29: 5/5 false on the lab before this Job existed). On emptyDir the
+start arg is the path that holds; this Job is for clusters that persist.
+*/ -}}
+{{- if .Values.redpandaAutoCreateTopics.enforceOff }}
+{{- $acAdminBrokers := list }}
+{{- $acTiers := include "openddil.tierList" . | fromYamlArray }}
+{{- range $tier := $acTiers }}
+{{- if or (eq $tier.kind "edge") (include "openddil.isTierManaged" (dict "id" $tier.id "root" $)) }}
+{{- $acAdminBrokers = append $acAdminBrokers (printf "%s-redpanda-%s:%d" $.Release.Name $tier.id (int $.Values.redpandaEdge.adminPort)) }}
+{{- end }}
+{{- end }}
+{{- $acAdminBrokers = append $acAdminBrokers (printf "%s-redpanda-hq:%d" .Release.Name (int .Values.redpandaHq.adminPort)) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-redpanda-auto-create-off
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "redpanda-auto-create-off" "root" .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rpk
+          image: "{{ include "openddil.thirdPartyImage" .Values.redpandaEdge.image }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaEdge.image.pullPolicy "root" .) }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
+          env:
+            - name: BROKERS
+              value: "{{ range $acAdminBrokers }}{{ . }} {{ end }}"
+          command:
+            - sh
+            - -c
+            - |
+              {{- .Files.Get "scripts/redpanda-auto-create-off.sh" | nindent 14 }}
+{{- end }}
