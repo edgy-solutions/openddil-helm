@@ -482,9 +482,15 @@ spec:
     - name: kafka
       port: {{ .Values.redpandaHq.kafkaPort }}
       targetPort: kafka
+    # The hq broker's args set no admin address, so Redpanda listens on its
+    # default 9644 -- NOT on the container port named `admin` (adminPort,
+    # 19644, a compose host-port mapping carried over). targetPort: admin
+    # therefore hit a closed port: connection refused, measured 2026-09-29.
+    # Service port stays adminPort so callers keep one address per broker.
+    # Changing the containerPort instead would roll the broker.
     - name: admin
       port: {{ .Values.redpandaHq.adminPort }}
-      targetPort: admin
+      targetPort: 9644
 ---
 # =============================================================================
 # Redpanda broker alias Services — bare names for docker-compose-baked configs

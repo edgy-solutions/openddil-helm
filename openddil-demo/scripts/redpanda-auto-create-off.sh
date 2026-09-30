@@ -68,8 +68,10 @@ for B in $BROKERS; do
   until rpk cluster health -X admin.hosts="$B" >/dev/null 2>&1; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 60 ]; then
-      echo "ERROR: $B Admin API unreachable after ~3min — failing." >&2
-      exit 1
+      # Counted, not fatal: the summary must still say N/M, so an unreachable
+      # broker reads as one of the M that is not false.
+      echo "FAIL: $B Admin API unreachable after ~3min"
+      continue 2
     fi
     sleep 3
   done
