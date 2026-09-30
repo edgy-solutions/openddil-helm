@@ -131,6 +131,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pg-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: postgres
           image: {{ include "openddil.thirdPartyImage" $tn.postgres.image }}
@@ -210,6 +214,10 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       restartPolicy: OnFailure
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
@@ -370,6 +378,10 @@ spec:
         # presents as green everywhere with nothing moved.
         checksum/restate-config: {{ include "openddil.tierRestateToml" (dict "tier" $tier "broker" $broker) | sha256sum }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: restate
           image: {{ include "openddil.thirdPartyImage" $root.Values.restate.image }}
@@ -493,6 +505,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
@@ -640,6 +656,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: electric
           image: {{ include "openddil.thirdPartyImage" $root.Values.electric.image }}
@@ -699,6 +719,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: frontend
           image: {{ include "openddil.image" (dict "name" $root.Values.frontend.image.name "tag" $root.Values.frontend.image.tag "digest" $root.Values.frontend.image.digest "root" $root) }}
@@ -864,6 +888,10 @@ spec:
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
           )) | sha256sum | quote }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/gateway" "dst" "app")
@@ -1068,6 +1096,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- /*
           THE OVERLAY ONTOLOGY BELONGS HERE TOO, and its absence was a
@@ -1153,6 +1185,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         # GATE FINDING: cm-service needs BOTH the proto mount (+PYTHONPATH)
         # and a BASELINES mount. The baselines are load-bearing, not
@@ -1235,6 +1271,10 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       restartPolicy: OnFailure
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -1431,6 +1471,10 @@ spec:
       annotations:
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if $root.Values.releasability.enabled }}
       # THE SEAT IS OCCUPIED. Until 2026-09-05 this Topaz loaded an EMPTY
       # bundle — running, healthy, and deciding nothing, which was honest and

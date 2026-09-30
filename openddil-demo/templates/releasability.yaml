@@ -146,6 +146,10 @@ spec:
         # until `bundle.image.digest` is set.
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         # THE ENTITLEMENTS FILE IS RENAMED IN TRANSIT, AND THAT IS CALLED OUT
         # IN BOTH PLACES. The reviewed artifact is policy/users.yaml; OPA's
@@ -293,6 +297,10 @@ spec:
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
           )) | sha256sum | quote }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/gateway" "dst" "app")
@@ -544,6 +552,10 @@ spec:
       annotations:
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.keycloakTierClients" $root))) | sha256sum | quote }}
     spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
