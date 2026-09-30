@@ -136,11 +136,15 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 8 }}
       annotations:
-        # Roll the pod when the policy changes. The bundle image is a rolling
-        # tag, so without this a helm upgrade that ships new policy leaves the
-        # old policy running and reports success — the rolling-tag hazard, in
-        # the one component where a stale artifact means stale ENFORCEMENT.
-        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+        # Roll the pod when the policy CONTENT changes, not on every helm
+        # revision. The bundle image is a rolling tag, so without this a helm
+        # upgrade that ships new policy leaves the old policy running and
+        # reports success — the rolling-tag hazard, in the one component
+        # where a stale artifact means stale ENFORCEMENT. See
+        # openddil.policyChecksum for what's hashed and the unpinned
+        # fallback that keeps this component's old every-upgrade behavior
+        # until `bundle.image.digest` is set.
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
     spec:
       initContainers:
         # THE ENTITLEMENTS FILE IS RENAMED IN TRANSIT, AND THAT IS CALLED OUT
@@ -285,7 +289,9 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
       annotations:
-        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list
+            (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
+          )) | sha256sum | quote }}
     spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
@@ -455,36 +461,7 @@ data:
        Derived from the SAME list that decides a tier node exists, so a
        fourth tier gets its client by being declared rather than by someone
        remembering this file. */ -}}
-{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
-{{- if and (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) $tier.publicOrigin }}
-{{- if $root.Values.releasability.oidc.enabled }}
-    {
-      "clientId": {{ include "openddil.tierClientId" (dict "id" $tier.id "root" $root) | quote }},
-      "name": {{ printf "OpenDDIL tier PEP (%s)" $tier.id | quote }},
-      "description": "Backend-for-frontend for one tier. Confidential: the browser never holds a token.",
-      "enabled": true,
-      "protocol": "openid-connect",
-      "publicClient": false,
-      "clientAuthenticatorType": "client-secret",
-      "secret": "__PEP_CLIENT_SECRET__",
-      "standardFlowEnabled": true,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "redirectUris": [
-        {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
-      ],
-      "webOrigins": [],
-      "attributes": {
-        "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "+"
-      },
-      "fullScopeAllowed": false,
-      "defaultClientScopes": ["openid", "profile", "email", "roles"]
-    },
-{{- end }}
-{{- end }}
-{{- end }}
+{{- include "openddil.keycloakTierClients" $root }}
 
   substitutions.sh: |
     set -eu
@@ -565,7 +542,7 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
-        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.keycloakTierClients" $root))) | sha256sum | quote }}
     spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list

@@ -214,6 +214,102 @@ subPath-mounts /shared/<dst> at the target absolute path.
 {{- end }}
 
 {{/*
+Content input for the identity pods' `checksum/policy` annotation
+(topaz-hq, pep, keycloak, tier-pep — see each pod template's WHY comment).
+Pipe the result through `sha256sum` at the call site, same as every other
+checksum/* annotation in this chart.
+
+MEASURED 2026-09-30: those four pod specs carried an annotation stamping
+`{{ "{{" }} .Release.Revision {{ "}}" }}` on every render, which rolled all 6 identity pods (3 root + 3 per-tier) on EVERY helm
+upgrade — because the entitlements corpus and the OIDC realm both arrive
+inside the runtime-bundle image under a rolling tag, so the chart cannot
+see whether the CONTENT behind that tag changed, only that an upgrade
+happened. This replaces "did a revision happen" with "did the content an
+identity pod actually loads change".
+
+Usage:
+  checksum/policy: {{ "{{" }} include "openddil.policyChecksum" (dict "root" $root "extra" (list ...)) | sha256sum {{ "}}" }}
+
+Input, for every call site:
+  - the fully resolved bundle-image reference, via the SAME openddil.image
+    include openddil.bundleInit resolves it with (name/tag/digest/registry)
+    — not re-derived, so the two can never disagree about what "the
+    bundle" means.
+  - `.extra`, a list of strings the CALLER supplies: every value under
+    `.Values.releasability` (and, for tier-pep, the tier's own id and
+    publicOrigin) that pod actually consumes and that is NOT already
+    rendered literally into its own pod spec. A value already in the pod
+    spec changes the rendered YAML by itself and Kubernetes rolls it
+    without this helper's help — the only thing worth hashing here is
+    what the pod spec does NOT show, e.g. `releasability.oidc.clientSecret`,
+    which every consumer reaches through a Secret NAME, never its value.
+
+CONSERVATIVE FALLBACK — the rolling-tag hazard must not come back by a
+different door. A tag-only bundle reference can point at new content
+without the reference TEXT changing at all, which is the exact hazard
+above; content-addressing needs content to address, and a tag is not
+content. So when `bundle.image.digest` is empty, `.Release.Revision` is
+folded into the input too, i.e. an unpinned install keeps rolling
+identity pods on every upgrade exactly like the revision-stamped
+annotation this replaces. Pinning `bundle.image.digest` is how an install
+opts in to rolling on content instead of on revision.
+*/}}
+{{- define "openddil.policyChecksum" -}}
+{{- $root := .root -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
+bundleImage={{ $bundleImage }}
+{{- range $i, $v := (.extra | default list) }}
+extra[{{ $i }}]={{ $v }}
+{{- end }}
+{{- if not $digest }}
+revision={{ $root.Release.Revision }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Keycloak realm per-tier clients (the keycloak-realm ConfigMap's tier-clients.json;
+see the WHY comment there). A named template so keycloak's checksum/policy can
+hash exactly what the ConfigMap renders: the realm substitutions come from the
+tier list, not from anything in the keycloak pod spec, so without this a
+digest-pinned install would leave keycloak on a stale realm when a tier's
+publicOrigin changed.
+*/}}
+{{- define "openddil.keycloakTierClients" -}}
+{{- $root := . }}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if and (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) $tier.publicOrigin }}
+{{- if $root.Values.releasability.oidc.enabled }}
+    {
+      "clientId": {{ include "openddil.tierClientId" (dict "id" $tier.id "root" $root) | quote }},
+      "name": {{ printf "OpenDDIL tier PEP (%s)" $tier.id | quote }},
+      "description": "Backend-for-frontend for one tier. Confidential: the browser never holds a token.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__PEP_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["openid", "profile", "email", "roles"]
+    },
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Toxiproxy proxy bootstrap. Runs once at install-time to register the
 hq-link proxy with the toxiproxy daemon (so the DDIL sever button on
 the frontend has a real proxy to enable/disable). Idempotent — POST to

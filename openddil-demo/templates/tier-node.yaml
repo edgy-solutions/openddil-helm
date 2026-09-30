@@ -858,7 +858,11 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
       annotations:
-        openddil.io/policy-revision: {{ $root.Release.Revision | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list
+            $tier.id
+            ($tier.publicOrigin | default "")
+            (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
+          )) | sha256sum | quote }}
     spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
