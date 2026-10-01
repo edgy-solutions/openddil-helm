@@ -1285,11 +1285,13 @@ releasability:
       digest: ""
     # The sign-in page carries a minimal `openddil` login theme (chart-
     # owned, no values flag of its own: it renders whenever keycloak is
-    # enabled). It activates for the `realm` below and sources its logo,
-    # full-page background and sign-in strings from the SAME
-    # frontend.branding.configMap every UI already mounts -- absent that
-    # ConfigMap, or any of its image/message keys, the page looks exactly
-    # like stock Keycloak 26.
+    # enabled). It activates for the `realm` below. Its logo and full-page
+    # background default to the OpenDDIL images in the frontend image
+    # (/brand/); the SAME frontend.branding.configMap every UI mounts
+    # overrides them per key (signin-logo.png, signin-background.jpg) and
+    # supplies the sign-in strings (keycloak-messages_en.properties). A
+    # ConfigMap change reaches the sign-in page after a keycloak rollout
+    # restart.
     realm: openddil
     # Served under a sub-path of the app's own host, so the IdP and the app
     # are same-site and the login round trip needs no CORS.

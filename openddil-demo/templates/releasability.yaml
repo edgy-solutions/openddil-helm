@@ -486,9 +486,9 @@ data:
     cat /subst/tier-clients.json                                     >> /tmp/realm.json
     sed -e "1,/__TIER_CLIENTS__/d" /bundle-realm/realm-openddil.json >> /tmp/realm.json
     # ACTIVATE THE SIGN-IN THEME HERE, NOT IN THE BUNDLE REALM FILE. The
-    # theme is chart-owned (it ships as the `-keycloak-theme` ConfigMap
-    # mounted at /opt/keycloak/themes/openddil below), so the chart is what
-    # turns it on. This is safe to do on every start: Keycloak's data
+    # theme is chart-owned (the `-keycloak-theme` ConfigMap below, assembled
+    # into /opt/keycloak/themes/openddil by the `theme` init container), so
+    # the chart is what turns it on. This is safe to do on every start: Keycloak's data
     # directory has no volume of its own here -- only /opt/keycloak/data/
     # import is mounted, and that's an emptyDir -- so the embedded H2
     # database never survives a pod restart and --import-realm never finds
@@ -549,75 +549,7 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
 data:
-  theme.properties: |
-    parent=keycloak.v2
-
-    # theme.properties keys like `styles` are NOT merged across the parent
-    # chain -- a theme that sets the key at all must restate everything it
-    # wants, including the parent's own sheet, or lose it. Keycloak
-    # resolves each relative path by walking up the theme hierarchy, so
-    # "css/styles.css" still finds keycloak.v2's own file even though this
-    # theme carries no copy of it.
-    styles=css/styles.css css/openddil.css
-  openddil.css: |
-    /* Sign-in branding for the `openddil` login theme. Every rule here
-       degrades to a no-op when its image is absent: with no branding
-       ConfigMap mounted at all, the header, background and form card
-       render exactly as stock keycloak.v2 does.
-
-       Header logo precedence (first layer wins where it is opaque):
-       signin-logo.png, then logo.svg, then logo.png. CSS cannot detect
-       whether a background-image actually loaded, so there is no way to
-       GUARANTEE that a present signin-logo.png fully hides logo.svg/
-       logo.png beneath it if it has transparent regions -- a deployment
-       that wants exactly one logo should supply only that one key. */
-    #kc-header-wrapper {
-      background-repeat: no-repeat, no-repeat, no-repeat;
-      background-position: center, center, center;
-      background-size: contain, contain, contain;
-      background-image:
-        url("../img/signin-logo.png"),
-        url("../img/logo.svg"),
-        url("../img/logo.png");
-    }
-
-    /* Full-page sign-in background, with a dark fallback colour so a
-       tall/narrow source image still fills the viewport. CSS cannot make
-       the fallback colour conditional on signin-background.jpg actually
-       being present, so -- same as the form card below -- it applies
-       unconditionally, including on an unbranded deployment. */
-    html.login-pf body#keycloak-bg {
-      background-color: #0f172a;
-      background-image: url("../img/signin-background.jpg");
-      background-repeat: no-repeat;
-      background-position: center center;
-      background-size: cover;
-      background-attachment: fixed;
-    }
-
-    /* "Glass" form card: dark, translucent, blue-bordered. CSS has no way
-       to apply this only when a background image loaded, so it is
-       unconditional -- the fixed light-on-dark palette keeps it readable
-       on the plain keycloak.v2 background too. */
-    .pf-v5-c-login__main-body {
-      background: rgba(15, 23, 42, 0.55);
-      backdrop-filter: blur(6px);
-      border: 1px solid rgba(96, 165, 250, 0.45);
-      border-radius: 8px;
-      padding: 2rem;
-      color: #f8fafc;
-    }
-
-    .pf-v5-c-login__main-body .pf-v5-c-form__label,
-    .pf-v5-c-login__main-body label,
-    .pf-v5-c-login__main-header .pf-v5-c-title {
-      color: #f8fafc;
-    }
-
-    .pf-v5-c-login__main-body .pf-v5-c-button.pf-m-primary {
-      background-color: #2563eb;
-      border-color: #1d4ed8;
-    }
+  {{- include "openddil.keycloakThemeData" $root | nindent 2 }}
 ---
 apiVersion: v1
 kind: Service
@@ -651,6 +583,7 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.keycloakTierClients" $root))) | sha256sum | quote }}
+        checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -675,6 +608,24 @@ spec:
             - { name: subst,         mountPath: /subst }
             - { name: bundle-shared, mountPath: /bundle-realm, subPath: bundle-realm }
             - { name: import,        mountPath: /import }
+        # THE SIGN-IN THEME, ASSEMBLED FROM THE FRONTEND IMAGE. The OpenDDIL
+        # default images ship in that image under /brand/ (the UIs serve
+        # them from there), so this is the one copy of them; the optional
+        # branding ConfigMap's keys override them file by file. See
+        # assemble.sh in _keycloak-theme.tpl.
+        #
+        # The cost of copying instead of mounting: a branding ConfigMap
+        # change reaches the sign-in page only after
+        #   kubectl rollout restart deployment/<release>-keycloak
+        # (the UIs still pick it up live through their own mounts).
+        - name: theme
+          image: {{ include "openddil.image" (dict "name" $root.Values.frontend.image.name "tag" $root.Values.frontend.image.tag "digest" $root.Values.frontend.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.frontend.image.pullPolicy "root" $root) }}
+          command: ["sh", "/theme-src/assemble.sh"]
+          volumeMounts:
+            - { name: theme-src,    mountPath: /theme-src, readOnly: true }
+            - { name: branding-src, mountPath: /branding-src, readOnly: true }
+            - { name: theme,        mountPath: /theme }
       containers:
         - name: keycloak
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.keycloak.image.repository "tag" $root.Values.releasability.keycloak.image.tag "digest" $root.Values.releasability.keycloak.image.digest "root" $root) }}
@@ -733,6 +684,7 @@ spec:
               mountPath: /opt/keycloak/data/import
             - name: theme
               mountPath: /opt/keycloak/themes/openddil
+              readOnly: true
       volumes:
         - name: subst
           configMap:
@@ -743,51 +695,20 @@ spec:
         - name: import
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.keycloak.realmVolumeSize }}
-        # THE SAME OPTIONAL BRANDING CONFIGMAP EVERY FRONTEND MOUNTS,
-        # layered here as a Keycloak login theme instead of static files.
-        # The chart's own `-keycloak-theme` ConfigMap supplies
-        # theme.properties and the stylesheet; the branding ConfigMap
-        # (optional, same as frontend.branding.configMap everywhere else)
-        # supplies the images and the sign-in strings, if it exists at
-        # all and whichever of its keys are present.
-        #
-        # An `items` key absent from an OPTIONAL ConfigMap source is not
-        # a mount error: kubelet's projected-volume handling for a
-        # ConfigMapProjection calls the same MakePayload() the plain
-        # configMap volume type does, with THIS source's `optional`
-        # carried through: a referenced key missing from the ConfigMap's
-        # Data/BinaryData is silently skipped (`continue`) rather than
-        # failing with "references non-existent config key", exactly like
-        # a wholly-absent ConfigMap is. (pkg/volume/configmap/configmap.go
-        # MakePayload, called from pkg/volume/projected/projected.go with
-        # source.ConfigMap.Optional threaded through.) So a branding
-        # ConfigMap with only a logo and no messages key -- or no logo and
-        # only a title -- mounts cleanly; only the keys that exist land
-        # under /opt/keycloak/themes/openddil.
+        # The chart's theme files and assembly script.
+        - name: theme-src
+          configMap:
+            name: {{ $root.Release.Name }}-keycloak-theme
+        # THE SAME OPTIONAL BRANDING CONFIGMAP EVERY FRONTEND MOUNTS. Absent,
+        # the directory is empty and every default stands.
+        - name: branding-src
+          configMap:
+            name: {{ $root.Values.frontend.branding.configMap | default (printf "%s-branding" $root.Release.Name) }}
+            optional: true
+        # The assembled theme, written by the `theme` init container.
         - name: theme
-          projected:
-            sources:
-              - configMap:
-                  name: {{ $root.Release.Name }}-keycloak-theme
-                  items:
-                    - key: theme.properties
-                      path: login/theme.properties
-                    - key: openddil.css
-                      path: login/resources/css/openddil.css
-              - configMap:
-                  name: {{ $root.Values.frontend.branding.configMap | default (printf "%s-branding" $root.Release.Name) }}
-                  optional: true
-                  items:
-                    - key: logo.png
-                      path: login/resources/img/logo.png
-                    - key: logo.svg
-                      path: login/resources/img/logo.svg
-                    - key: signin-logo.png
-                      path: login/resources/img/signin-logo.png
-                    - key: signin-background.jpg
-                      path: login/resources/img/signin-background.jpg
-                    - key: keycloak-messages_en.properties
-                      path: login/messages/messages_en.properties
+          emptyDir:
+            sizeLimit: 16Mi
 {{- end }}
 {{- if $root.Values.releasability.lockDownElectric }}
 ---
