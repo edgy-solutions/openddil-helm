@@ -1,5 +1,8 @@
 # Deploy package — chart `openddil-demo-0.1.58`
 
+> **Superseded as the procedure by `DEPLOY-PACKAGE-chart-0.1.68.md`.** Kept for the measurements
+> behind its rows; where the two disagree, the 0.1.68 package is later.
+
 > **Named by chart version, not by helm revision.** A revision number is a
 > per-cluster counter: this same chart is revision 51 on the lab and will be
 > some other number at work, so the old name identified the document only on

@@ -1,5 +1,8 @@
 # Revision 51 on the work cluster — read this before touching it
 
+> **Superseded as the difference list by `DEPLOY-PACKAGE-chart-0.1.68.md` §2.** Kept for the
+> measurements behind its rows; where the two disagree, the 0.1.68 package is later.
+
 The lab proved this deploy on 2026-09-26. Revision 51 is now the **work-deploy
 package**, so this file is the difference list: what the lab measured, what the
 lab *could not* measure, and what is different at work. Read it top to bottom
