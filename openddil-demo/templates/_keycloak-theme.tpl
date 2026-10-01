@@ -27,11 +27,17 @@ openddil.css: |
      the parent theme's look, with the dark colour and card below.
 
      The header shows signin-logo.png only, so an overlay rebrands it with
-     that one key. */
+     that one key. The wrapper holds only the realm name, one line of
+     text, so `contain` would shrink the logo to that line and draw it
+     over the name. Instead the logo gets its own band above the name,
+     sized to the viewport: 22vh keeps a 1366x768 screen from scrolling,
+     and the clamp keeps it legible on a phone and sane on a tall monitor. */
   #kc-header-wrapper {
+    --openddil-logo-h: clamp(120px, 22vh, 240px);
+    padding-top: calc(var(--openddil-logo-h) + 16px);
     background-repeat: no-repeat;
-    background-position: center;
-    background-size: contain;
+    background-position: center top;
+    background-size: auto var(--openddil-logo-h);
     background-image: url("../img/signin-logo.png");
   }
 
@@ -53,6 +59,14 @@ openddil.css: |
      to apply this only when a background image loaded, so it is
      unconditional -- the fixed light-on-dark palette keeps it readable
      on the plain keycloak.v2 background too. */
+  /* The panel the card sits on, which also carries the "Sign in to your
+     account" title. keycloak.v2 paints it white in a light colour scheme
+     and #26292d in a dark one; the title is light (below) in both, so a
+     light-scheme browser showed white on white. Pin the dark value. */
+  .pf-v5-c-login__main {
+    background-color: #26292d;
+  }
+
   .pf-v5-c-login__main-body {
     background: rgba(15, 23, 42, 0.55);
     backdrop-filter: blur(6px);
