@@ -197,6 +197,10 @@ spec:
 # read contract tier-INDEPENDENT, which is what lets ADR-0031's read seam be
 # written once instead of per-tier. Empty tables cost ~nothing; schema
 # variants cost permanently.
+#
+# NOT post-rollback: Atlas migrations are forward-only -- same reasoning as
+# postgres-schema-init.yaml. A refused re-apply fails this hook and blocks
+# every registration Job at a later weight.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -1261,7 +1265,7 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade,post-rollback
     "helm.sh/hook-weight": "5"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:

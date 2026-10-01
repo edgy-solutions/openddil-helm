@@ -13,6 +13,10 @@
    Hook weight 10 places this AFTER topic-init (weight 5) and BEFORE
    cm-service-bootstrap (weight 20) / logistics-fusion-bootstrap (21),
    so cluster comes up: topics → schema → service registrations.
+
+   NOT post-rollback: Atlas migrations are forward-only, so an older
+   migration dir cannot take the DB back, and a refused re-apply fails
+   this hook -- blocking every registration Job that runs after it.
 */}}
 {{- $pgHost := printf "%s-postgres-hq%s" .Release.Name (include "openddil.svcDomain" .) }}
 {{- $pgUser := .Values.postgresHq.auth.username }}

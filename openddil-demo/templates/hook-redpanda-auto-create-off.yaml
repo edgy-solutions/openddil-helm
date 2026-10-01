@@ -21,7 +21,7 @@ cluster that already exists on a PVC that predates the flag: the arg
 renders, the pod restarts, and the property is still whatever it was.
 
 THIS JOB is that other path: `rpk cluster config set` at RUNTIME, against
-every broker's Admin API, on every install/upgrade — so a long-lived
+every broker's Admin API, on every install/upgrade/rollback — so a long-lived
 PVC-backed cluster gets corrected even though the StatefulSet's `--set`
 line was inert for it. It is deliberately a hook Job rather than an
 addition to the broker args for exactly that reason: the two mechanisms
@@ -70,7 +70,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade,post-rollback
     "helm.sh/hook-weight": "6"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:

@@ -197,18 +197,18 @@ spec:
             # cluster, as opposed to a fresh install or a fresh
             # persistence.redpandaUseEmptyDir reform), this line does NOTHING.
             #
-            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade hook Job
-            # {{ $.Release.Name }}-redpanda-auto-create-off
+            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade/post-rollback
+            # hook Job {{ $.Release.Name }}-redpanda-auto-create-off
             # (templates/hook-redpanda-auto-create-off.yaml, gated by
             # .Values.redpandaAutoCreateTopics.enforceOff): it runs
             # `rpk cluster config set auto_create_topics_enabled false` plus a
             # read-back against every broker's Admin API -- 9644 for edges and
             # regions, 19644 for hq, NOT the Kafka port -- on every
-            # install/upgrade, so a cluster this `--set` arg cannot reach still
-            # gets corrected. Shipping only this arg and believing an existing
-            # lab changed is the trap the hook Job exists to close: it reads the
-            # property back per broker and never infers it from this arg being
-            # present.
+            # install/upgrade/rollback, so a cluster this `--set` arg cannot
+            # reach still gets corrected. Shipping only this arg and believing
+            # an existing lab changed is the trap the hook Job exists to
+            # close: it reads the property back per broker and never infers
+            # it from this arg being present.
             #
             # Why off: an auto-created topic is born at broker DEFAULTS -- 1
             # partition, cleanup.policy=delete -- so a latest-state topic that
@@ -389,18 +389,18 @@ spec:
             # cluster, as opposed to a fresh install or a fresh
             # persistence.redpandaUseEmptyDir reform), this line does NOTHING.
             #
-            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade hook Job
-            # {{ .Release.Name }}-redpanda-auto-create-off
+            # THE EXISTING-CLUSTER PATH is the post-install/post-upgrade/post-rollback
+            # hook Job {{ .Release.Name }}-redpanda-auto-create-off
             # (templates/hook-redpanda-auto-create-off.yaml, gated by
             # .Values.redpandaAutoCreateTopics.enforceOff): it runs
             # `rpk cluster config set auto_create_topics_enabled false` plus a
             # read-back against every broker's Admin API -- 9644 for edges and
             # regions, 19644 for hq, NOT the Kafka port -- on every
-            # install/upgrade, so a cluster this `--set` arg cannot reach still
-            # gets corrected. Shipping only this arg and believing an existing
-            # lab changed is the trap the hook Job exists to close: it reads the
-            # property back per broker and never infers it from this arg being
-            # present.
+            # install/upgrade/rollback, so a cluster this `--set` arg cannot
+            # reach still gets corrected. Shipping only this arg and believing
+            # an existing lab changed is the trap the hook Job exists to
+            # close: it reads the property back per broker and never infers
+            # it from this arg being present.
             #
             # Why off: an auto-created topic is born at broker DEFAULTS -- 1
             # partition, cleanup.policy=delete -- so a latest-state topic that
@@ -637,7 +637,7 @@ spec:
 # =============================================================================
 # Topic-init Job — creates all Kafka topics on every cluster
 # =============================================================================
-# Runs as a post-install/post-upgrade Helm hook so it fires AFTER the
+# Runs as a post-install/post-upgrade/post-rollback Helm hook so it fires AFTER the
 # StatefulSets are scheduled but creates topics idempotently (rpk topic
 # create returns nonzero if topic exists — the || true swallows it).
 {{- /* BROKER LIST -- must match the StatefulSet loop's predicate exactly.
@@ -668,7 +668,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade,post-rollback
     "helm.sh/hook-weight": "5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:

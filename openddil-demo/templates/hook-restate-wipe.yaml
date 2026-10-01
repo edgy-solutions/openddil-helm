@@ -9,18 +9,20 @@ appears alive but emits nothing for every event hitting an old VO.
 
 The recovery used to be a manual five-step kubectl ritual (scale down,
 delete PVC, scale up, re-run bootstraps, rollout restart). This pre-
-install/pre-upgrade hook does the first three steps automatically so a
-plain `helm upgrade` Just Works. The post-install/post-upgrade bootstrap
-Jobs (cm-service-bootstrap, logistics-fusion-bootstrap) re-register
-services against the fresh Restate state on the way back up.
+install/pre-upgrade/pre-rollback hook does the first three steps
+automatically so a plain `helm upgrade` (or `helm rollback` -- a rollback
+is a code change too) Just Works. The post-install/post-upgrade/
+post-rollback bootstrap Jobs (cm-service-bootstrap, logistics-fusion-
+bootstrap) re-register services against the fresh Restate state on the
+way back up.
 
 Behavior is gated by `.Values.restate.ephemeralOnUpgrade`:
   * true  (default for the demo chart) — wipe Restate state on every
           install/upgrade. Trade-off: discards CM history + logistics
           state from the previous deploy. Right for demos; iteration
           velocity over state durability.
-  * false — leave Restate state alone. The pre-install/pre-upgrade
-          step becomes a no-op. Use this when CM history actually
+  * false — leave Restate state alone. The pre-install/pre-upgrade/
+          pre-rollback step becomes a no-op. Use this when CM history actually
           matters across deploys (prod-like environments) and you
           accept that handler-code changes require an explicit
           `flush-assets.sh --deep` to clean state.
@@ -99,7 +101,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-100"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 ---
@@ -110,7 +112,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-100"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
@@ -131,7 +133,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-100"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
@@ -150,7 +152,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-99"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
@@ -233,7 +235,7 @@ spec:
               echo
               echo "Restate wipe complete: ${wiped} PVC(s) deleted, ${absent} StatefulSet(s) absent."
               echo "The StatefulSet apply that follows recreates each PVC empty;"
-              echo "the post-install/post-upgrade bootstrap Jobs (root: cm-service-"
+              echo "the post-install/post-upgrade/post-rollback bootstrap Jobs (root: cm-service-"
               echo "bootstrap + logistics-fusion-bootstrap; per tier: tier-restate-"
               echo "bootstrap-<id>) re-register services and Kafka subscriptions."
               echo
