@@ -26,12 +26,19 @@ brokers rolled Ready: **five of five still read `true`.**
 
 ## What actually applies it
 
-    rpk cluster config set redpanda.auto_create_topics_enabled false
+    rpk cluster config set auto_create_topics_enabled false
 
 Once, against one broker — it is a *cluster* property, so it propagates through
 the controller log to all of them. Read it back **per broker**, not once:
 
-    rpk -X admin.hosts=localhost:9644 cluster config get redpanda.auto_create_topics_enabled
+    rpk -X admin.hosts=localhost:9644 cluster config get auto_create_topics_enabled
+
+**Corrected 2026-10-01: the property name has no `redpanda.` prefix here.** The prefix belongs
+only to `redpanda start --set`. As first written, both commands above used it, and the Admin API
+answers that with `Bad Request, Unknown property {redpanda.auto_create_topics_enabled}` (rpk
+v26.1.7, HQ broker, measured). The chart's hook (`scripts/redpanda-auto-create-off.sh`) and the
+pre-deploy gate (`scripts/check-cluster-config.sh`) already use the unprefixed name, so neither is
+affected; only someone copying these lines by hand was.
 
 ## Two things that will waste your time
 
@@ -39,6 +46,12 @@ the controller log to all of them. Read it back **per broker**, not once:
 declares a port named `admin` as 19644, but the process listens on the default.
 A read-back against 19644 comes back `connection refused`, which reads as a dead
 broker rather than a wrong port.
+
+*Refined 2026-10-01:* this holds from **inside** a broker pod (`localhost`). Reached through
+its Service from another pod, HQ answers on **19644** (the Service maps 19644 to the process's
+9644) and does not expose 9644 at all. So both numbers are right, each for its own path.
+`check-cluster-config.sh` reads each broker's admin port from that broker's own Service, so it
+never has to pick one.
 
 **Do not verify this with `rpk topic consume` or `rpk topic produce`.** Both
 return `UNKNOWN_TOPIC_OR_PARTITION` and create nothing **whether the property is
