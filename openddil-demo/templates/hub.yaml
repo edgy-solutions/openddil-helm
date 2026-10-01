@@ -942,6 +942,21 @@ spec:
               containerPort: {{ .Values.frontend.port }}
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
+          volumeMounts:
+            # Branding is OPTIONAL and supplied by a separate overlay chart,
+            # not this one. `optional: true` on the volume below is what
+            # makes a missing ConfigMap a non-error instead of a stuck pod;
+            # the kubelet populates this mount once the ConfigMap shows up,
+            # with no restart needed. The SPA reads /branding/branding.json
+            # and falls back to OpenDDIL defaults when the file is absent.
+            - name: branding
+              mountPath: /usr/share/nginx/html/branding
+              readOnly: true
+      volumes:
+        - name: branding
+          configMap:
+            name: {{ .Values.frontend.branding.configMap | default (printf "%s-branding" .Release.Name) }}
+            optional: true
 ---
 apiVersion: v1
 kind: Service

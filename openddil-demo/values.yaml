@@ -724,6 +724,11 @@ frontend:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 200m, memory: 256Mi }
   port: 80
+  branding:
+    # Optional ConfigMap holding branding.json (title, logo) plus image
+    # files; served unauthenticated at /branding/ on every UI. Empty =
+    # <release>-branding. Absent ConfigMap = OpenDDIL defaults.
+    configMap: ""
 
 # --- Egress gate + its pane (ADR-0043 Arc 2 Slice 2, ledger row LR-0043-C) --
 # ONE image, TWO Deployments: the gate (image default command, main.py) and
