@@ -1071,7 +1071,8 @@ delete_table() {
   for excl in "${EXCLUDED_TABLES[@]}"; do
     if [ "$table" = "$excl" ]; then
       echo "REFUSING to delete from $table — it is in EXCLUDED_TABLES (ADR-0029)." >&2
-      exit 1
+      halt_reset "refused to delete from $table on $pod: it is in EXCLUDED_TABLES (ADR-0029)" \
+        "$table on $pod untouched; tables already deleted in phase 6 stay deleted"
     fi
   done
   maybe_run "DELETE FROM $table on $pod" \
@@ -1564,108 +1565,136 @@ phase2_quiesce() {
   done
 }
 
+# restate_residue POD -> "keys rows scheduled open", one line. Any value that
+# cannot be read prints as "?", and "?" is never zero: an unreadable read
+# that defaulted to 0 would let a pod the script cannot see pass as cleared.
+restate_residue() {
+  local pod="$1" k r s o v out=""
+  k="$(restate_count "$pod" "select count(distinct service_key) as n from state")"
+  r="$(restate_count "$pod" "select count(*) as n from state")"
+  s="$(restate_count "$pod" "select count(*) as n from sys_invocation where status = 'scheduled'")"
+  o="$(restate_count "$pod" "select count(*) as n from sys_invocation where status <> 'completed'")"
+  for v in "$k" "$r" "$s" "$o"; do
+    [[ "$v" =~ ^[0-9]+$ ]] || v="?"
+    out="$out $v"
+  done
+  printf '%s\n' "${out# }"
+}
+
+# One cancel-then-clear pass over one pod. Every id read is cancelled, and
+# every service read is cleared, even when a cross-check count disagrees with
+# the list: the list is a snapshot of objects that re-arm themselves, and the
+# re-read in phase3_restate, not this pass, decides whether the pod is clear.
+restate_clear_pass() {
+  local pod="$1" raw ids id svc_raw services svc
+  # 1. Open invocations (the scheduled timers, plus any running or backing
+  #    off that would re-arm), cancelled BEFORE any clear.
+  raw="$(restate_json "$pod" "select id from sys_invocation where status <> 'completed'")"
+  mapfile -t ids < <(json_field "$raw" "id")
+  for id in "${ids[@]}"; do
+    echo "-> cancel invocation $id on $pod"
+    # Same -y / timeout reasoning as the state clear below: no tty here.
+    if ! kubectl exec -n "$NS" "$pod" -c restate -- \
+           timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$id"; then
+      # Admin-API fallback, the exact syntax measured working in
+      # FINDING-2026-09-26-no-asset-eviction.md. An id that completed between
+      # the read and the cancel (a timer that fired and re-armed under a new
+      # id) fails both: harmless, because the re-read sees the new id.
+      echo "   CLI cancel failed for $id on $pod — falling back to admin API" >&2
+      kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
+        "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'" || true
+    fi
+  done
+
+  # 2. Services with any state, cleared only after their timers are cancelled.
+  svc_raw="$(restate_json "$pod" "select service_name, count(distinct service_key) as n from state group by service_name")"
+  mapfile -t services < <(json_field "$svc_raw" "service_name")
+  for svc in "${services[@]}"; do
+    echo "-> clear state for service $svc on $pod"
+    # -y RESOLVED BY MEASUREMENT (ROWS doc, call 5). `restate --help` carries a
+    # global "-y, --yes: Auto answer yes to confirmation prompts. Default to
+    # false, unless running on ci". kubectl exec here has no tty, so WITHOUT -y
+    # a confirmation prompt makes this hang forever rather than fail. The
+    # timeout is the belt to that braces.
+    if ! kubectl exec -n "$NS" "$pod" -c restate -- \
+           timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc"; then
+      # -f/--force is documented for a version mismatch between CLI and
+      # server. Not a first attempt on purpose: it is an escape hatch for
+      # exactly one failure mode (PREDICTION doc §3.3).
+      echo "   plain clear failed for $svc on $pod — retrying with -f/--force" >&2
+      kubectl exec -n "$NS" "$pod" -c restate -- \
+        timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc" -f || true
+    fi
+  done
+}
+
 # ===========================================================================
-# PHASE 3 — RESTATE. Per instance: cancel scheduled invocations FIRST, THEN
-# clear state per service. This order is LOAD-BEARING, not a preference:
-# the measured baseline is one self-re-arming timer per asset
-# (asset_logistics.py:477, AssetLogistics.on_timer re-arms unconditionally).
-# Clear state before cancelling and the very next tick fires against empty
-# state, emits "no telemetry observed" as DEGRADED, and reschedules itself —
-# recreating everything this phase just cleared. See
-# FINDING-2026-09-26-no-asset-eviction.md for the incident this order
-# prevents at single-asset scale; at whole-fleet scale it is worse, not
-# smaller.
+# PHASE 3 — RESTATE. Per instance: cancel open invocations FIRST, THEN clear
+# state per service, THEN re-read; repeat until two reads, RESTATE_ZERO_GAP_S
+# apart, both read zero on all four counts (object keys, state rows,
+# scheduled, open). Bounded at RESTATE_CLEAR_MAX_PASSES; a pod that is not
+# clear by then HALTS the whole reset (halt_reset), naming the residue.
+#
+# Cancel-before-clear is LOAD-BEARING: the measured baseline is one
+# self-re-arming timer per asset (asset_logistics.py:477). Clear state
+# before cancelling and the very next tick fires against empty state and
+# reschedules itself (FINDING-2026-09-26-no-asset-eviction.md).
+#
+# WHY A LOOP, NOT A ONE-SHOT CROSS-CHECK. The id list and its count(*) are
+# two reads of a set that changes under them: a timer that fires between
+# them re-arms under a new id. On 2026-10-01 that made the lab read 7 ids
+# against a count of 8 on one instance; the old guard refused, then
+# `continue`d, and the surviving objects refilled every store the later
+# phases emptied. Refusing was right and continuing was wrong. The loop
+# replaces both: whatever a pass misses, the re-read sees, and only a
+# measured zero, read twice, lets the reset move on.
 #
 # Service names are DISCOVERED from the state table's own group-by, never
-# hardcoded as AssetCM/AssetLogistics — a third Virtual Object service added
-# later must not require touching this script to be reset.
+# hardcoded, so a new Virtual Object service needs no change here.
 # ===========================================================================
+RESTATE_CLEAR_MAX_PASSES="${RESTATE_CLEAR_MAX_PASSES:-5}"
+RESTATE_ZERO_GAP_S="${RESTATE_ZERO_GAP_S:-5}"
+
 phase3_restate() {
   echo
-  echo "=== PHASE 3: restate (cancel scheduled invocations, then clear state) ==="
+  echo "=== PHASE 3: restate (cancel, clear, re-read until two reads agree at zero) ==="
   if $SKIP_RESTATE; then
     skip_warning "RESTATE" \
       "Scheduled invocations are not cancelled and Virtual Object state is not\n    cleared. The self-re-arming timer (asset_logistics.py:477) keeps firing;\n    every store this script empties below will be repopulated by Restate's\n    own next tick, on its own schedule, regardless of the producers' state."
     return 0
   fi
 
-  local pod raw ids id svc_raw services svc scheduled_n parsed_n
-  for pod in "${RESTATE_PODS[@]}"; do
+  local pod pass r1 r2 i cleared=() not_reached
+  for i in "${!RESTATE_PODS[@]}"; do
+    pod="${RESTATE_PODS[$i]}"
+    not_reached="${RESTATE_PODS[*]:$((i + 1))}"
     echo "-- $pod --"
-
-    # 1. Scheduled invocations, cancelled BEFORE any clear.
-    raw="$(restate_json "$pod" "select id from sys_invocation where status = 'scheduled'")"
-    mapfile -t ids < <(json_field "$raw" "id")
-    scheduled_n="$(restate_count "$pod" "select count(*) as n from sys_invocation where status = 'scheduled'")"
-    parsed_n="${#ids[@]}"
-    # This cross-check now compares like with like: one id row per scheduled
-    # invocation against count(*) of the same predicate. (The earlier revision
-    # compared an object-key count against a state-row count — 14 against 84 —
-    # and would have aborted a correct run. See ROWS doc, call 1.)
-    if [ "$parsed_n" != "${scheduled_n:-0}" ]; then
-      echo "ERROR: $pod — read $parsed_n scheduled invocation id(s) but count(*)" >&2
-      echo "       reports ${scheduled_n:-'(unreadable)'}. Refusing to cancel a" >&2
-      echo "       possibly-incomplete list: a missed timer re-arms everything." >&2
-      OVERALL_FAIL=1
+    if $DRY_RUN; then
+      echo "   residue now (keys rows scheduled open): $(restate_residue "$pod")"
+      maybe_run "cancel every open invocation, clear every service, re-read until two zero reads ${RESTATE_ZERO_GAP_S}s apart (max ${RESTATE_CLEAR_MAX_PASSES} passes) on $pod" true
       continue
     fi
-    for id in "${ids[@]}"; do
-      if $DRY_RUN; then
-        maybe_run "cancel scheduled invocation $id on $pod (CLI)" true
-        continue
+    pass=0
+    while :; do
+      pass=$((pass + 1))
+      if [ "$pass" -gt "$RESTATE_CLEAR_MAX_PASSES" ]; then
+        halt_reset "Restate on $pod is not clear after ${RESTATE_CLEAR_MAX_PASSES} cancel-clear-reread passes" \
+          "$pod residue (keys rows scheduled open): ${r2:-$r1}" \
+          "Restate instances cleared to a double zero read: ${cleared[*]:-none}" \
+          "Restate instances not reached: ${not_reached:-none}"
       fi
-      echo "-> cancel scheduled invocation $id on $pod"
-      # Same -y / timeout reasoning as the state clear below: no tty here.
-      if ! kubectl exec -n "$NS" "$pod" -c restate -- \
-             timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$id"; then
-        # Admin-API fallback: the CLI path is primary ("Cancel via the
-        # restate CLI ... and/or the admin API"); this fills in the "and/or"
-        # with the exact syntax already measured working in
-        # FINDING-2026-09-26-no-asset-eviction.md, from a pod with curl.
-        # Wrapped in sh -c per the MSYS-URL-rewriting note above pg_query().
-        echo "   CLI cancel failed for $id on $pod — falling back to admin API" >&2
-        kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
-          "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'"
-      fi
+      echo "   pass $pass"
+      restate_clear_pass "$pod"
+      r1="$(restate_residue "$pod")"; r2=""
+      echo "   read 1 (keys rows scheduled open): $r1"
+      [ "$r1" = "0 0 0 0" ] || continue
+      sleep "$RESTATE_ZERO_GAP_S"
+      r2="$(restate_residue "$pod")"
+      echo "   read 2 after ${RESTATE_ZERO_GAP_S}s (keys rows scheduled open): $r2"
+      [ "$r2" = "0 0 0 0" ] && break
     done
-
-    # 2. Services with any state, cleared only now that their timers are cancelled.
-    svc_raw="$(restate_json "$pod" "select service_name, count(distinct service_key) as n from state group by service_name")"
-    mapfile -t services < <(json_field "$svc_raw" "service_name")
-    local svc_n
-    svc_n="$(restate_count "$pod" "select count(distinct service_name) as n from state")"
-    if [ "${#services[@]}" != "${svc_n:-0}" ]; then
-      echo "ERROR: $pod — parsed ${#services[@]} service name(s) but count query" >&2
-      echo "       reports ${svc_n:-'(unreadable)'}. Refusing to clear a possibly-" >&2
-      echo "       incomplete service list." >&2
-      OVERALL_FAIL=1
-      continue
-    fi
-    for svc in "${services[@]}"; do
-      if $DRY_RUN; then
-        maybe_run "clear state for service $svc on $pod" true
-        continue
-      fi
-      echo "-> clear state for service $svc on $pod"
-      # -y RESOLVED BY MEASUREMENT (ROWS doc, call 5). `restate --help` carries a
-      # global "-y, --yes: Auto answer yes to confirmation prompts. Default to
-      # false, unless running on ci". kubectl exec here has no tty, so WITHOUT -y
-      # a confirmation prompt makes this hang forever rather than fail — the one
-      # outcome an overnight/unattended reset must not have. The timeout is the
-      # belt to that braces: if anything still blocks, it fails loudly and the
-      # phase reports it instead of the script sitting on a dead prompt.
-      if ! kubectl exec -n "$NS" "$pod" -c restate -- \
-             timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc"; then
-        # -f/--force is documented for a version mismatch between CLI and
-        # server. Not used as a first attempt on purpose — it is an escape
-        # hatch for exactly one failure mode, and using it unconditionally
-        # would hide every OTHER reason a clear could fail.
-        echo "   plain clear failed for $svc on $pod — retrying with -f/--force" >&2
-        echo "   (version-mismatch escape hatch; see PREDICTION doc §3.3)" >&2
-        kubectl exec -n "$NS" "$pod" -c restate -- \
-          timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y state clear "$svc" -f
-      fi
-    done
+    echo "   $pod: clear after $pass pass(es), two zero reads"
+    cleared+=("$pod")
   done
 }
 
@@ -1845,11 +1874,13 @@ quiesce_derived_workload() {
       echo "CANNOT QUIESCE: $entry has no owner — a bare Pod cannot be scaled," >&2
       echo "  DaemonSet-patched, or Job-suspended. This is a hard stop for this" >&2
       echo "  entry, per work item 3's table; it is not quiesced and not restored." >&2
-      return 1
+      halt_reset "cannot quiesce $entry: a bare Pod has no owner to scale" \
+        "$entry still running; quiesced so far: ${QSTATE_QUIESCED[*]:-none}"
       ;;
     *)
       echo "WARNING: $entry — unrecognised kind '$kind', not quiesced." >&2
-      return 1
+      halt_reset "cannot quiesce $entry: unrecognised kind '$kind'" \
+        "$entry still running; quiesced so far: ${QSTATE_QUIESCED[*]:-none}"
       ;;
   esac
 }
@@ -2021,11 +2052,15 @@ SCALES_RESTORED=false
 arm_scale_trap() {
   $SCALES_ARMED && return 0
   SCALES_ARMED=true
+  # In a full reset on_reset_exit already owns EXIT and calls
+  # emergency_restore_scales itself; arming here would replace it (two traps
+  # on EXIT are one trap, see above).
+  $RESET_RUN && return 0
   trap 'emergency_restore_scales' EXIT
 }
 
 emergency_restore_scales() {
-  local exit_code=$?
+  local exit_code="${1:-$?}"
   trap - EXIT   # never re-enter, whatever happens below
   [ "$exit_code" -eq 0 ] && return 0
   $SCALES_RESTORED && return 0
@@ -2215,7 +2250,8 @@ phase4_topics() {
       echo "about to be deleted (see LIVE CONSUMER lines above). Nothing has been" >&2
       echo "deleted. Restoring the quiesced workloads and stopping cleanly." >&2
       restore_derived_set
-      return 1
+      halt_reset "phase 4: a live consumer holds an offset on a topic about to be deleted" \
+        "no topic deleted; the derived quiesce set was restored"
     fi
   else
     echo "no recreate-eligible (pure-compact) topics found — skipping consumer quiesce"
@@ -2401,7 +2437,9 @@ phase4_topics() {
     echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} — ${failure_reason:-did not match its captured configuration}." >&2
     echo "The capture directory holds the expected form for every topic this" >&2
     echo "run touched: $TOPIC_CAPTURE_DIR" >&2
-    return 1
+    halt_reset "phase 4: ${failure#*|} on ${failure%%|*} did not match its captured configuration" \
+      "${failure#*|}: ${failure_reason:-did not match its captured configuration}" \
+      "captured configuration for every topic touched: $TOPIC_CAPTURE_DIR"
   fi
 }
 
@@ -3109,6 +3147,84 @@ phase8_zero() {
   return "$OVERALL_FAIL"
 }
 
+# ---------------------------------------------------------------------------
+# HALT WITH THE STATE NAMED. A safety refusal anywhere in a full reset stops
+# the WHOLE reset: no later phase runs. The one EXIT trap (on_reset_exit)
+# then says where it stopped, which phases ran and so STAY applied, which did
+# not run, and what the refusal measured, before handing over to
+# emergency_restore_scales for the scale-downs.
+#
+# Why not refuse-and-continue: on 2026-10-01 phase 3 refused one Restate
+# instance and carried on. Every later phase then emptied stores and topics
+# that the uncleared instance refilled while everything else was quiesced: a
+# reset that ran to the end and reset nothing. A partial reset is worse than
+# none, because it looks like one.
+#
+# halt_reset REASON [STATE-LINE...] records the refusal and exits 2. Exit 2
+# is distinct from phase 8's exit 1 (a completed run whose zero assertion
+# failed). A phase that stops with a bare `return 1` (set -e) also reaches
+# the trap, so it is reported as a halt too, with its own ERROR lines above
+# as the reason.
+# ---------------------------------------------------------------------------
+RESET_RUN=false
+RUN_COMPLETED=false
+CURRENT_PHASE=""
+PHASES_DONE=()
+HALT_REASON=""
+HALT_DETAIL=()
+ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore")
+
+halt_reset() {
+  HALT_REASON="$1"; shift
+  HALT_DETAIL=("$@")
+  echo "HALT: $HALT_REASON" >&2
+  exit 2
+}
+
+# run_phase "N name" FUNCTION. Called bare, so set -e still aborts on a
+# phase's `return 1` (inside an `if` or `||` it would not).
+run_phase() {
+  CURRENT_PHASE="$1"
+  "$2"
+  PHASES_DONE+=("$1")
+  CURRENT_PHASE=""
+}
+
+on_reset_exit() {
+  local rc=$? p d done_p line
+  trap - EXIT
+  if [ "$rc" -ne 0 ] && ! $RUN_COMPLETED; then
+    local -a not_run=()
+    for p in "${ALL_PHASES[@]}"; do
+      [ "$p" = "$CURRENT_PHASE" ] && continue
+      done_p=false
+      for d in "${PHASES_DONE[@]}"; do [ "$d" = "$p" ] && done_p=true; done
+      $done_p || not_run+=("$p")
+    done
+    {
+      echo
+      echo "=================== RESET HALTED (exit $rc) ==================="
+      if $DRY_RUN; then echo "  [dry-run] this run mutated nothing"; fi
+      echo "  reason:    ${HALT_REASON:-a phase stopped non-zero; its ERROR/ABORTED lines are above}"
+      echo "  halted in: ${CURRENT_PHASE:-between phases}"
+      echo "  completed: ${PHASES_DONE[*]:-none}  (their mutations STAY made)"
+      echo "  not run:   ${not_run[*]:-none}"
+      for line in "${HALT_DETAIL[@]}"; do
+        echo "  state:     $line"
+      done
+      if $SCALES_ARMED && ! $SCALES_RESTORED; then
+        echo "  workloads: scaled-down workloads are restored next (below)"
+      else
+        echo "  workloads: none left scaled down by this run"
+      fi
+      echo "  THIS CLUSTER HAS NOT BEEN RESET. Fix the cause, then re-run the whole reset."
+      echo "================================================================"
+    } >&2
+  fi
+  emergency_restore_scales "$rc"
+  exit "$rc"
+}
+
 # Test-only escape hatch (scripts/tests/test_reset_ownership.sh sources this
 # file to reuse its function definitions against stubbed kubectl/census_groups/
 # restate_subscriptions output). RESET_SCENARIO_SOURCE_ONLY is never set by
@@ -3185,7 +3301,9 @@ if $RED_CHECK_ELECTRIC; then
   exit 1
 fi
 
-phase1_baseline
+RESET_RUN=true
+trap 'on_reset_exit' EXIT
+run_phase "1 baseline" phase1_baseline
 
 # --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
 # consumer group on a target topic must have a declared owner BEFORE
@@ -3195,29 +3313,35 @@ phase1_baseline
 # so CAPTURED_TOPICS reflects this run's actual topic set, not a stale or
 # guessed one. Unconditional in dry-run too: a dry run that "passes" over an
 # undeclared consumer would print a plan nobody should trust.
+CURRENT_PHASE="pre-flight"
 phase4_capture_pass
 if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
   echo "PRE-FLIGHT ABORTED: an undeclared live consumer exists on a target" >&2
   echo "topic (see UNDECLARED CONSUMER lines above). Nothing has been" >&2
   echo "mutated — no workload scaled, no topic touched. Add the missing" >&2
   echo "openddil.io/consumer-groups declaration and re-run." >&2
-  exit 1
+  halt_reset "pre-flight: an undeclared live consumer on a target topic" \
+    "nothing mutated: no workload scaled, no topic touched"
 fi
+PHASES_DONE+=("pre-flight")
 
-phase2_quiesce
-phase3_restate
-phase4_topics
-phase5_aggregator
-phase6_stores
-phase7_electric
+run_phase "2 quiesce" phase2_quiesce
+run_phase "3 restate" phase3_restate
+run_phase "4 topics" phase4_topics
+run_phase "5 aggregator" phase5_aggregator
+run_phase "6 stores" phase6_stores
+run_phase "7 electric" phase7_electric
 # phase 8 runs BEFORE producers come back (that ordering is the whole point
 # of this reorder — see phase 8's header). Guarded with `|| true` so a FAIL
 # here (OVERALL_FAIL=1, a non-zero return) does not let `set -e` skip straight
 # to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
 # get its producers back, exactly like a passing one does.
+CURRENT_PHASE="8 zero assertion"
 phase8_zero || true
-phase9_restore_producers
+PHASES_DONE+=("8 zero assertion")
+run_phase "9 restore" phase9_restore_producers
 echo "reset-scenario: producers restored. This script asserts zero at rest" \
      "only — confirming the reset holds under a live refill is" \
      "check-advancing.sh's job, not this script's; run it separately."
+RUN_COMPLETED=true
 exit "$OVERALL_FAIL"
