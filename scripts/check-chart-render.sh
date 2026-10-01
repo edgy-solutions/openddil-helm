@@ -230,6 +230,75 @@ for variant in "default:" "tiernode:--set tierNode.enabled=true" "releasability:
   fi
 done
 
+# --- guard 5: setup hooks also run on rollback ------------------------------
+# THE DEFECT MODELLED: `helm rollback` fires pre-rollback/post-rollback
+# hooks, NOT pre-upgrade/post-upgrade. A hook annotated only post-upgrade
+# (or pre-upgrade) is invisible to a rollback -- it renders, it is valid
+# YAML, `helm lint` is silent, and the hook simply never runs.
+#
+# Before this guard, hook-restate-wipe.yaml was pre-install/pre-upgrade-only
+# and every registration Job (cm-service-bootstrap, logistics-fusion-
+# bootstrap, topic-init, tier-restate-bootstrap-<tier>,
+# redpanda-auto-create-off) was post-install/post-upgrade-only: a rollback
+# left Restate's old journals in place -- wrong, since a rollback is a code
+# change too and an old journal does not replay against changed code -- and
+# re-registered nothing against the wipe that normally follows.
+#
+# ALLOWLIST: postgres-schema-init and tier-schema-init-<tier> stay
+# post-install/post-upgrade ONLY, on purpose. Atlas migrations are
+# forward-only -- an older migration dir cannot take the DB back, and a
+# re-apply Atlas refuses FAILS the hook, blocking every registration Job at
+# a later weight (20/21). See the comment at each one's own annotation.
+#
+# hook-restate-wipe.yaml's pre-install/pre-upgrade/pre-rollback hooks are
+# gated by `restate.ephemeralOnUpgrade` (default false), so this guard sets
+# it true -- otherwise the wipe Job never renders in any variant below and
+# the pre-rollback check would pass vacuously, having checked nothing.
+echo
+echo "guard 5: setup hooks also run on rollback"
+for variant in "default:" "tiernode:--set tierNode.enabled=true" "releasability:--set releasability.enabled=true"; do
+  vname="${variant%%:*}"
+  vargs="${variant#*:}"
+  # shellcheck disable=SC2086
+  guard5_out=$(render $vargs --set restate.ephemeralOnUpgrade=true | "$PY" -c '
+import sys, re, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+allow_re = re.compile(r"-postgres-schema-init$|-tier-schema-init-")
+checked = 0
+bad = []
+for d in docs:
+    meta = d.get("metadata") or {}
+    ann = meta.get("annotations") or {}
+    hook = ann.get("helm.sh/hook")
+    if not hook:
+        continue
+    name = meta.get("name") or "<unnamed>"
+    kind = d.get("kind")
+    hooks = [h.strip() for h in hook.split(",")]
+    if "pre-upgrade" in hooks:
+        checked += 1
+        if "pre-rollback" not in hooks:
+            bad.append(f"FAIL: {kind}/{name}: pre-upgrade without pre-rollback ({hook})")
+    if "post-upgrade" in hooks:
+        checked += 1
+        if "post-rollback" not in hooks:
+            if allow_re.search(name):
+                print(f"  ok   : {kind}/{name} allowlisted -- Atlas schema migrations are forward-only, a refused re-apply must not run on rollback")
+            else:
+                bad.append(f"FAIL: {kind}/{name}: post-upgrade without post-rollback ({hook})")
+if checked == 0:
+    print("FAIL: 0 hooks checked in this variant -- proves nothing (vacuous-pass floor)")
+    sys.exit(1)
+for b in bad:
+    print(b)
+print(f"  hooks checked: {checked}")
+sys.exit(1 if bad else 0)
+')
+  status=$?
+  printf '%s\n' "$guard5_out" | sed "s/^/  [$vname] /"
+  [ "$status" -ne 0 ] && fail=1
+done
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
