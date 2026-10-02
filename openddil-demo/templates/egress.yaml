@@ -28,6 +28,25 @@ tier can produce to, and the gate's claim is that there is ONE boundary.
 {{- $topazUrl := printf "http://%s-topaz-hq%s:8383" .Release.Name (include "openddil.svcDomain" .) }}
 {{- $image := include "openddil.image" (dict "name" .Values.egress.image.name "tag" .Values.egress.image.tag "digest" .Values.egress.image.digest "root" .) }}
 {{- $pullPolicy := include "openddil.pullPolicy" (dict "policy" .Values.egress.image.pullPolicy "root" .) }}
+{{- /*
+Extra routes, kinds, the assembler and the forwarder -- all opt-in, all
+off/empty by default, so a deployment that sets none of them renders this
+file exactly as it rendered before they existed. See values.yaml's comments
+on egress.routes/.kinds/.assembler/.forwarder/.stubSink for the shapes.
+*/}}
+{{- $routesMountPath := "/etc/openddil/egress-routes" }}
+{{- $kindsMountPath := "/etc/openddil/egress-kinds" }}
+{{- $assemblerConfigMountPath := "/etc/openddil/egress-assembler" }}
+{{- $forwarderConfigMountPath := "/etc/openddil/egress-forwarder" }}
+{{- $forwarderTokenMountPath := "/etc/openddil/egress-forwarder-token" }}
+{{- range $i, $r := .Values.egress.routes }}
+{{- if $r.group }}
+{{- fail (printf "egress.routes[%d]: per-route 'group' is not supported -- every route shares the gate's ONE consumer group (routes.py refuses this too; see egress.yaml's comment on egress-gate-c2)" $i) }}
+{{- end }}
+{{- end }}
+{{- $c2Route := dict "name" "c2" "source_topic" .Values.egress.sourceTopic "destination" .Values.egress.destination "sink_topic" .Values.egress.sinkTopic }}
+{{- $allRoutes := prepend .Values.egress.routes $c2Route }}
+{{- $routesJSON := toJson $allRoutes }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,6 +74,15 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 8 }}
+      {{- if or .Values.egress.routes .Values.egress.kinds }}
+      annotations:
+        {{- if .Values.egress.routes }}
+        checksum/routes: {{ $routesJSON | sha256sum | quote }}
+        {{- end }}
+        {{- if .Values.egress.kinds }}
+        checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
+        {{- end }}
+      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -76,10 +104,76 @@ spec:
               value: {{ .Values.egress.destination | quote }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ $topazUrl | quote }}
+            {{- if .Values.egress.routes }}
+            - name: OPENDDIL_EGRESS_ROUTES_PATH
+              value: {{ printf "%s/routes.json" $routesMountPath | quote }}
+            {{- end }}
+            {{- if .Values.egress.kinds }}
+            - name: OPENDDIL_EGRESS_KINDS_DIR
+              value: {{ $kindsMountPath | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: "INFO"
           resources:
             {{- toYaml .Values.egress.resources | nindent 12 }}
+          {{- if or .Values.egress.routes .Values.egress.kinds }}
+          volumeMounts:
+            {{- if .Values.egress.routes }}
+            - name: egress-routes
+              mountPath: {{ $routesMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.egress.kinds }}
+            - name: egress-kinds
+              mountPath: {{ $kindsMountPath }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.egress.routes .Values.egress.kinds }}
+      volumes:
+        {{- if .Values.egress.routes }}
+        - name: egress-routes
+          configMap:
+            name: {{ .Release.Name }}-egress-routes
+        {{- end }}
+        {{- if .Values.egress.kinds }}
+        - name: egress-kinds
+          configMap:
+            name: {{ .Release.Name }}-egress-kinds
+        {{- end }}
+      {{- end }}
+{{- if .Values.egress.routes }}
+---
+# The route table itself (routes.py's own JSON shape). The C2 route is
+# first, built from the SAME values the gate's env-fallback route has always
+# used (sourceTopic/destination/sinkTopic) -- so adding no extra routes
+# leaves OPENDDIL_EGRESS_ROUTES_PATH unset and the gate on its original,
+# single env-derived route.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-routes
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  routes.json: {{ $routesJSON | quote }}
+{{- end }}
+{{- if .Values.egress.kinds }}
+---
+# One <Kind>.schema.json per declared kind (kinds.py's SCHEMA_SUFFIX),
+# mounted read-only wherever OPENDDIL_EGRESS_KINDS_DIR points: the gate
+# above, and the assembler below when it is enabled.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-kinds
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  {{- range $name, $schema := .Values.egress.kinds }}
+  {{ $name }}.schema.json: {{ toJson $schema | quote }}
+  {{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -137,6 +231,245 @@ spec:
               containerPort: {{ .Values.egress.paneApi.port }}
           resources:
             {{- toYaml .Values.egress.resources | nindent 12 }}
+{{- if .Values.egress.assembler.enabled }}
+---
+# egress-assembler (ADR-0046) — reads the CM episode stream (and, when a
+# config entry names one, a parts-availability stream) and assembles each
+# into a declared kind's record. Own process, own consumer group: see the
+# group-naming note on egress-gate-c2 above for why the gate's group stays
+# untouched by anything this chart adds alongside it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-assembler-config
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  config.json: {{ toJson .Values.egress.assembler.config | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-assembler
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 4 }}
+  annotations:
+    openddil.io/consumer-groups: "hq/egress-assembler"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson .Values.egress.assembler.config | sha256sum | quote }}
+        {{- if .Values.egress.kinds }}
+        checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
+        {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: assembler
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/assembler.py"]
+          env:
+            - name: OPENDDIL_EGRESS_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
+            - name: OPENDDIL_ASSEMBLER_CONFIG
+              value: {{ printf "%s/config.json" $assemblerConfigMountPath | quote }}
+            {{- if .Values.egress.kinds }}
+            - name: OPENDDIL_EGRESS_KINDS_DIR
+              value: {{ $kindsMountPath | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+          volumeMounts:
+            - name: egress-assembler-config
+              mountPath: {{ $assemblerConfigMountPath }}
+              readOnly: true
+            {{- if .Values.egress.kinds }}
+            - name: egress-kinds
+              mountPath: {{ $kindsMountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: egress-assembler-config
+          configMap:
+            name: {{ .Release.Name }}-egress-assembler-config
+        {{- if .Values.egress.kinds }}
+        - name: egress-kinds
+          configMap:
+            name: {{ .Release.Name }}-egress-kinds
+        {{- end }}
+{{- end }}
+{{- if .Values.egress.forwarder.enabled }}
+---
+# egress-forwarder — the last hop: consumes one or more sink topics and
+# POSTs each admitted record to its route's destination URL (forwarder.py).
+# Own process, own consumer group, same reason as the assembler above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-forwarder-config
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  config.json: {{ toJson .Values.egress.forwarder.config | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-forwarder
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-forwarder" "root" .) | nindent 4 }}
+  annotations:
+    openddil.io/consumer-groups: "hq/egress-forwarder"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-forwarder" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-forwarder" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson .Values.egress.forwarder.config | sha256sum | quote }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: forwarder
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/forwarder.py"]
+          env:
+            - name: OPENDDIL_EGRESS_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: OPENDDIL_FORWARD_CONFIG
+              value: {{ printf "%s/config.json" $forwarderConfigMountPath | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: egress-forwarder-config
+              mountPath: {{ $forwarderConfigMountPath }}
+              readOnly: true
+            {{- if .Values.egress.forwarder.tokenSecret }}
+            - name: egress-forwarder-token
+              mountPath: {{ $forwarderTokenMountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: egress-forwarder-config
+          configMap:
+            name: {{ .Release.Name }}-egress-forwarder-config
+        {{- if .Values.egress.forwarder.tokenSecret }}
+        # A config entry's `token_file` points at
+        # {{ $forwarderTokenMountPath }}/token (documented on
+        # egress.forwarder.tokenSecret in values.yaml). The chart never
+        # reads, creates or renders the token itself -- only the mount.
+        - name: egress-forwarder-token
+          secret:
+            secretName: {{ .Values.egress.forwarder.tokenSecret }}
+            items:
+              - key: token
+                path: token
+        {{- end }}
+{{- end }}
+{{- if .Values.egress.stubSink.enabled }}
+---
+# egress-stub-sink (stub_sink.py) — the stand-in destination for a
+# destination with no credential yet; see values.yaml's comment on
+# egress.stubSink for the emptyDir persistence note.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-egress-stub-sink
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.egress.stubSink.port }}
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-stub-sink
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: stub-sink
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/stub_sink.py"]
+          env:
+            - name: STUB_SINK_DIR
+              value: "/data"
+            - name: STUB_SINK_PORT
+              value: {{ .Values.egress.stubSink.port | quote }}
+            - name: STUB_SINK_KIND_FIELD
+              value: {{ .Values.egress.stubSink.kindField | quote }}
+            - name: STUB_SINK_ID_FIELD
+              value: {{ .Values.egress.stubSink.idField | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - name: http
+              containerPort: {{ .Values.egress.stubSink.port }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          # emptyDir, NOT a PVC: the cluster's PVCs are NFS-backed, and an
+          # emptyDir survives a container restart but not a reschedule --
+          # see values.yaml's comment on egress.stubSink.
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}
 {{- if .Values.egress.tak.enabled }}
 {{- /*
 ---------------------------------------------------------------------------

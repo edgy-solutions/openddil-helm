@@ -831,6 +831,65 @@ egress:
     resources:
       requests: { cpu: 50m,  memory: 128Mi }
       limits:   { cpu: 300m, memory: 256Mi }
+  # --- extra routes, kinds, the assembler, the forwarder, the stub sink ---
+  # All off/empty by default, so a deployment that sets none of these
+  # renders this chart's egress.yaml exactly as it rendered before any of
+  # them existed -- see egress.yaml's own comment on why. The HQ-only
+  # topic-init loop's `parts-availability` topic (infrastructure.yaml) is
+  # the one default-render change this release makes: it is not a value
+  # here (nothing to toggle), but it is scoped to the same
+  # `releasability.enabled` gate as everything else under `egress:`, so a
+  # release with releasability off renders that loop exactly as before.
+  #
+  # Extra route objects, appended AFTER the one C2 route (built above from
+  # sourceTopic/destination/sinkTopic). Shape is routes.py's own: {name,
+  # source_topic, destination, sink_topic, kind?}. `group` is refused here
+  # (the template `fail`s, naming the entry) and refused again by routes.py
+  # at startup: every route shares the gate's ONE consumer group.
+  routes: []
+  # kind name -> JSON Schema object (Draft 2020-12, kinds.py's own
+  # vocabulary, `x-openddil` included). Rendered as one <name>.schema.json
+  # key per kind in the egress-kinds ConfigMap, mounted read-only into the
+  # gate (and the assembler, when enabled) at OPENDDIL_EGRESS_KINDS_DIR.
+  kinds: {}
+  # Extra "name|rpk args" specs, appended to the HQ-only topic-init loop
+  # (infrastructure.yaml) after egress-c2-status and parts-availability --
+  # like the rest of `egress:`, only when releasability.enabled is true (the
+  # loop still creates egress-c2-status unconditionally; that predates this
+  # gate and is unchanged). Any rpk topic-create/alter-config args are
+  # accepted as-is, including a delete-policy topic -- the loop never forces
+  # compaction on anything beyond the topics it declares for itself.
+  hubTopics: []
+  # egress-assembler (ADR-0046): reads a CM episode stream (and, when a
+  # config entry names one, a parts-availability stream) and assembles each
+  # into a declared kind's record. `config` is OPENDDIL_ASSEMBLER_CONFIG's
+  # own JSON list (assembler.py's AssemblerRoute shape, including the
+  # optional per-route `battle_condition` map) -- this chart passes every
+  # entry through as opaque JSON and never interprets it.
+  assembler:
+    enabled: false
+    config: []
+  # egress-forwarder: consumes one or more sink topics and POSTs each
+  # admitted record to its route's destination URL. `config` is
+  # OPENDDIL_FORWARD_CONFIG's own JSON list (forwarder.py's ForwardRoute
+  # shape). When `tokenSecret` names a Secret, its `token` key is mounted
+  # read-only at /etc/openddil/egress-forwarder-token/token -- point a
+  # config entry's `token_file` there. The chart never reads, creates or
+  # renders the token itself, only the mount.
+  forwarder:
+    enabled: false
+    config: []
+    tokenSecret: ""
+  # egress-stub-sink (stub_sink.py): the stand-in destination for whatever
+  # does not have a real credential yet. STUB_SINK_DIR is an emptyDir at
+  # /data -- the cluster's PVCs are NFS-backed, and an emptyDir survives a
+  # container restart but NOT a reschedule, which is fine for "something
+  # real for the forwarder to hit" and not meant as a durable receipt log.
+  stubSink:
+    enabled: false
+    port: 8099
+    kindField: kind
+    idField: id
 
 # --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
 # Three small images referenced by chart templates rather than by service-

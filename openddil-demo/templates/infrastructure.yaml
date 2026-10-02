@@ -832,7 +832,11 @@ spec:
               # Ledger row LR-0043-C.
               HQB={{ .Release.Name }}-redpanda-hq:{{ .Values.redpandaHq.kafkaPort }}
               echo "INFO: Initializing HQ-only egress topics on $HQB"
+              {{- if .Values.releasability.enabled }}
+              for spec in                 "egress-c2-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" "parts-availability|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"{{- range .Values.egress.hubTopics }} "{{ . }}"{{- end }}               ; do
+              {{- else }}
               for spec in                 "egress-c2-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"               ; do
+              {{- end }}
                 topic="${spec%%|*}"
                 args="${spec##*|}"
                 rpk -X brokers=$HQB topic create $topic $args || true
