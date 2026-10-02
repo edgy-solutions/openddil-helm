@@ -153,6 +153,9 @@ restate:
   # is. This file's job is to render EVERYTHING the chart can emit; a value
   # that is off by default is precisely what it exists to turn on.
   ephemeralOnUpgrade: true
+egress:
+  tak:
+    enabled: true
 YAML
 
 # Parse the PowerShell inventory and values-path mapping. Both are plain

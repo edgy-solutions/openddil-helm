@@ -140,6 +140,7 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/hub-restate-projector:latest';    dst='edgy-solutions/openddil/hub-restate-projector:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';           dst='edgy-solutions/openddil/runtime-bundle:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/egress:latest';                   dst='edgy-solutions/openddil/egress:latest' },
+    @{ src='ghcr.io/edgy-solutions/openddil/tak-server:latest';               dst='edgy-solutions/openddil/tak-server:latest' },
     #
     # dis-sim is the ONE entry here the chart does not render. It is the DIS
     # PDU generator that feeds the pipeline's front door, deployed by
@@ -477,6 +478,7 @@ $SrcShortNameToValuesPaths = @{
     'hub-restate-projector'    = @('restateHub.image.digest')
     'runtime-bundle'           = @('bundle.image.digest')
     'egress'                   = @('egress.image.digest')
+    'tak-server'               = @('egress.tak.image.digest')
     # dis-sim has no chart values path because the chart does not deploy it.
     # An explicit empty list, not an omission: an unmapped short name prints
     # "no values-path mapping defined" on every run, which reads as a pinning
