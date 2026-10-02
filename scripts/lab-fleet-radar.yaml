@@ -1,0 +1,116 @@
+# LAB FLEET: one ground radar, `dis:1:1:1008`, at edge-01.
+#
+# WHAT THIS IS FOR
+# The fleet had no sensor platform. This adds one asset of platform variant
+# MRAD_Sensor, so the CM baseline, the element profile and the array schematic
+# that already exist for that variant have a live asset to describe. It is the
+# subject of fault events in later work.
+#
+# ITS TYPE IS A SISO TUPLE
+# 1.1.225.9.1.7.0, which SISO-REF-010-v37 names "Radar vehicles". The ontology
+# entry (openddil-contracts ontology/dis_entity_types.yaml) pairs that tuple
+# with MRAD_Sensor. The pairing is curated, not given by SISO.
+#
+# IT IS DECLARED
+# Unlike dis:1:1:1099, this id is declared ATL in
+# openddil-demo/ontology/releasability.yaml. It is a fleet member, so its id
+# is contiguous with the site-1 range (1000-1007).
+#
+# WHY A SEPARATE DEPLOYMENT
+# The site-1 sim emits 1000-1007 from the built-in type list and platform map.
+# Adding an id there would change that sim's environment and restart it, and
+# its seeded state with it. This Deployment emits one id with its own type list
+# and platform map (the ConfigMap below), and leaves the other sim untouched.
+#
+# SOURCE
+# It mounts `dis-sim-src`. Check that ConfigMap matches the repo file before
+# applying; if it does not, build a separate ConfigMap from the repo file as
+# lab-fixture-undeclared-asset.yaml does.
+#
+# NOT APPLIED BY `tools/dis-sim/deploy.sh`.
+#
+#   kubectl -n openddil apply -f openddil-helm/scripts/lab-fleet-radar.yaml
+#
+# Deleting the Deployment stops the emission. The asset stays in the stores
+# until the retention pruner removes it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dis-sim-radar-enum
+  labels:
+    app.kubernetes.io/name: dis-sim
+    app.kubernetes.io/component: dis-sim-radar
+    app.kubernetes.io/part-of: openddil
+data:
+  types.json: |
+    [{"type": [1, 1, 225, 9, 1, 7, 0], "variant": "MRAD_Sensor"}]
+  platforms.json: |
+    {"dis:1:1:1008": "MRAD_Sensor"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dis-sim-radar
+  labels:
+    app.kubernetes.io/name: dis-sim
+    app.kubernetes.io/component: dis-sim-radar
+    app.kubernetes.io/part-of: openddil
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: dis-sim-radar
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dis-sim
+        app.kubernetes.io/component: dis-sim-radar
+        app.kubernetes.io/part-of: openddil
+    spec:
+      containers:
+        - name: dis-sim
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              pip install --quiet --no-cache-dir opendis==1.0
+              exec python /src/dis_sim.py
+          env:
+            - name: DIS_TARGET_HOST
+              value: openddil-sensor-ingest-edge-01
+            - name: DIS_TARGET_PORT
+              value: "62040"
+            - name: DIS_ENTITY_IDS
+              value: "1008"
+            - name: DIS_INTERVAL_S
+              value: "5.0"
+            - name: DIS_EXERCISE_ID
+              value: "1"
+            - name: DIS_PROTOCOL_VERSION
+              value: "7"
+            - name: DIS_SITE_ID
+              value: "1"
+            - name: DIS_APP_ID
+              value: "1"
+            - name: DIS_SEED
+              value: "1008"
+            - name: DIS_ENTITY_TYPES_PATH
+              value: /enum/types.json
+            - name: DIS_ENTITY_PLATFORMS_PATH
+              value: /enum/platforms.json
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - name: src
+              mountPath: /src
+            - name: enum
+              mountPath: /enum
+      volumes:
+        - name: src
+          configMap:
+            name: dis-sim-src
+        - name: enum
+          configMap:
+            name: dis-sim-radar-enum
