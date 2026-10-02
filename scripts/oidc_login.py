@@ -29,9 +29,16 @@ import urllib.request
 COOKIE = "openddil_session"
 
 
-def login(base: str, user: str, password: str) -> str:
+def login(base: str, user: str, password: str, opener=None) -> str:
+    """Return the session cookie value. Pass `opener` to keep the identity
+    provider's cookies across calls, the way one browser does."""
     jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    if opener is None:
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar))
+    else:
+        jar = next(h.cookiejar for h in opener.handlers
+                   if isinstance(h, urllib.request.HTTPCookieProcessor))
     base = base.rstrip("/")
 
     # 1. /auth/login redirects (followed) to the identity provider's form.
