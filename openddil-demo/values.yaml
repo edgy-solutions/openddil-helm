@@ -780,6 +780,11 @@ frontend:
     # files; served unauthenticated at /branding/ on every UI. Empty =
     # <release>-branding. Absent ConfigMap = OpenDDIL defaults.
     configMap: ""
+  # Hub-view-only tables of records released to a destination, per ADR-0046
+  # §5: each entry is {title, destination, kind, columns:[{header, pointer}]}
+  # and is passed through as opaque JSON into the hub frontend's
+  # deployment.json. Empty by default -- no panes, no ConfigMap, no mount.
+  releasedRecordsPanes: []
 
 # --- Egress gate + its pane (ADR-0043 Arc 2 Slice 2, ledger row LR-0043-C) --
 # ONE image, TWO Deployments: the gate (image default command, main.py) and
@@ -869,6 +874,15 @@ egress:
   assembler:
     enabled: false
     config: []
+  # egress-intake: polls a destination's artifacts by kind, per ADR-0046 §5,
+  # and turns each into a record the rest of the pipeline can carry. `config`
+  # is OPENDDIL_EGRESS_INTAKE_CONFIG's own JSON list, passed through as
+  # opaque JSON and never interpreted by this chart. Off by default, same
+  # reason as the assembler: a release that sets neither renders egress.yaml
+  # exactly as it rendered before either existed.
+  intake:
+    enabled: false
+    config: []
   # egress-forwarder: consumes one or more sink topics and POSTs each
   # admitted record to its route's destination URL. `config` is
   # OPENDDIL_FORWARD_CONFIG's own JSON list (forwarder.py's ForwardRoute
@@ -890,6 +904,10 @@ egress:
     port: 8099
     kindField: kind
     idField: id
+    # Artifacts the stub serves at GET /artifacts as {"items": [...]}, for an
+    # intake polling a destination's artifacts by kind (ADR-0046 §5). Opaque
+    # JSON, passed through as-is. Empty by default -- no mount, no file.
+    artifacts: []
 
 # --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
 # Three small images referenced by chart templates rather than by service-

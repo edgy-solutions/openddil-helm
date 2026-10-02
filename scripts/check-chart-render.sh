@@ -333,6 +333,128 @@ else
   echo "  ok   : gate == topaz-hq, and both move with releasability.destinations"
 fi
 
+
+# Guard 7: the intake process, the stub sink's artifacts and the hub's
+# released-records panes render (or don't) exactly as values.yaml says.
+echo
+echo "guard 7: intake / stub artifacts / released-records panes"
+
+# 7a: default values render no intake Deployment at all -- checked plain,
+# and again with releasability.enabled=true alone (egress.yaml's own gate),
+# so egress.intake.enabled's own default is what is under test, not merely
+# releasability's.
+for g7a_args in "" "--set releasability.enabled=true"; do
+  # shellcheck disable=SC2086
+  render $g7a_args | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+bad = [ (d["metadata"] or {}).get("name","") for d in docs
+        if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-egress-intake") ]
+if bad:
+    print("  FAIL [7a]: egress.intake.enabled defaults to rendering a Deployment: " + ", ".join(bad)); sys.exit(1)
+print("  ok   [7a]: egress.intake.enabled default renders no egress-intake Deployment")
+' || fail=1
+done
+
+# 7b: enabling intake renders one Deployment, carrying the five documented
+# env vars and a checksum/registries annotation equal to the gate's own
+# (same computation, same releasability.destinations input).
+render --set releasability.enabled=true --set egress.intake.enabled=true | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+want_env = {"OPENDDIL_EGRESS_BROKERS", "OPENDDIL_EGRESS_INTAKE_CONFIG",
+            "OPENDDIL_EGRESS_KINDS_DIR", "POSTGRES_DSN", "OPENDDIL_TOPAZ_URL"}
+intake = gate = None
+for d in docs:
+    if d.get("kind") != "Deployment":
+        continue
+    n = d["metadata"]["name"]
+    if n.endswith("-egress-intake"):
+        intake = d
+    elif n.endswith("-egress-gate-c2"):
+        gate = d
+if intake is None:
+    print("  FAIL [7b]: egress.intake.enabled=true rendered no egress-intake Deployment"); sys.exit(1)
+if gate is None:
+    print("  FAIL [7b]: no egress-gate-c2 Deployment rendered -- cannot compare checksums"); sys.exit(1)
+envs = {e["name"] for e in intake["spec"]["template"]["spec"]["containers"][0]["env"]}
+missing = want_env - envs
+if missing:
+    print("  FAIL [7b]: intake missing env vars: " + ", ".join(sorted(missing))); sys.exit(1)
+iann = intake["spec"]["template"]["metadata"].get("annotations") or {}
+gann = gate["spec"]["template"]["metadata"].get("annotations") or {}
+ireg, greg = iann.get("checksum/registries"), gann.get("checksum/registries")
+if not ireg:
+    print("  FAIL [7b]: intake has no checksum/registries annotation"); sys.exit(1)
+if ireg != greg:
+    print(f"  FAIL [7b]: intake checksum/registries ({ireg}) != gate checksum/registries ({greg})"); sys.exit(1)
+print("  ok   [7b]: intake has the five env vars and checksum/registries matching the gate")
+' || fail=1
+
+# 7c: a stub artifacts value change changes the stub's checksum/artifacts.
+g7c() { render --set releasability.enabled=true --set egress.stubSink.enabled=true "$@" | "$PY" -c '
+import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-egress-stub-sink"):
+        ann = d["spec"]["template"]["metadata"].get("annotations") or {}
+        print(ann.get("checksum/artifacts") or "MISSING")
+        sys.exit(0)
+print("MISSING")
+'; }
+g7c_before=$(g7c)
+g7c_after=$(g7c --set-json 'egress.stubSink.artifacts=[{"kind":"K","id":"1"}]')
+if [ "$g7c_before" = MISSING ] || [ "$g7c_after" = MISSING ]; then
+  echo "  FAIL [7c]: stub-sink checksum/artifacts annotation missing"; fail=1
+elif [ "$g7c_before" = "$g7c_after" ]; then
+  echo "  FAIL [7c]: changing egress.stubSink.artifacts did not change checksum/artifacts"; fail=1
+else
+  echo "  ok   [7c]: stub-sink checksum/artifacts moves with egress.stubSink.artifacts"
+fi
+
+# 7d: default render has no hub frontend deployment-config ConfigMap at all.
+render | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+bad = [ d["metadata"]["name"] for d in docs
+        if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") ]
+if bad:
+    print("  FAIL [7d-default]: default render has a hub deployment-config ConfigMap: " + ", ".join(bad)); sys.exit(1)
+print("  ok   [7d-default]: default render has no hub frontend deployment-config ConfigMap")
+' || fail=1
+
+# 7e: a non-empty frontend.releasedRecordsPanes appears in the hub frontend's
+# deployment.json and in no tier's tier-frontend-config.
+render --set tierNode.enabled=true --set-json 'frontend.releasedRecordsPanes=[{"title":"t","destination":"system:x","kind":"K","columns":[]}]' \
+  | G7E_JSON='[{"title": "t", "destination": "system:x", "kind": "K", "columns": []}]' "$PY" -c '
+import sys, os, yaml, json
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+want = json.loads(os.environ["G7E_JSON"])
+hub = None
+tiers = []
+for d in docs:
+    if d.get("kind") != "ConfigMap":
+        continue
+    n = d["metadata"]["name"]
+    if n.endswith("-frontend-deployment-config"):
+        hub = d
+    elif "-tier-frontend-config-" in n:
+        tiers.append(d)
+if hub is None:
+    print("  FAIL [7e]: no hub frontend-deployment-config ConfigMap rendered"); sys.exit(1)
+got = json.loads(hub["data"]["deployment.json"])
+gotPanes = got.get("releasedRecordsPanes")
+if gotPanes != want:
+    print("  FAIL [7e]: hub deployment.json releasedRecordsPanes = " + repr(gotPanes) + ", want " + repr(want)); sys.exit(1)
+if set(got.keys()) != {"releasedRecordsPanes"}:
+    print(f"  FAIL [7e]: hub deployment.json has extra keys: {sorted(got.keys())}"); sys.exit(1)
+if not tiers:
+    print("  FAIL [7e]: no tier-frontend-config ConfigMaps rendered with tierNode.enabled=true -- cannot check absence"); sys.exit(1)
+leaked = [d["metadata"]["name"] for d in tiers if "releasedRecordsPanes" in (d["data"].get("deployment.json") or "")]
+if leaked:
+    print("  FAIL [7e]: releasedRecordsPanes leaked into tier config(s): " + ", ".join(leaked)); sys.exit(1)
+print(f"  ok   [7e]: hub carries releasedRecordsPanes; {len(tiers)} tier-frontend-config(s) do not")
+' || fail=1
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

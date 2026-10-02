@@ -37,8 +37,10 @@ on egress.routes/.kinds/.assembler/.forwarder/.stubSink for the shapes.
 {{- $routesMountPath := "/etc/openddil/egress-routes" }}
 {{- $kindsMountPath := "/etc/openddil/egress-kinds" }}
 {{- $assemblerConfigMountPath := "/etc/openddil/egress-assembler" }}
+{{- $intakeConfigMountPath := "/etc/openddil/egress-intake" }}
 {{- $forwarderConfigMountPath := "/etc/openddil/egress-forwarder" }}
 {{- $forwarderTokenMountPath := "/etc/openddil/egress-forwarder-token" }}
+{{- $stubArtifactsMountPath := "/etc/openddil/egress-stub-artifacts" }}
 {{- range $i, $r := .Values.egress.routes }}
 {{- if $r.group }}
 {{- fail (printf "egress.routes[%d]: per-route 'group' is not supported -- every route shares the gate's ONE consumer group (routes.py refuses this too; see egress.yaml's comment on egress-gate-c2)" $i) }}
@@ -319,6 +321,92 @@ spec:
             name: {{ .Release.Name }}-egress-kinds
         {{- end }}
 {{- end }}
+{{- if .Values.egress.intake.enabled }}
+---
+# egress-intake (ADR-0046 §5) — polls a destination's artifacts by kind and
+# turns each into a record the rest of the pipeline can carry. It PRODUCES
+# from a destination's artifacts feed rather than consuming Kafka, so unlike
+# the assembler/forwarder/gate it carries no openddil.io/consumer-groups
+# annotation here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-intake-config
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  config.json: {{ toJson .Values.egress.intake.config | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-intake
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-intake" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-intake" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-intake" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson .Values.egress.intake.config | sha256sum | quote }}
+        {{- if .Values.egress.kinds }}
+        checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
+        {{- end }}
+        # The intake resolves subjects through topaz too, so it must roll
+        # with the registries -- identical computation to the gate's
+        # checksum/registries above (egress-gate-c2), on purpose.
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list (toJson .Values.releasability.destinations))) | sha256sum | quote }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: intake
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/intake.py"]
+          env:
+            - name: OPENDDIL_EGRESS_BROKERS
+              value: {{ $hqBroker | quote }}
+            - name: OPENDDIL_EGRESS_INTAKE_CONFIG
+              value: {{ printf "%s/config.json" $intakeConfigMountPath | quote }}
+            - name: OPENDDIL_EGRESS_KINDS_DIR
+              value: {{ $kindsMountPath | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
+            - name: OPENDDIL_TOPAZ_URL
+              value: {{ $topazUrl | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+          volumeMounts:
+            - name: egress-intake-config
+              mountPath: {{ $intakeConfigMountPath }}
+              readOnly: true
+            {{- if .Values.egress.kinds }}
+            - name: egress-kinds
+              mountPath: {{ $kindsMountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: egress-intake-config
+          configMap:
+            name: {{ .Release.Name }}-egress-intake-config
+        {{- if .Values.egress.kinds }}
+        - name: egress-kinds
+          configMap:
+            name: {{ .Release.Name }}-egress-kinds
+        {{- end }}
+{{- end }}
 {{- if .Values.egress.forwarder.enabled }}
 ---
 # egress-forwarder — the last hop: consumes one or more sink topics and
@@ -415,6 +503,20 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 4 }}
 ---
+# Artifacts the stub serves back out at GET /artifacts (stub_sink.py), for an
+# intake polling a destination's artifacts by kind, per ADR-0046 §5. A
+# separate ConfigMap from the stub's own emptyDir /data: that volume is the
+# stub's received-records log, this one is read-only input the stub was
+# given to answer with.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-egress-stub-artifacts
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  artifacts.json: {{ toJson .Values.egress.stubSink.artifacts | quote }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -432,6 +534,10 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "egress-stub-sink" "root" .) | nindent 8 }}
+      annotations:
+        # A changed artifact list must roll the stub, the same way a changed
+        # config rolls the assembler/forwarder above.
+        checksum/artifacts: {{ toJson .Values.egress.stubSink.artifacts | sha256sum | quote }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -451,6 +557,8 @@ spec:
               value: {{ .Values.egress.stubSink.kindField | quote }}
             - name: STUB_SINK_ID_FIELD
               value: {{ .Values.egress.stubSink.idField | quote }}
+            - name: OPENDDIL_STUB_ARTIFACTS_PATH
+              value: {{ printf "%s/artifacts.json" $stubArtifactsMountPath | quote }}
             - name: LOG_LEVEL
               value: "INFO"
           ports:
@@ -464,15 +572,21 @@ spec:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 10
             periodSeconds: 20
-          # emptyDir, NOT a PVC: the cluster's PVCs are NFS-backed, and an
-          # emptyDir survives a container restart but not a reschedule --
-          # see values.yaml's comment on egress.stubSink.
           volumeMounts:
+            # emptyDir, NOT a PVC: the cluster's PVCs are NFS-backed, and an
+            # emptyDir survives a container restart but not a reschedule --
+            # see values.yaml's comment on egress.stubSink.
             - name: data
               mountPath: /data
+            - name: egress-stub-artifacts
+              mountPath: {{ $stubArtifactsMountPath }}
+              readOnly: true
       volumes:
         - name: data
           emptyDir: {}
+        - name: egress-stub-artifacts
+          configMap:
+            name: {{ .Release.Name }}-egress-stub-artifacts
 {{- end }}
 {{- if .Values.egress.tak.enabled }}
 {{- /*
