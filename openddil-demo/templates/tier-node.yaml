@@ -1406,6 +1406,23 @@ spec:
       ports:
         - protocol: TCP
           port: 4197
+    {{- /* The second writer: this tier's own redpanda-connect (edge.yaml),
+       forwarding DIS Event Report CmEvents, when that path is configured.
+       Same $eventReportOn condition as edge.yaml -- recomputed here since
+       this file has no access to edge.yaml's range-local variable. Gated
+       additionally on `kind == "edge"`: edge.yaml's redpanda-connect-
+       {{ $edge.id }} only ever exists for `.Values.edges` entries, never
+       for a region -- without this, a region tier would get a podSelector
+       clause that can never match any pod this chart renders. */}}
+    {{- if and (eq $tier.kind "edge") $root.Values.cmReports.eventReport.eventType $root.Values.tierNode.enabled (or (not $root.Values.tierNode.tiers) (has $tier.id $root.Values.tierNode.tiers)) }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $tier.id) "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 4197
+    {{- end }}
 {{- end }}
 ---
 # ===========================================================================

@@ -14,6 +14,12 @@
 {{- $edge := . }}
 {{- $edgeBroker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $edge.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.redpandaHq.kafkaPort) }}
+{{- /* This edge's DIS Event Report path is on only when cmReports.eventReport
+   is configured AND this edge is also a tierNode tier -- tier-cm-intake-
+   {{ $edge.id }} (tier-node.yaml) is the only cm-intake this chart ever
+   renders that this edge's redpanda-connect could reach. See cmReports
+   .eventReport's values.yaml comment. */ -}}
+{{- $eventReportOn := and $root.Values.cmReports.enabled $root.Values.cmReports.eventReport.eventType $root.Values.tierNode.enabled (or (not $root.Values.tierNode.tiers) (has $edge.id $root.Values.tierNode.tiers)) }}
 
 # ===========================================================================
 # sensor-ingest-{{ $edge.id }} — DIS UDP ingestion
@@ -219,6 +225,31 @@ spec:
           env:
             - name: REDPANDA_BROKER
               value: {{ $edgeBroker | quote }}
+            {{- if $eventReportOn }}
+            # --- the DIS Event Report -> CmEvent path, this edge's own
+            # tier-cm-intake (see $eventReportOn above and dis-event-report
+            # .yaml, dynamic-mappings/) -----------------------------------
+            - name: CM_EVENT_REPORT_TYPE
+              value: {{ $root.Values.cmReports.eventReport.eventType | quote }}
+            - name: CM_EVENT_REPORT_COMPONENT_DATUM
+              value: {{ $root.Values.cmReports.eventReport.componentDatum | quote }}
+            - name: CM_EVENT_REPORT_FAULT_CODE_DATUM
+              value: {{ $root.Values.cmReports.eventReport.faultCodeDatum | quote }}
+            {{- if $root.Values.cmReports.eventReport.descriptionDatum }}
+            - name: CM_EVENT_REPORT_DESCRIPTION_DATUM
+              value: {{ $root.Values.cmReports.eventReport.descriptionDatum | quote }}
+            {{- end }}
+            - name: CM_EVENT_REPORT_SEVERITY
+              value: {{ $root.Values.cmReports.eventReport.severity | quote }}
+            {{- if $root.Values.cmReports.eventReport.recordedBy }}
+            - name: CM_EVENT_REPORT_RECORDED_BY
+              value: {{ $root.Values.cmReports.eventReport.recordedBy | quote }}
+            {{- end }}
+            - name: CM_EVENT_REPORT_SOURCE
+              value: {{ $root.Values.cmReports.eventReport.source | quote }}
+            - name: CM_INTAKE_URL
+              value: {{ printf "http://%s-tier-cm-intake-%s%s:4197/cm-events" $root.Release.Name $edge.id (include "openddil.svcDomain" $root) | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ $root.Values.redpandaConnect.httpPort }}

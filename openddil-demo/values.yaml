@@ -557,6 +557,40 @@ cmReports:
   # chart has no knowledge of what's upstream of the PEP.
   source: operator_report
 
+  # The SECOND write path into the CM event log: a DIS Event Report PDU,
+  # decoded at the edge, becomes a CmEvent at that edge's own cm-intake --
+  # no operator in the loop. Disabled by `eventType` being empty (the
+  # default): no DIS wire format fact fixes what a given event type or
+  # datum id means, so every one of these is a deployment choice, not a
+  # protocol constant. Empty eventType renders no new env on any
+  # redpanda-connect pod and leaves the cm-intake NetworkPolicy
+  # unchanged -- same "default install is unchanged" stance as the rest
+  # of this block.
+  #
+  # Only takes effect on an edge that is ALSO a tierNode tier (tierNode
+  # .enabled, and tierNode.tiers empty or containing that edge's id) --
+  # that is the only place this chart renders a cm-intake an edge's own
+  # redpanda-connect can reach. An edge outside the active tierNode set
+  # has nowhere for this path to post to, so it renders nothing, same as
+  # eventType empty.
+  eventReport:
+    # DIS Event Report `event_type`, read off the decoded PDU. No default:
+    # unset means "this deployment has not turned this feature on".
+    eventType: ""
+    # Variable datum ids (as the wire sends them: numeric, read as text)
+    # holding the component slot id and the fault code. Required once
+    # eventType is set -- see dis-event-report.yaml's "missing_datum" case.
+    componentDatum: ""
+    faultCodeDatum: ""
+    # Optional: a free-text description datum. Blank means the mapping's
+    # own default text is used ("reported by built-in test").
+    descriptionDatum: ""
+    severity: MAJOR
+    # Optional override of the CmEvent's recordedBy. Blank means the
+    # mapping's own default ("system:dis-event-report").
+    recordedBy: ""
+    source: telemetry_bit
+
 logisticsFusion:
   image:
     name: logistics-fusion-service
