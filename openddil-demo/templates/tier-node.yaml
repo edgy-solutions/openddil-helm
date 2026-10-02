@@ -264,11 +264,19 @@ spec:
           # root-tier Jobs have always had this; the tier Jobs did not.
           resources:
             {{- toYaml $root.Values.jobs.resources | nindent 12 }}
+          # --tx-mode none: six migrations carry their own BEGIN/COMMIT. Under the
+          # default per-file transaction, that COMMIT ends Atlas's transaction early;
+          # the file and its revision row commit, then Atlas's own commit finds the
+          # connection idle and exits 1 ("unexpected transaction status idle"). A
+          # fresh store crashed once per such file: 6 times, then succeeded on the 7th.
+          # Files that need atomicity carry their own BEGIN/COMMIT.
           args:
             - migrate
             - apply
             - --dir
             - "file:///bundle/schema/migrations"
+            - --tx-mode
+            - none
             - --url
             - "{{ $dsn }}?sslmode=disable"
           volumeMounts:

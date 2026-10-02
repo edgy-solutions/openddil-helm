@@ -80,11 +80,14 @@ spec:
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.atlas.pullPolicy "root" .) }}
           resources:
             {{- toYaml .Values.jobs.resources | nindent 12 }}
+          # See tier-node.yaml's atlas-apply for why --tx-mode none.
           args:
             - migrate
             - apply
             - --dir
             - file:///schema/migrations
+            - --tx-mode
+            - none
             - --url
             - postgres://{{ $pgUser }}:{{ $pgPass }}@{{ $pgHost }}:{{ $pgPort }}/{{ $pgDb }}?sslmode=disable
           volumeMounts:
