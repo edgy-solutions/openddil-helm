@@ -431,6 +431,54 @@ key_column() {
 }
 
 # ---------------------------------------------------------------------------
+# REGION-KEYED ROLLUPS: excused ONLY on an exact match
+# ---------------------------------------------------------------------------
+# A non-aggregate table keyed on region_id, carrying a per-region fleet_total,
+# can show the same shape the phantom-partial correlate further below was
+# built for: a region whose only assets are the declared-unlabelled fixture
+# composes into a single NULL-nation, NULL-releasable_to row for that region,
+# honestly. The rule is generalised past one named view on purpose -- nothing
+# below names a table, only the shape "non-aggregate, keyed on region_id,
+# carries a per-region fleet_total", so a future rollup of the same shape is
+# covered without a second copy of this logic.
+#
+# EXCUSED ONLY ON AN EXACT MATCH, same discipline as the phantom-partial rule:
+# the NULL-label row's fleet_total must EQUAL the number of declared-
+# unlabelled assets asset_logistics_status places in that region, and that
+# count must be non-zero. One asset more or fewer than declared, and the row
+# stays a finding.
+#
+# ONE RULE, ONE PLACE: the counting path and the findings-listing path both
+# call this function for the same table, so they cannot disagree about which
+# regions are excused.
+#
+# Found 2026-10-03, the first gate run after asset_lifecycle_summary landed:
+# region-west's only asset is the declared-unlabelled fixture, so the view's
+# only row for that region is (region-west, NULL, NULL, fleet_total 1) --
+# correct composition, not a missing label.
+has_fleet_total_column() {
+  local n
+  n="$(q "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='$1' AND column_name='fleet_total';" </dev/null)"
+  [ "${n:-0}" = "1" ]
+}
+
+# Regions of table $1 excused by an exact match. One "region_id|fleet_total"
+# line per excused region; nothing if $1 has no fleet_total column or there
+# is no declared-unlabelled fixture to match against.
+excused_region_rollup_rows() {
+  local t="$1" r ft dn
+  [ -n "$DU_SQL" ] || return 0
+  has_fleet_total_column "$t" || return 0
+  while IFS='|' read -r r ft; do
+    [ -n "$r" ] || continue
+    dn="$(q "SELECT count(*) FROM asset_logistics_status WHERE region_id='$r' AND asset_id IN ($DU_SQL);" </dev/null)"
+    if [ "$ft" = "$dn" ] && [ "${dn:-0}" != "0" ]; then
+      printf '%s|%s\n' "$r" "$ft"
+    fi
+  done < <(q "SELECT region_id, fleet_total FROM \"$t\" WHERE originator_nation IS NULL AND releasable_to IS NULL;" </dev/null)
+}
+
+# ---------------------------------------------------------------------------
 # THE THIRD TERM: is the producer alive?
 # ---------------------------------------------------------------------------
 # `tactical_events` at the root is empty most of the time and that is CORRECT:
@@ -719,6 +767,17 @@ while IFS='|' read -r t n nn nr; do
           du_note="$du_note   ($((du_nn + du_nr)) DECLARED: $du_id)"
         done < <(q "SELECT $du_key, count(*) FILTER (WHERE originator_nation IS NULL), count(*) FILTER (WHERE releasable_to IS NULL) FROM \"$t\" WHERE $du_key IN ($DU_SQL) GROUP BY $du_key;" </dev/null)
         ;;
+      region_id)
+        # See excused_region_rollup_rows() above: EXCUSED ONLY ON AN EXACT
+        # MATCH. Each excused region contributes exactly one row that is NULL
+        # in both label columns, so it subtracts 1 from nn and 1 from nr.
+        while IFS='|' read -r du_r du_ft; do
+          [ -n "$du_r" ] || continue
+          nn=$((nn - 1)); nr=$((nr - 1))
+          du_note="$du_note   ($du_ft DECLARED: region $du_r)"
+          echo "$t region $du_r: NULL-label group holds $du_ft asset(s) = $du_ft declared unlabelled asset(s) there   (DECLARED)"
+        done < <(excused_region_rollup_rows "$t")
+        ;;
     esac
   fi
   if is_aggregate "$t"; then
@@ -885,6 +944,16 @@ if [ "$unlabelled" -gt 0 ]; then
     if [ -n "$DU_SQL" ] && ! is_aggregate "$t"; then
       case "$key" in
         asset_id|subject) pred="($pred) AND $key NOT IN ($DU_SQL)" ;;
+        region_id)
+          # Same exact-match rule as the counting path, via the same
+          # function (excused_region_rollup_rows) -- not restated.
+          excused_regions_sql=""
+          while IFS='|' read -r ex_r ex_ft; do
+            [ -n "$ex_r" ] || continue
+            excused_regions_sql="${excused_regions_sql:+$excused_regions_sql,}'$ex_r'"
+          done < <(excused_region_rollup_rows "$t")
+          [ -n "$excused_regions_sql" ] && pred="($pred) AND region_id NOT IN ($excused_regions_sql)"
+          ;;
       esac
     fi
     if [ -z "$key" ]; then
