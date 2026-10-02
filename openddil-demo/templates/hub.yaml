@@ -927,15 +927,21 @@ spec:
             # deployment having a gate with nothing behind it.
             - name: OPENDDIL_SESSION_GATE
               value: {{ ternary "on" "off" .Values.releasability.oidc.enabled | quote }}
-            # THE EGRESS ADMISSION PANE, HUB-ONLY. egress.yaml renders
-            # egress-pane-api under this same `releasability.enabled`
-            # condition, so the two arrive together. Not set on tier-node.yaml
-            # frontends: nginx there substitutes the __EGRESS_PANE_OFF__ 404
-            # branch instead, because the pane does not exist at that tier.
-            - name: OPENDDIL_EGRESS_PANE_UPSTREAM
-              value: {{ printf "%s-egress-pane-api" .Release.Name | quote }}
-            - name: OPENDDIL_EGRESS_PANE_PORT
-              value: {{ .Values.egress.paneApi.port | quote }}
+            # THE EGRESS ADMISSION PANE, HUB-ONLY, REACHED THROUGH THE HUB
+            # PEP -- PA. The pane (egress.yaml's egress-pane-api) answers
+            # once, for every nation on the wire; routing straight to it from
+            # a gated shell was the cross-nation leak PA/measure-4.log
+            # measured (every profile got the pane's identical 15 records).
+            # VIA_PEP tells 40-resolver.sh to point this location at the same
+            # $pep_upstream the read path already uses, path unchanged, so
+            # the PEP's own /egress/decisions route can ask Topaz for THIS
+            # viewer's nations and filter the pane's answer down to them
+            # (gateway/egress_view.py) before the browser ever sees it. Not
+            # set on tier-node.yaml frontends: nginx there substitutes the
+            # __EGRESS_PANE_OFF__ 404 branch instead, because neither a PEP
+            # nor a pane exists at that tier.
+            - name: OPENDDIL_EGRESS_PANE_VIA_PEP
+              value: "on"
           {{- end }}
           ports:
             - name: http

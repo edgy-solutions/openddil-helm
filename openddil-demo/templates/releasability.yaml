@@ -316,6 +316,12 @@ spec:
           env:
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            # THE EGRESS PANE -- PA. egress.yaml's egress-pane-api Service
+            # renders under the same `releasability.enabled` condition this
+            # whole PEP does, so the two arrive together; see hub.yaml's
+            # OPENDDIL_EGRESS_PANE_VIA_PEP for the frontend half of this wire.
+            - name: OPENDDIL_EGRESS_PANE_URL
+              value: {{ printf "http://%s-egress-pane-api%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.egress.paneApi.port | quote }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ printf "http://%s-topaz-hq%s:8383" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
             - name: OPENDDIL_PEP_PORT
@@ -738,5 +744,35 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.electric.port }}
+---
+# BYPASS PREVENTION, SAME REASON, SECOND SURFACE -- PA. Without this, the
+# egress pane (egress.yaml's egress-pane-api) is reachable by any pod in the
+# namespace once OPENDDIL_EGRESS_PANE_URL exists to find it, which would let
+# something other than the PEP read the pane's unfiltered, every-nation
+# answer directly -- the same class of bypass `electric-pep-only` closes for
+# the read path. The flag name (`lockDownElectric`) predates the pane; it is
+# reused rather than introducing a second flag, because both NetworkPolicies
+# answer the same question -- "can anything but the PEP reach a component
+# that has not applied a viewer filter" -- and a deployment that locks down
+# one surface almost certainly means to lock down the other.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-egress-pane-pep-only
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-pane-api" "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.egress.paneApi.port }}
 {{- end }}
 {{- end }}
