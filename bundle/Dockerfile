@@ -48,6 +48,12 @@ COPY openddil-tactical-agents/hub/restate_hub.py /bundle/agents/hub/restate_hub.
 COPY openddil-demo/openddil-base-connect.yaml    /bundle/demo/openddil-base-connect.yaml
 COPY openddil-demo/dynamic-mappings              /bundle/demo/dynamic-mappings/
 
+# cm-intake — the one CM event log's connect pipeline. Sibling to
+# openddil-base-connect.yaml above: same packaging convention (repo-root
+# file, no per-edge variants — the broker is injected via REDPANDA_BROKER,
+# same as the DIS mapper), gated at install by cmReports.enabled.
+COPY openddil-demo/cm-intake.yaml                /bundle/demo/cm-intake.yaml
+
 # Deployment ontology OVERLAY (ADR-0029 §3). Copied on top of
 # contracts/ontology by the chart's bundleInit, so a deployment can declare
 # facts about ITS OWN fleet — releasability labels, first — without those

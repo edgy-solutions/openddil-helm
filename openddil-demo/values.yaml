@@ -540,6 +540,23 @@ cmService:
   # openddil-customer-bundle-customer-overlay/chart/templates/
   # hook-patch-cm-service.yaml for the canonical example.
 
+# The first write path into the CM event log: an authenticated report
+# becomes one CmEvent on the tier's cm-events topic. Disabled by default so
+# a default install's rendered output is unchanged -- enabling this adds a
+# cm-intake Deployment+Service per managed tier (plus hub, when hub has its
+# own cm-service), a NetworkPolicy restricting ingress to that tier's PEP,
+# and new PEP env/volumes pointing at it.
+cmReports:
+  enabled: false
+  # Known fault codes the PEP will accept on a report, rendered to a
+  # ConfigMap and mounted read-only into the PEP. Empty means no file and
+  # no OPENDDIL_FAULT_CODES_PATH, and the PEP then serves no write route at
+  # all (404): a report is only accepted against a known code.
+  faultCodes: []
+  # Stamped onto each CmEvent as its report source. Generic by design: this
+  # chart has no knowledge of what's upstream of the PEP.
+  source: operator_report
+
 logisticsFusion:
   image:
     name: logistics-fusion-service

@@ -907,11 +907,11 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
             $tier.id
             ($tier.publicOrigin | default "")
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
-          )) | sha256sum | quote }}
+          ) (ternary (list (toJson $root.Values.cmReports.faultCodes)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -955,6 +955,21 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            {{- if $root.Values.cmReports.enabled }}
+            # --- the CM write path, THIS TIER's own cm-intake --------
+            - name: OPENDDIL_CM_INTAKE_URL
+              value: {{ printf "http://%s-tier-cm-intake-%s%s:4197/cm-events" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            - name: OPENDDIL_REPORT_SOURCE
+              value: {{ $root.Values.cmReports.source | quote }}
+            {{- if $root.Values.cmReports.faultCodes }}
+            # Unset (not an empty-list file) when no fault code is
+            # configured — same "route exists, nothing to serve" shape as
+            # EGRESS_PANE elsewhere: pep.py 404s the discrepancy route
+            # rather than accepting writes against a taxonomy of zero.
+            - name: OPENDDIL_FAULT_CODES_PATH
+              value: /etc/openddil/cm-fault-codes.json
+            {{- end }}
+            {{- end }}
             {{- if and $root.Values.releasability.oidc.enabled $tier.publicOrigin }}
             # AUTH CLIENT PER TIER (chart delta item 4). A redirect URI is
             # per host, so a tier reached at its own hostname needs its own
@@ -1023,10 +1038,20 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
+            {{- if $root.Values.cmReports.enabled }}
+            - name: cm-fault-codes
+              mountPath: /etc/openddil
+              readOnly: true
+            {{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+        {{- if $root.Values.cmReports.enabled }}
+        - name: cm-fault-codes
+          configMap:
+            name: {{ $root.Release.Name }}-cm-fault-codes
+        {{- end }}
 {{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION AT THE TIER. Slice 1's policy named the ROOT's
@@ -1265,7 +1290,123 @@ spec:
       name: http
   selector:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 4 }}
-
+{{- if $root.Values.cmReports.enabled }}
+---
+# ===========================================================================
+# tier-cm-intake-{{ $tier.id }} — the one CM event log, at this tier
+# ===========================================================================
+# Structural twin of redpanda-connect-{{ "{{ $edge.id }}" }} (edge.yaml): same
+# connect image, same bundleInit-for-/proto pattern, broker resolved the same
+# way every other tier-local consumer resolves it ($broker, set once above).
+# Unlike that sibling, this one's input is `http_server`, not a Kafka
+# consumer — so it needs a Service, and the NetworkPolicy below is what
+# makes "the tier PEP is its only caller" true rather than aspirational.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-tier-cm-intake-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 8 }}
+      annotations:
+        # HASHES THE BUNDLE IMAGE REFERENCE (or Release.Revision when
+        # unpinned), not this pod's own rendered spec — same mechanism
+        # openddil.policyChecksum gives the identity pods, extended here
+        # because cm-intake.yaml ships as a static bundle file this
+        # initContainer only copies once at pod start: a bundle update with
+        # no other pod-spec change would otherwise leave a running cm-intake
+        # on stale config exactly the way edge-hq-bridge's connect-config
+        # comment describes for a chart-generated file. This is the same
+        # staleness hazard for a bundle-shipped one.
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "tier-cm-intake" $tier.id)) | sha256sum | quote }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: connect
+          image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.redpandaConnect.image.pullPolicy "root" $root) }}
+          args: ["--chilled", "run", "/connect.yaml"]
+          env:
+            - name: REDPANDA_BROKER
+              value: {{ $broker | quote }}
+          ports:
+            - name: http
+              containerPort: 4197
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /connect.yaml
+              subPath: connect.yaml
+          resources:
+            {{- toYaml $root.Values.redpandaConnect.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-tier-cm-intake-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 4197
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 4 }}
+---
+# BYPASS PREVENTION, SAME SHAPE AS tier-electric-pep-only-{{ "{{ $tier.id }}" }}
+# ABOVE. cm-intake takes an authenticated write and trusts its caller's
+# identity unchecked — it is a transport, not a second gate (see
+# cm-intake.yaml's own header comment) — so the only thing making that safe
+# is that nothing but the tier PEP can reach it. Gated on cmReports.enabled,
+# not lockDownElectric: a deployment that has not turned the CM write path
+# on at all has no cm-intake pod for this policy to select in the first
+# place, but the gate is named for ITS OWN flag rather than borrowing
+# lockDownElectric's, since the two features ship independently.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-tier-cm-intake-pep-only-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # Another writer into this one intake log adds its own podSelector
+    # entry here rather than a second policy.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 4197
+{{- end }}
 ---
 # ===========================================================================
 # tier-restate-bootstrap-{{ $tier.id }} — register services + subscriptions

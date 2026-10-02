@@ -455,6 +455,112 @@ spec:
     - name: http
       port: {{ .Values.cmService.port }}
       targetPort: http
+{{- if .Values.cmReports.enabled }}
+---
+# ===========================================================================
+# cm-intake — the one CM event log, at the hub
+# ===========================================================================
+# Structural twin of tier-cm-intake-{{ "{{ $tier.id }}" }} (tier-node.yaml):
+# same connect image, same bundleInit-for-/proto pattern, broker resolved via
+# $hqBroker instead of a tier's $broker since this one lives beside the hub's
+# own cm-service rather than inside a managed tier's block. Named plainly
+# "cm-intake" (no tier suffix), matching how hub's own pep/cm-service are
+# named without a tier suffix.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-cm-intake
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 8 }}
+      annotations:
+        # Same staleness hazard, same fix, as tier-cm-intake-{{ "{{ $tier.id }}" }}'s
+        # checksum/bundle comment: cm-intake.yaml ships as a static bundle file
+        # this initContainer only copies once at pod start.
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list "cm-intake")) | sha256sum | quote }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) "root" .) | nindent 8 }}
+      containers:
+        - name: connect
+          image: "{{ include "openddil.thirdPartyImage" .Values.redpandaConnect.image }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.redpandaConnect.image.pullPolicy "root" .) }}
+          args: ["--chilled", "run", "/connect.yaml"]
+          env:
+            - name: REDPANDA_BROKER
+              value: {{ $hqBroker | quote }}
+          ports:
+            - name: http
+              containerPort: 4197
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /connect.yaml
+              subPath: connect.yaml
+          resources:
+            {{- toYaml .Values.redpandaConnect.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-cm-intake
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 4197
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 4 }}
+---
+# BYPASS PREVENTION, SAME SHAPE AS tier-cm-intake-pep-only-{{ "{{ $tier.id }}" }}.
+# Gated on cmReports.enabled, not lockDownElectric, for the same reason: the
+# two features ship independently, and a deployment with the CM write path
+# off has no cm-intake pod here for this policy to select in the first place.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-cm-intake-pep-only
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # Another writer into this one intake log adds its own podSelector
+    # entry here rather than a second policy.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "pep" "root" .) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 4197
+{{- end }}
 ---
 # ===========================================================================
 # asset-registry-service (ADR-0028) — canonical asset->edge->region writer

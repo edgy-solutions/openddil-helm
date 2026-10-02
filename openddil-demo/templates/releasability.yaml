@@ -293,9 +293,9 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
-          )) | sha256sum | quote }}
+          ) (ternary (list (toJson $root.Values.cmReports.faultCodes)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -328,6 +328,17 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            {{- if $root.Values.cmReports.enabled }}
+            # --- the CM write path, the HUB's own cm-intake -----------
+            - name: OPENDDIL_CM_INTAKE_URL
+              value: {{ printf "http://%s-cm-intake%s:4197/cm-events" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
+            - name: OPENDDIL_REPORT_SOURCE
+              value: {{ $root.Values.cmReports.source | quote }}
+            {{- if $root.Values.cmReports.faultCodes }}
+            - name: OPENDDIL_FAULT_CODES_PATH
+              value: /etc/openddil/cm-fault-codes.json
+            {{- end }}
+            {{- end }}
             {{- if $root.Values.releasability.oidc.enabled }}
             # --- authentication (BFF) ---------------------------------------
             # Setting OPENDDIL_OIDC_ISSUER is what selects `oidc` auth mode.
@@ -391,10 +402,34 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
+            {{- if $root.Values.cmReports.enabled }}
+            - name: cm-fault-codes
+              mountPath: /etc/openddil
+              readOnly: true
+            {{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+        {{- if $root.Values.cmReports.enabled }}
+        - name: cm-fault-codes
+          configMap:
+            name: {{ $root.Release.Name }}-cm-fault-codes
+        {{- end }}
+{{- if $root.Values.cmReports.enabled }}
+---
+# The fixed list the PEP will accept a report's fault code against.
+# Shared by every PEP that mounts it -- root pep and every tier-pep -- so
+# there is exactly one list, not one per tier.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-cm-fault-codes
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  cm-fault-codes.json: {{ toJson $root.Values.cmReports.faultCodes | quote }}
+{{- end }}
 {{- if $root.Values.releasability.oidc.enabled }}
 ---
 apiVersion: v1
