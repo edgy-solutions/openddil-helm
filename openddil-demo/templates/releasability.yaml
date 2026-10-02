@@ -774,5 +774,39 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.egress.paneApi.port }}
+{{- if $root.Values.egress.tak.enabled }}
+---
+# BYPASS PREVENTION, SAME REASON, A DIFFERENT SHAPE OF LEAK. taky
+# broadcasts every event to every connected client and replays the whole
+# tracked picture to anyone who connects (router.send_persist); it has no
+# per-client filter of its own. That means this label is not "can reach the
+# adapter's output" the way a Service normally is -- it is "receives this
+# destination's entire releasable picture, labelled events included" -- so
+# it is granted sparingly: the adapter itself, and pods the operator has
+# explicitly marked `openddil.io/tak-reader: "true"` as members of this
+# destination's audience. Nothing else in the namespace may open this port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-tak-server-readers-only
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "egress-cot-adapter-c2" "root" $root) | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              openddil.io/tak-reader: "true"
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.egress.tak.port }}
+{{- end }}
 {{- end }}
 {{- end }}

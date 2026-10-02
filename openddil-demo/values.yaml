@@ -755,6 +755,31 @@ egress:
   resources:
     requests: { cpu: 50m,  memory: 128Mi }
     limits:   { cpu: 300m, memory: 256Mi }
+  # taky on the hub as a tier workload, fed by the CoT adapter above. DEFAULT
+  # OFF: unlike the gate and the pane, this ships an image (tak-server) that
+  # has to be reachable from the cluster's own registry before a Deployment
+  # referencing it can even schedule -- the gate/pane's egress image was
+  # already being built and pushed for other reasons, this one is not, and a
+  # chart that defaulted a brand-new image reference to "on" would turn a
+  # missing build into a crash-looping pod rather than an opt-in step.
+  tak:
+    enabled: false
+    image:
+      name: tak-server
+      tag: ""
+      digest: ""
+      pullPolicy: ""
+    port: 8087
+    # taky replays every tracked non-stale event to a client on connect and
+    # broadcasts to every connected socket (router.send_persist) -- "stale"
+    # is the only thing bounding how long a disconnected/stopped asset keeps
+    # showing on the picture. 300s matches compose's taky.conf-adjacent
+    # default and the adapter's own OPENDDIL_COT_STALE_S default.
+    staleSeconds: 300
+    cotType: a-u-G
+    resources:
+      requests: { cpu: 50m,  memory: 128Mi }
+      limits:   { cpu: 300m, memory: 256Mi }
 
 # --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
 # Three small images referenced by chart templates rather than by service-

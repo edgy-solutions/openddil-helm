@@ -137,4 +137,143 @@ spec:
               containerPort: {{ .Values.egress.paneApi.port }}
           resources:
             {{- toYaml .Values.egress.resources | nindent 12 }}
+{{- if .Values.egress.tak.enabled }}
+{{- /*
+---------------------------------------------------------------------------
+TAK server + CoT adapter — the hub's stand-in C2, fed from the gate's sink
+---------------------------------------------------------------------------
+Off by default: see values.yaml's comment on egress.tak.enabled for why (the
+image has to be reachable from the cluster's own registry first).
+
+ONE TAK SERVER IS ONE AUDIENCE. taky replays every tracked non-stale `a-*`
+event to a client on connect and broadcasts to every connected socket
+(router.send_persist) — it has no per-client filtering. The NetworkPolicy in
+releasability.yaml (`<rel>-tak-server-readers-only`) is what keeps that
+single undifferentiated picture scoped to this destination's own audience.
+*/}}
+{{- $takImage := include "openddil.image" (dict "name" .Values.egress.tak.image.name "tag" .Values.egress.tak.image.tag "digest" .Values.egress.tak.image.digest "root" .) }}
+{{- $takPullPolicy := include "openddil.pullPolicy" (dict "policy" .Values.egress.tak.image.pullPolicy "root" .) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-tak-server
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.egress.tak.port }}
+      name: cot
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-tak-server
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        # No command override: the image's default command IS taky.
+        - name: tak-server
+          image: {{ $takImage }}
+          imagePullPolicy: {{ $takPullPolicy }}
+          ports:
+            - name: cot
+              containerPort: {{ .Values.egress.tak.port }}
+          # TCP, not HTTP: CoT over this port is a raw XML stream, the same
+          # bare-connect check compose's healthcheck uses.
+          readinessProbe:
+            tcpSocket: { port: {{ .Values.egress.tak.port }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: {{ .Values.egress.tak.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.egress.tak.resources | nindent 12 }}
+          # taky's persistence is IN-MEMORY (router.send_persist tracks state
+          # for the life of the process). A restart loses the whole picture
+          # until the adapter's next records repopulate it — seconds on a
+          # live hub — which is why no volume is mounted here: there is
+          # nothing durable to mount.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-egress-cot-adapter-c2
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "egress-cot-adapter-c2" "root" .) | nindent 4 }}
+  annotations:
+    openddil.io/consumer-groups: "hq/egress-cot-adapter-c2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-cot-adapter-c2" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" . | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "egress-cot-adapter-c2" "root" .) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: cot-adapter
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command: ["python", "-u", "/app/cot_adapter.py"]
+          env:
+            - name: OPENDDIL_COT_BROKERS
+              value: {{ $hqBroker | quote }}
+            # DERIVED FROM THE GATE'S SINK, NOT A SEPARATE KNOB -- ON PURPOSE.
+            # The design measured the source topic as the connector's only
+            # safeguard: pointed at the gate's SOURCE topic instead, it
+            # carried 15 uids onto the picture instead of 8, because the
+            # source carries every asset the gate has not yet decided on.
+            # Giving this its own value would let it drift from the sink and
+            # silently widen the audience back to "everyone upstream of the
+            # gate" -- exactly the bypass the gate exists to prevent.
+            - name: OPENDDIL_COT_SOURCE_TOPIC
+              value: {{ .Values.egress.sinkTopic | quote }}
+            - name: OPENDDIL_COT_GROUP
+              value: "egress-cot-adapter-c2"
+            - name: OPENDDIL_COT_TAK_HOST
+              value: {{ printf "%s-tak-server%s" .Release.Name (include "openddil.svcDomain" .) | quote }}
+            - name: OPENDDIL_COT_TAK_PORT
+              value: {{ .Values.egress.tak.port | quote }}
+            - name: OPENDDIL_COT_STALE_S
+              value: {{ .Values.egress.tak.staleSeconds | quote }}
+            - name: OPENDDIL_COT_TYPE
+              value: {{ .Values.egress.tak.cotType | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            {{- toYaml .Values.egress.resources | nindent 12 }}
+{{- end }}
 {{- end }}
