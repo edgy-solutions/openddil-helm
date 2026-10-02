@@ -4,7 +4,7 @@ ingress host, signed in.
 
     python check_egress_pane.py http://<ingress host> \
         [--user operator.atlantia] [--destination system:c2-stand-in-atl] \
-        [--expect-admitted 8] [--expect-refused 7]
+        [--expect-admitted 8] [--expect-refused 7] [--expect-withheld 7]         [--require-viewer-filter]
 
 Exit 0 PASS, 1 FAIL, 3 NOT RUN.
 
@@ -19,7 +19,12 @@ WHAT FAILS IT
     per-record release decisions (asset ids, originator nations); reaching it
     without a session is a releasability bypass, and this is checked first;
   * a signed-in request that gets an error, or counts that differ from the
-    --expect-* values given.
+    --expect-* values given;
+  * with --require-viewer-filter: any record shown that the signed-in viewer
+    may not see. "May see" is the read path's rule, applied to the nations
+    /auth/me reports: originator in them, or releasable_to overlapping them.
+    An unlabelled record satisfies neither, so showing one fails. This needs
+    no expected list, so it fails wherever the pane answers everyone alike.
 
 WHAT IS NOT RUN, NOT FAILED
   * sign-in did not yield a session (nothing was read);
@@ -68,6 +73,8 @@ def main() -> int:
     ap.add_argument("--destination", default="system:c2-stand-in-atl")
     ap.add_argument("--expect-admitted", type=int)
     ap.add_argument("--expect-refused", type=int)
+    ap.add_argument("--expect-withheld", type=int)
+    ap.add_argument("--require-viewer-filter", action="store_true")
     a = ap.parse_args()
     base = a.host.rstrip("/")
     url = f"{base}/egress/decisions?destination={urllib.parse.quote(a.destination)}"
@@ -89,6 +96,10 @@ def main() -> int:
         return NOT_RUN
     st, ct, body, _ = fetch(f"{base}/auth/me", cookie)
     print(f"  signed in as {a.user}: /auth/me {st} {body[:160].decode('utf-8', 'replace')}")
+    try:
+        nations = set(json.loads(body).get("nations") or [])
+    except ValueError:
+        nations = set()
 
     # 3. Signed in: the decisions.
     st, ct, body, _ = fetch(url, cookie)
@@ -105,18 +116,38 @@ def main() -> int:
     recs = d.get("records", [])
     print(f"  destination={d.get('destination')} policy={d.get('policy_version')} "
           f"corpus={d.get('corpus_version')}")
-    print(f"  admitted={admitted} refused={refused} records={len(recs)}")
+    withheld = d.get("withheld")
+    print(f"  admitted={admitted} refused={refused} records={len(recs)} "
+          f"withheld={withheld} viewer_nations={d.get('viewer_nations')}")
     by_reason: dict[str, list[str]] = {}
     for r in recs:
-        by_reason.setdefault(r.get("reason", "?"), []).append(r.get("asset_id", "?"))
+        by_reason.setdefault(r.get("reason") or "-", []).append(r.get("asset_id") or "?")
     for reason, ids in sorted(by_reason.items()):
         print(f"    {reason:<20} {len(ids):>3}  {' '.join(sorted(ids))}")
+    by_label: dict[str, list[str]] = {}
+    for r in recs:
+        label = (f"{r.get('originator_nation') or '-'}"
+                 f"|{','.join(r.get('releasable_to') or []) or '-'}")
+        by_label.setdefault(label, []).append(r.get("asset_id") or "?")
+    for label, ids in sorted(by_label.items()):
+        print(f"    label {label:<14} {len(ids):>3}  {' '.join(sorted(ids))}")
 
     bad = []
     if a.expect_admitted is not None and admitted != a.expect_admitted:
         bad.append(f"admitted {admitted} != expected {a.expect_admitted}")
     if a.expect_refused is not None and refused != a.expect_refused:
         bad.append(f"refused {refused} != expected {a.expect_refused}")
+    if a.expect_withheld is not None and withheld != a.expect_withheld:
+        bad.append(f"withheld {withheld} != expected {a.expect_withheld}")
+    if a.require_viewer_filter:
+        if not nations:
+            bad.append("/auth/me reported no nations; the filter cannot be judged")
+        seen = [r.get("asset_id") or "?" for r in recs
+                if not ((r.get("originator_nation") in nations)
+                        or (set(r.get("releasable_to") or []) & nations))]
+        if seen:
+            bad.append(f"{len(seen)} record(s) shown outside viewer nations "
+                       f"{sorted(nations)}: {' '.join(sorted(seen))}")
     if bad:
         print("FAIL: " + "; ".join(bad))
         return FAIL
