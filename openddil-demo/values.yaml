@@ -1170,6 +1170,28 @@ releasability:
   # keeps writing about.
   policyVariant: users
 
+  # THE DEPLOYMENT'S OWN DESTINATION REGISTRY OVERLAY (ADR-0046 §7).
+  #
+  # EMPTY BY DEFAULT, deliberately. The shipped registry in the runtime
+  # bundle (policy/destinations.yaml) is ALSO always `entries: {}` — a
+  # concrete destination names a real downstream system and belongs in
+  # neither the chart defaults nor the bundle image. A deployment that wants
+  # one supplies it here, in its OWN values file, outside this chart's repo.
+  #
+  # Non-empty `entries` renders one ConfigMap
+  # (`<release>-destinations-deployment`), mounted into every topaz's
+  # policy-loader (optional, so a tier that predates this feature still
+  # starts) and folded into openddil.policyChecksum, so a registry change
+  # rolls every topaz that reads it. Topaz reads policy only at process
+  # start — there is no hot reload yet.
+  #
+  # Shape, per entry (same idea as a users.yaml row, see that file's header):
+  #   "system:<name>": {display_name, nations: [...], accepts: [...],
+  #                      asserted_by, asserted_on}
+  destinations:
+    version: ""
+    entries: {}
+
   # --- authentication ---------------------------------------------------------
   # OFF by default, which leaves the PEP in `header` mode: the subject arrives
   # in a trusted header and the PEP is only safe where it is unreachable from

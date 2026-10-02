@@ -1635,7 +1635,7 @@ spec:
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list (toJson $root.Values.releasability.destinations))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -1683,11 +1683,39 @@ spec:
               mkdir -p /shared/policy/openddil
               cp "$src" /shared/policy/openddil/data.yaml
               echo "tier {{ $tier.id }} corpus: ${OPENDDIL_POLICY_VARIANT}.yaml"
+              # THE SHIPPED DESTINATION REGISTRY (ADR-0046 §7). Always ships
+              # `entries: {}` — concrete destinations are a deployment
+              # overlay, never chart-default content. ABSENT IS ALSO LEGAL:
+              # an older bundle built before this file existed must still
+              # start, so a missing file here is a smaller shipped surface,
+              # not the FATAL the missing entitlements corpus is above.
+              if [ -f /bundle/demo/policy/destinations.yaml ]; then
+                mkdir -p /shared/policy/openddil/destinations
+                cp /bundle/demo/policy/destinations.yaml /shared/policy/openddil/destinations/data.yaml
+                echo "tier {{ $tier.id }} destinations registry (shipped): present"
+              else
+                echo "tier {{ $tier.id }} destinations registry (shipped): none in this bundle"
+              fi
+              # THE DEPLOYMENT'S OWN OVERLAY, mounted as a ConfigMap only when
+              # releasability.destinations.entries is non-empty (optional, so
+              # its absence is not an error either).
+              if [ -f /destinations-deployment/data.yaml ]; then
+                mkdir -p /shared/policy/openddil/destinations_deployment
+                cp /destinations-deployment/data.yaml /shared/policy/openddil/destinations_deployment/data.yaml
+                echo "tier {{ $tier.id }} destinations registry (deployment overlay): present"
+              else
+                echo "tier {{ $tier.id }} destinations registry (deployment overlay): none"
+              fi
           resources:
             {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /shared
+            {{- if $root.Values.releasability.destinations.entries }}
+            - name: destinations-deployment
+              mountPath: /destinations-deployment
+              readOnly: true
+            {{- end }}
       {{- end }}
       containers:
         - name: topaz
@@ -1744,6 +1772,12 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.topaz.policyVolumeSize }}
+        {{- if $root.Values.releasability.destinations.entries }}
+        - name: destinations-deployment
+          configMap:
+            name: {{ $root.Release.Name }}-destinations-deployment
+            optional: true
+        {{- end }}
         {{- else }}
         - name: policy
           configMap:

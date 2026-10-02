@@ -144,7 +144,7 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list (toJson $root.Values.releasability.destinations))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -209,11 +209,39 @@ spec:
               mkdir -p /shared/policy/openddil
               cp "$src" /shared/policy/openddil/data.yaml
               echo "entitlements corpus: ${OPENDDIL_POLICY_VARIANT}.yaml -> /policy/openddil/data.yaml"
+              # THE SHIPPED DESTINATION REGISTRY (ADR-0046 §7). Always ships
+              # `entries: {}` — concrete destinations are a deployment
+              # overlay, never chart-default content. ABSENT IS ALSO LEGAL:
+              # an older bundle built before this file existed must still
+              # start, so a missing file here is a smaller shipped surface,
+              # not the FATAL the missing entitlements corpus is above.
+              if [ -f /bundle/demo/policy/destinations.yaml ]; then
+                mkdir -p /shared/policy/openddil/destinations
+                cp /bundle/demo/policy/destinations.yaml /shared/policy/openddil/destinations/data.yaml
+                echo "destinations registry (shipped): present"
+              else
+                echo "destinations registry (shipped): none in this bundle"
+              fi
+              # THE DEPLOYMENT'S OWN OVERLAY, mounted as a ConfigMap only when
+              # releasability.destinations.entries is non-empty (optional, so
+              # its absence is not an error either).
+              if [ -f /destinations-deployment/data.yaml ]; then
+                mkdir -p /shared/policy/openddil/destinations_deployment
+                cp /destinations-deployment/data.yaml /shared/policy/openddil/destinations_deployment/data.yaml
+                echo "destinations registry (deployment overlay): present"
+              else
+                echo "destinations registry (deployment overlay): none"
+              fi
           resources:
             {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
           volumeMounts:
             - name: bundle-shared
               mountPath: /shared
+            {{- if $root.Values.releasability.destinations.entries }}
+            - name: destinations-deployment
+              mountPath: /destinations-deployment
+              readOnly: true
+            {{- end }}
       containers:
         - name: topaz
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.topaz.image.repository "tag" $root.Values.releasability.topaz.image.tag "digest" $root.Values.releasability.topaz.image.digest "root" $root) }}
@@ -252,6 +280,12 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.topaz.policyVolumeSize }}
+        {{- if $root.Values.releasability.destinations.entries }}
+        - name: destinations-deployment
+          configMap:
+            name: {{ $root.Release.Name }}-destinations-deployment
+            optional: true
+        {{- end }}
         - name: db
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.topaz.dbVolumeSize }}
@@ -429,6 +463,24 @@ metadata:
     {{- include "openddil.labels" $root | nindent 4 }}
 data:
   cm-fault-codes.json: {{ toJson $root.Values.cmReports.faultCodes | quote }}
+{{- end }}
+{{- if $root.Values.releasability.destinations.entries }}
+---
+# THE DEPLOYMENT'S OWN DESTINATION REGISTRY OVERLAY (ADR-0046 §7). Rendered
+# only when a deployment supplies entries — the shipped chart default is
+# `entries: {}`, which renders no ConfigMap at all. Shared by every topaz
+# that mounts it -- topaz-hq and every tier-topaz -- so there is exactly one
+# overlay, not one per tier. `optional: true` on the mount, because a tier
+# that got rolled before this ConfigMap existed must still start.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-destinations-deployment
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  data.yaml: |
+    {{- toYaml (dict "version" $root.Values.releasability.destinations.version "entries" $root.Values.releasability.destinations.entries) | nindent 4 }}
 {{- end }}
 {{- if $root.Values.releasability.oidc.enabled }}
 ---
