@@ -74,15 +74,19 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 8 }}
-      {{- if or .Values.egress.routes .Values.egress.kinds }}
       annotations:
+        # The gate resolves each route's destination from topaz-hq once, at
+        # startup, so a registry change must restart it too. Same inputs as
+        # topaz-hq's checksum/policy: both roll on exactly the same upgrades.
+        # Rolling together does not order them: a gate that starts before the
+        # new topaz-hq serves still resolves against the old registry.
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list (toJson .Values.releasability.destinations))) | sha256sum | quote }}
         {{- if .Values.egress.routes }}
         checksum/routes: {{ $routesJSON | sha256sum | quote }}
         {{- end }}
         {{- if .Values.egress.kinds }}
         checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
         {{- end }}
-      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

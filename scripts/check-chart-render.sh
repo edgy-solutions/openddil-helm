@@ -299,6 +299,40 @@ sys.exit(1 if bad else 0)
   [ "$status" -ne 0 ] && fail=1
 done
 
+# Guard 6: the egress gate resolves each route's destination from topaz-hq
+# once, at startup. A registry change that rolls topaz-hq but not the gate
+# leaves the gate on the old registry (an unknown destination, nations=[]),
+# with nothing failing loudly. The gate must carry the same registry checksum
+# as topaz-hq, and that checksum must move when the destinations registry moves.
+# Defect model: drop checksum/registries from the gate, or key it to something
+# other than releasability.destinations.
+echo
+echo "guard 6: egress gate rolls with the destinations registry"
+g6() { render --set releasability.enabled=true "$@" | "$PY" -c '
+import sys, yaml
+want = {"openddil-egress-gate-c2": "checksum/registries", "openddil-topaz-hq": "checksum/policy"}
+got = {}
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Deployment":
+        n = d["metadata"]["name"].replace("t-", "openddil-", 1)
+        if n in want:
+            got[n] = ((d["spec"]["template"]["metadata"].get("annotations") or {}).get(want[n]) or "")
+print(" ".join(got.get(n, "") or "MISSING" for n in want))
+'; }
+read -r g6_gate g6_topaz <<<"$(g6)"
+read -r g6_gate2 g6_topaz2 <<<"$(g6 --set releasability.destinations.version=guard6-changed)"
+if [ "$g6_gate" = MISSING ] || [ "$g6_topaz" = MISSING ] || [ -z "$g6_gate" ]; then
+  echo "  FAIL: gate=$g6_gate topaz-hq=$g6_topaz -- an annotation is missing (or neither rendered: vacuous)"; fail=1
+elif [ "$g6_gate" != "$g6_topaz" ]; then
+  echo "  FAIL: gate checksum/registries ($g6_gate) != topaz-hq checksum/policy ($g6_topaz)"; fail=1
+elif [ "$g6_gate2" = "$g6_gate" ]; then
+  echo "  FAIL: changing releasability.destinations did not change the gate's checksum/registries"; fail=1
+elif [ "$g6_gate2" != "$g6_topaz2" ]; then
+  echo "  FAIL: after a destinations change, gate ($g6_gate2) != topaz-hq ($g6_topaz2)"; fail=1
+else
+  echo "  ok   : gate == topaz-hq, and both move with releasability.destinations"
+fi
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
