@@ -894,6 +894,23 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.egress.tak.port }}
+{{- if $root.Values.egress.tak.tls.enabled }}
+    # THE MUTUAL-TLS PORT IS DELIBERATELY NOT READERS-ONLY. The rule above
+    # scopes 8087 (plaintext CoT) to the adapter and declared in-namespace
+    # readers because taky has no admission control of its own on that
+    # port. The TLS port is admission-controlled BY THE GHOSTUNNEL SIDECAR
+    # in front of it (client cert signed by the configured CA AND CN in
+    # `allowedClientCNs`), not by this policy -- so "any source" here is
+    # correct, not an oversight: narrowing `from` on this rule would add a
+    # SECOND gate in front of a port that is already the cluster's one
+    # legitimate way for an outside device onto this audience, for no
+    # additional safety (an outside device has no podSelector label to
+    # match anyway). Same audience rule still applies once past the
+    # sidecar: see the comment on the sidecar container itself.
+    - ports:
+        - protocol: TCP
+          port: {{ $root.Values.egress.tak.tls.port }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

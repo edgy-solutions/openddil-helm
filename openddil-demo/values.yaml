@@ -836,6 +836,43 @@ egress:
     resources:
       requests: { cpu: 50m,  memory: 128Mi }
       limits:   { cpu: 300m, memory: 256Mi }
+    # Mutual-TLS listener for ONE device class reaching this TAK server from
+    # outside the cluster (a phone or laptop running ATAK/WinTAK). taky
+    # itself stays plaintext on `port` above, unchanged -- this is a
+    # ghostunnel sidecar in the SAME pod that terminates TLS on its own port
+    # and forwards to 127.0.0.1:<tak.port>. Inert by default: rendering
+    # needs `egress.tak.enabled` AND `tls.enabled` together, and the render
+    # `fail`s if either `secretName` or `allowedClientCNs` is still empty
+    # once tls.enabled is true -- a half-configured listener (a port open
+    # with no way to admit anyone, or a port open admitting everyone CA-only)
+    # is not a safe default to render quietly.
+    #
+    # THE AUDIENCE RULE: a device admitted here receives this TAK server's
+    # entire picture -- the same undifferentiated audience egress.destination
+    # already defines for every other reader (see releasability.yaml's
+    # `<rel>-tak-server-readers-only` NetworkPolicy comment). Admitting a
+    # device's CN admits it to that audience; there is no per-device filter
+    # downstream of this listener.
+    tls:
+      enabled: false
+      port: 8089
+      secretName: ""          # Secret keys: server.pem, server.key, ca.pem
+      allowedClientCNs: []    # e.g. ["demo-device-01"]
+      service:
+        type: LoadBalancer
+      proxy:
+        image:
+          # Pinned by digest, same convention as redpandaEdge/redpandaHq/etc
+          # above: `docker.io` repository + released tag recorded for
+          # security-team review, `digest:` the content hash actually
+          # pulled. Resolved 2026-10-02 from the registry (docker-content-
+          # digest for the v1.11.3 multi-arch manifest list).
+          repository: ghostunnel/ghostunnel
+          tag: "v1.11.3"
+          digest: "sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f"
+        resources:
+          requests: { cpu: 10m,  memory: 32Mi }
+          limits:   { cpu: 200m, memory: 64Mi }
   # --- extra routes, kinds, the assembler, the forwarder, the stub sink ---
   # All off/empty by default, so a deployment that sets none of these
   # renders this chart's egress.yaml exactly as it rendered before any of

@@ -780,6 +780,182 @@ for variant in "default:" "default-upgrade:--is-upgrade" "tiernode-all:--set tie
   [ "$status" -ne 0 ] && fail=1
 done
 
+
+# --- guard 9: TAK mutual-TLS sidecar --------------------------------------
+# THE SHAPE BEING GUARDED: taky (egress.tak) stays plaintext on its own port
+# always; a ghostunnel sidecar terminating mutual TLS is strictly OPT IN
+# (egress.tak.tls.enabled), and even then only renders with BOTH a cert
+# Secret name and at least one admitted CN -- a half-configured listener
+# (open port, no way to admit or refuse anyone) must never render quietly.
+echo
+echo "guard 9: TAK mutual-TLS sidecar"
+
+echo "  9a: default render, and tak-enabled-without-tls, carry no trace of it"
+for g9a_variant in "default:" \
+    "tak-only:--set releasability.enabled=true --set releasability.lockDownElectric=true --set egress.tak.enabled=true"; do
+  vname="${g9a_variant%%:*}"
+  vargs="${g9a_variant#*:}"
+  # shellcheck disable=SC2086
+  g9a_out=$(render $vargs | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+bad = []
+for d in docs:
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    kind = d.get("kind")
+    name = (d.get("metadata") or {}).get("name", "")
+    for c in pod.get("containers") or []:
+        if c.get("name") == "tls-proxy":
+            bad.append(f"tls-proxy container on {kind}/{name}")
+    if kind == "Service" and name.endswith("-tak-server-tls"):
+        bad.append(f"Service {name}")
+    if kind == "NetworkPolicy":
+        for rule in (d.get("spec") or {}).get("ingress") or []:
+            for p in rule.get("ports") or []:
+                if p.get("port") == 8089:
+                    bad.append(f"NetworkPolicy {name} has port 8089")
+if bad:
+    print("FAIL: " + "; ".join(bad)); sys.exit(1)
+print("ok: no tls-proxy container, no -tak-server-tls Service, no 8089 in any NetworkPolicy")
+')
+  status=$?
+  printf '%s\n' "$g9a_out" | sed "s/^/  [$vname] 9a: /"
+  [ "$status" -ne 0 ] && fail=1
+done
+
+TAK_ARGS="--set releasability.enabled=true --set releasability.lockDownElectric=true --set egress.tak.enabled=true"
+TLS_ARGS="$TAK_ARGS --set egress.tak.tls.enabled=true --set egress.tak.tls.secretName=guard9-secret --set-json egress.tak.tls.allowedClientCNs=[\"guard9-cn-a\",\"guard9-cn-b\"]"
+
+g9_rule87() { "$PY" -c '
+import sys, yaml, json
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+for d in docs:
+    if d.get("kind") == "NetworkPolicy" and (d.get("metadata") or {}).get("name", "").endswith("-tak-server-readers-only"):
+        for rule in (d.get("spec") or {}).get("ingress") or []:
+            if any(p.get("port") == 8087 for p in (rule.get("ports") or [])):
+                print(json.dumps(rule, sort_keys=True)); sys.exit(0)
+print("MISSING")
+'; }
+# shellcheck disable=SC2086
+g9_rule_tak=$(render $TAK_ARGS | g9_rule87)
+# shellcheck disable=SC2086
+g9_rule_tls=$(render $TLS_ARGS | g9_rule87)
+if [ "$g9_rule_tak" = MISSING ] || [ "$g9_rule_tls" = MISSING ]; then
+  echo "  FAIL [9b]: readers-only 8087 rule missing in one of the two renders (tak-only or tak+tls)"; fail=1
+elif [ "$g9_rule_tak" != "$g9_rule_tls" ]; then
+  echo "  FAIL [9b]: the readers-only 8087 rule differs between tak-only and tak+tls renders"
+  echo "    tak-only: $g9_rule_tak"
+  echo "    tak+tls : $g9_rule_tls"
+  fail=1
+else
+  echo "  ok   [9b]: readers-only 8087 rule is byte-for-byte identical with TLS on or off"
+fi
+
+# shellcheck disable=SC2086
+render $TLS_ARGS | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+bad = []
+sidecar = None
+for d in docs:
+    if d.get("kind") == "Deployment" and (d.get("metadata") or {}).get("name", "").endswith("-tak-server"):
+        for c in d["spec"]["template"]["spec"].get("containers") or []:
+            if c.get("name") == "tls-proxy":
+                sidecar = c
+if sidecar is None:
+    print("  FAIL [9c]: no tls-proxy sidecar in the tak-server Deployment"); sys.exit(1)
+args = sidecar.get("args") or []
+for cn in ("guard9-cn-a", "guard9-cn-b"):
+    if not any(a == "--allow-cn" and i + 1 < len(args) and args[i + 1] == cn for i, a in enumerate(args)):
+        bad.append(f"no --allow-cn {cn}")
+if "127.0.0.1:8087" not in args:
+    bad.append("sidecar does not target 127.0.0.1:<tak.port>")
+tls_svc = next((d for d in docs if d.get("kind") == "Service"
+                 and (d.get("metadata") or {}).get("name", "").endswith("-tak-server-tls")), None)
+if tls_svc is None:
+    bad.append("no -tak-server-tls Service rendered")
+elif not any(p.get("port") == 8089 for p in tls_svc["spec"]["ports"]):
+    svc_ports = tls_svc["spec"]["ports"]
+    bad.append(f"TLS Service port != tls.port (8089): {svc_ports}")
+rule_count = 0
+for d in docs:
+    if d.get("kind") == "NetworkPolicy" and (d.get("metadata") or {}).get("name", "").endswith("-tak-server-readers-only"):
+        for rule in (d.get("spec") or {}).get("ingress") or []:
+            if any(p.get("port") == 8089 for p in (rule.get("ports") or [])):
+                rule_count += 1
+if rule_count != 1:
+    bad.append(f"expected exactly one ingress rule on tls.port (8089), found {rule_count}")
+if bad:
+    print("  FAIL [9c]: " + "; ".join(bad)); sys.exit(1)
+print("  ok   [9c]: sidecar carries --allow-cn per CN and targets 127.0.0.1:8087; TLS Service on 8089; exactly one NetworkPolicy rule on 8089")
+' || fail=1
+
+g9_fail_check() {
+  local desc="$1"; shift
+  local err status
+  err=$(helm template t "$CHART" "$@" 2>&1 >/dev/null)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "  FAIL [9d]: $desc did not fail the render"
+    fail=1
+  else
+    echo "  ok   [9d]: $desc fails the render ($(printf '%s' "$err" | grep -m1 'egress.tak.tls' | sed 's/^Error: execution error at.*: //'))"
+  fi
+}
+g9_fail_check "empty secretName" --set releasability.enabled=true --set egress.tak.enabled=true \
+  --set egress.tak.tls.enabled=true --set-json 'egress.tak.tls.allowedClientCNs=["guard9-cn"]'
+g9_fail_check "empty allowedClientCNs" --set releasability.enabled=true --set egress.tak.enabled=true \
+  --set egress.tak.tls.enabled=true --set egress.tak.tls.secretName=guard9-secret
+
+# --- guard 10: hub frontend deployment-config carries the egress pane ------
+# ---           destination (wiring committed in 6f17554) ------------------
+# Persists the check that was run once by hand when 6f17554 landed:
+# releasability.enabled=true must put the SAME egress.destination the gate
+# and topaz-hq already use into the hub frontend's deployment.json, as valid
+# JSON, under egressPane.destination -- and a default render must carry no
+# such ConfigMap at all (nothing for a non-releasability deployment to leak).
+echo
+echo "guard 10: hub frontend deployment-config carries the egress pane destination"
+
+render | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+bad = [d["metadata"]["name"] for d in docs
+       if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
+if bad:
+    print("  FAIL [10 default]: default render has a hub deployment-config ConfigMap: " + ", ".join(bad)); sys.exit(1)
+print("  ok   [10 default]: no hub frontend-deployment-config ConfigMap by default")
+' || fail=1
+
+g10_dest() { render --set releasability.enabled=true "$@" | "$PY" -c '
+import sys, yaml, json
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config"):
+        try:
+            parsed = json.loads(d["data"]["deployment.json"])
+        except Exception as e:
+            print("PARSE_ERROR:" + str(e)); sys.exit(0)
+        print((parsed.get("egressPane") or {}).get("destination") or "MISSING")
+        sys.exit(0)
+print("NO_CONFIGMAP")
+'; }
+g10_default_dest=$(g10_dest)
+g10_changed_dest=$(g10_dest --set egress.destination=guard10-changed-destination)
+case "$g10_default_dest$g10_changed_dest" in
+  *PARSE_ERROR:*)
+    echo "  FAIL [10 enabled]: deployment.json did not parse as JSON ($g10_default_dest / $g10_changed_dest)"; fail=1 ;;
+  *NO_CONFIGMAP*)
+    echo "  FAIL [10 enabled]: no hub frontend-deployment-config ConfigMap with releasability.enabled=true"; fail=1 ;;
+  *)
+    if [ "$g10_changed_dest" != "guard10-changed-destination" ]; then
+      echo "  FAIL [10 enabled]: egressPane.destination ($g10_changed_dest) did not follow an egress.destination override"
+      fail=1
+    else
+      echo "  ok   [10 enabled]: deployment.json parses; egressPane.destination == egress.destination ($g10_default_dest by default, follows overrides)"
+    fi
+    ;;
+esac
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

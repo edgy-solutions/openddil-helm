@@ -604,6 +604,16 @@ single undifferentiated picture scoped to this destination's own audience.
 */}}
 {{- $takImage := include "openddil.image" (dict "name" .Values.egress.tak.image.name "tag" .Values.egress.tak.image.tag "digest" .Values.egress.tak.image.digest "root" .) }}
 {{- $takPullPolicy := include "openddil.pullPolicy" (dict "policy" .Values.egress.tak.image.pullPolicy "root" .) }}
+{{- $tlsCfg := .Values.egress.tak.tls }}
+{{- if $tlsCfg.enabled }}
+{{- if not $tlsCfg.secretName }}
+{{- fail "egress.tak.tls.enabled requires egress.tak.tls.secretName (Secret keys: server.pem, server.key, ca.pem)" }}
+{{- end }}
+{{- if not $tlsCfg.allowedClientCNs }}
+{{- fail "egress.tak.tls.enabled requires at least one entry in egress.tak.tls.allowedClientCNs" }}
+{{- end }}
+{{- end }}
+{{- $tlsImage := include "openddil.thirdPartyImage" $tlsCfg.proxy.image }}
 ---
 apiVersion: v1
 kind: Service
@@ -636,6 +646,15 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 8 }}
+      {{- if $tlsCfg.enabled }}
+      annotations:
+        # Rolls the pod when the admitted-CN list or the cert Secret NAME
+        # changes -- not the Secret's content, which this chart never reads.
+        # A CN removed here and a pod left running on the old ghostunnel
+        # --allow-cn list would keep admitting a "revoked" device until the
+        # next unrelated rollout; this annotation makes removal self-enforcing.
+        checksum/tak-tls: {{ printf "%s/%s" $tlsCfg.secretName (toJson $tlsCfg.allowedClientCNs) | sha256sum | quote }}
+      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -669,6 +688,95 @@ spec:
           # until the adapter's next records repopulate it — seconds on a
           # live hub — which is why no volume is mounted here: there is
           # nothing durable to mount.
+        {{- if $tlsCfg.enabled }}
+        # tls-proxy — a ghostunnel sidecar, NOT a change to taky. taky stays
+        # plaintext on `egress.tak.port` exactly as above; this terminates
+        # mutual TLS on its own port and forwards over loopback, which the
+        # readers-only NetworkPolicy does not see (loopback never crosses a
+        # pod's network namespace boundary) -- so 8087 stays scoped to the
+        # adapter and declared in-namespace readers exactly as before, and
+        # only this port is what opens to a source outside the cluster.
+        #
+        # WHY A SIDECAR, NOT TLS IN TAKY ITSELF: taky 0.10 has no per-client
+        # admission of its own (router.send_persist broadcasts to every
+        # connected socket -- see the file-level comment above), so putting
+        # TLS in taky would still leave "anyone with a client cert from the
+        # right CA" as the whole admission check. ghostunnel's --allow-cn
+        # gets per-CN admission without touching taky: revoking a device is
+        # removing its CN from `allowedClientCNs` and upgrading, not a code
+        # change or a taky restart that drops the in-memory picture.
+        #
+        # THE AUDIENCE RULE (repeated at the point it bites): admitting a
+        # CN here admits that device to everything this TAK server's
+        # audience receives -- the same one-destination, no-per-client-
+        # filter picture egress.destination already defines for every other
+        # reader of port 8087.
+        - name: tls-proxy
+          image: {{ $tlsImage }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" "" "root" .) }}
+          args:
+            - server
+            - --listen
+            - {{ printf "0.0.0.0:%d" (int $tlsCfg.port) | quote }}
+            - --target
+            - {{ printf "127.0.0.1:%d" (int .Values.egress.tak.port) | quote }}
+            - --cert
+            - /certs/server.pem
+            - --key
+            - /certs/server.key
+            - --cacert
+            - /certs/ca.pem
+            {{- range $tlsCfg.allowedClientCNs }}
+            - --allow-cn
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: tak-tls
+              containerPort: {{ $tlsCfg.port }}
+          readinessProbe:
+            tcpSocket: { port: {{ $tlsCfg.port }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: {{ $tlsCfg.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml $tlsCfg.proxy.resources | nindent 12 }}
+          volumeMounts:
+            - name: tak-tls-certs
+              mountPath: /certs
+              readOnly: true
+        {{- end }}
+      {{- if $tlsCfg.enabled }}
+      volumes:
+        - name: tak-tls-certs
+          secret:
+            secretName: {{ $tlsCfg.secretName }}
+      {{- end }}
+{{- if $tlsCfg.enabled }}
+---
+# External mTLS entry point for the sidecar above. The existing ClusterIP
+# Service (`{{ .Release.Name }}-tak-server`, port {{ .Values.egress.tak.port }}) is unchanged --
+# this is an ADDITIONAL Service, selecting the SAME pod, on the TLS port only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-tak-server-tls
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  type: {{ $tlsCfg.service.type }}
+  ports:
+    - port: {{ $tlsCfg.port }}
+      targetPort: tak-tls
+      name: tak-tls
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "tak-server" "root" .) | nindent 4 }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
