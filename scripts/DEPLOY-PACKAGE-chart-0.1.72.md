@@ -1,19 +1,29 @@
-# Deploy package — chart `openddil-demo-0.1.71` at `openddil-helm@458d39b`
+# Deploy package — chart `openddil-demo-0.1.72` (`openddil-helm@2642988`)
 
 > **This supersedes `DEPLOY-PACKAGE-chart-0.1.68.md` as the procedure.** §2 of that file still holds
 > for every row this file does not replace. §2.9 here lists which rows those are. Where the two
 > disagree, this one was written later and against later measurements.
 
 Baseline is **chart 0.1.63** (`openddil-helm@b8dd645`), the version the work cluster runs. Target is
-**`openddil-helm@458d39b`**.
+**chart 0.1.72**:
+- `oci://ghcr.io/edgy-solutions/openddil/charts/openddil-demo:0.1.72`;
+- digest `sha256:ce0d29450faf70780ae5c11cd09a989d3f7648aa23bf0aa2cc3a3a2e16e360f6`;
+- built from `openddil-helm@2642988`.
 
-**Pin the commit, not the version string.** The chart reads `0.1.71`, but ten chart commits landed after
-the 0.1.71 bump (`91c1758`) without bumping it, so two different charts carry the same string. Until the
-string is bumped, `0.1.71` alone does not identify what you are installing. Quote the commit in every
-prediction and every change record.
+**The version string identifies the chart again.**
+- 0.1.72 is the templates of `458d39b` under a new version string. `git diff 458d39b 2642988 -- openddil-demo`
+  is one line, in `Chart.yaml`.
+- Pod templates carry no chart label, so moving from `458d39b` to 0.1.72 rolls nothing.
+- Ten chart commits had landed after the 0.1.71 bump (`91c1758`) without bumping it. The publish workflow
+  overwrites the OCI tag on a same-version push, so the `0.1.71` tag was replaced ten times.
+- Do not install `0.1.71` by tag. What it held depended on when it was pulled.
+- Quote the version and the digest in every prediction and every change record.
 
-The lab has been on `458d39b` since 2026-10-03 (lab revision 77), and all six predicted sections
-matched. It took the commits one at a time (revisions 69–77), never the whole jump at once. The jump
+This file was the 0.1.71 package (pinned to `458d39b`). It was renamed when the version string was bumped. Every
+render and measurement in it was taken at `458d39b`, which carries the same templates.
+
+The lab has been on `458d39b` since 2026-10-03 (lab revision 77, deployed under the string 0.1.71), and all
+six predicted sections matched. It took the commits one at a time (revisions 69–77), never the whole jump at once. The jump
 work makes is therefore a **render** here and has not been measured.
 
 Every count in this file is either a **render** (produced from the repository, reproducible on any
@@ -140,8 +150,9 @@ The changes from 0.1.63 to 0.1.68 are in the 0.1.68 package §1 and are not repe
 | `9bc7145` | (0.1.71) | The schema/topic-init hook phase is chosen per backend at render time (§2.2, guard 8) |
 | `81e8570` | (0.1.71) | Mutual-TLS listener for TAK devices, admitted per certificate CN (§2.4, guards 9 and 10) |
 | `458d39b` | (0.1.71) | A destination's client secret mounts from an existing Secret and is never rendered (§2.5, guard 11) |
+| `2642988` | 0.1.72 | The version string only; no template changes |
 
-`scripts/check-chart-render.sh` passes all 11 guards on `458d39b`. Each guard added in this range was
+`scripts/check-chart-render.sh` passes all 11 guards on `458d39b` and on `2642988`. Each guard added in this range was
 made to fail on purpose by breaking the template it covers.
 
 **Bundle of record (lab, 2026-10-03, revisions 76–77):** runtime-bundle
@@ -276,8 +287,9 @@ Measured on the lab, revision 77 (2026-10-03):
 - a connection without a certificate was refused (`certificate required`);
 - plaintext from outside was refused.
 
-The picture includes destroyed assets. On the lab, the one destroyed asset is still a track. A brief
-that says "8 tracks" will count 9.
+The picture includes destroyed assets, and that is the design. Operational status and reporting
+status are separate columns, so a destroyed asset that is still reporting stays a track and reads
+destroyed. The lab's 9 tracks (`1000`–`1008`, with `1005` destroyed) is the correct count.
 
 ### 2.5 Pre-deploy: a destination's client secret (only if a route or poll carries `auth`)
 
@@ -339,8 +351,11 @@ withheld (unlabelled, shown to nobody).
 
 0.1.68 §2.8 said that the reset was not yet proven end to end. **That line is replaced.**
 
-**It round-tripped on the lab at `458d39b` on 2026-10-03**, with `scripts/reset-scenario.sh` unchanged since
-`b7f4ff7` (an earlier round trip on 2026-10-01 at 0.1.68 gave the same shape).
+**It round-tripped on the lab at `458d39b` on 2026-10-03, twice.**
+- The first run used `scripts/reset-scenario.sh` unchanged since `b7f4ff7`, and is described in the list below. An
+  earlier round trip on 2026-10-01 at 0.1.68 gave the same shape.
+- The second run, the same day, used `329dfc0`, which brings `intake_records` into the reset. It is described after
+  the gaps table.
 
 - The red check ran first. `--verify-only` against the live store gave rc=1 with 163 FAIL, so the zero
   assertion can fail.
@@ -369,17 +384,32 @@ withheld (unlabelled, shown to nobody).
     sees it as a re-send.
 - The five pre-flight checks passed afterwards.
 
-What the reset does **not** cover, as measured on that run:
+What the reset does **not** cover, as of `329dfc0`:
 
 | state | reset today | effect |
 |---|---|---|
-| `intake_records` (hub store) | not in the reset's table list | survived the reset with its rows; phase 8 does not look at it |
-| the stub sink's received log (emptyDir) | outside the reset | survives a reset until that pod restarts |
+| the stub sink's received log (emptyDir) | outside the reset, on purpose | the stub stands in for an external destination, which keeps what it was sent; the log survives until that pod restarts |
 | the TAK server's in-memory picture | outside the reset; the CoT adapter is quiesced and restarts | the server keeps running; its replay history after a reset is shorter |
 | reported faults (Restate) | cleared | a filed report is gone after a reset and must be filed again; telemetry-derived faults come back on their own |
 
-Whether `intake_records` belongs in the reset is open. Until it is decided, a reset at work leaves returned
-artifacts in place.
+**`intake_records` is in the reset from `329dfc0`.** Phase 6 deletes it, and phase 8 asserts it at zero on every
+postgres. `egress-intake` is quiesced with the producers, down in phase 2 and back in phase 9. It reads its answers
+topic by assignment with no committed group, so the consumer census cannot derive it; it is matched by name.
+
+Measured on the lab, second run (2026-10-03):
+- **The red check.** `--verify-only` before the run gave rc=1, and the hub's `intake_records` line failed with
+  4 rows. The new assertion can fail.
+- **The run.** rc=1, with phase 8 at 631 PASS and 1 FAIL: the same aggregator line. `intake_records` read 0
+  on all four stores while quiesced.
+- **After the restore,** the intake re-polled the destination's returned artifacts, and **3 of the 4** rows
+  came back.
+  - The fourth artifact answers an event that existed only because a fault report had been filed. The reset
+    clears filed reports, so that event is gone.
+  - The intake now defers that artifact on every poll. It should refuse it as `answered_record_unknown`.
+  - The intake's caught-up test never passes on an answers topic whose partitions are empty after the reset.
+    This is open against the intake, not the reset.
+- **Everything else** matched the first run: the fleet, rollups, logins, panes, TAK picture and egress
+  event, and the five pre-flight checks after.
 
 ### 2.9 Still true from the 0.1.68 package §2
 
@@ -399,8 +429,8 @@ artifacts in place.
 - [ ] `kubectl config current-context` is the work cluster, and `.expected-context` was set deliberately
 - [ ] `helm get values "$REL" -n "$NS" > values-before.yaml` — **keep it**
 - [ ] `helm history "$REL" -n "$NS" | tail -3` — the 0.1.63 revision is there to roll back to
-- [ ] The chart is checked out at `458d39b`, and `git -C openddil-helm rev-parse --short HEAD` says so
-      (the version string cannot tell you)
+- [ ] The chart is 0.1.72, either pulled by tag with the digest from the top of this file, or checked out at
+      `2642988` or later with `openddil-demo/Chart.yaml` reading `0.1.72`
 - [ ] G1 routing: every node ok
 - [ ] G2 pull credentials: PASS with the exact `-f` files the upgrade will pass
 - [ ] G3 cluster config: result recorded
