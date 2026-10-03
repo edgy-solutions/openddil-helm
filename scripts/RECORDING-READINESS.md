@@ -102,10 +102,10 @@ stores held unlabelled rows. `--root-only` is now the thing you ask for.
 
 | endpoint | evidence |
 |---|---|
-| `openddil.cortex.edgy-solutions.com` | ingress rule present, root/HQ |
-| `edge-01.openddil.cortex.edgy-solutions.com` | ingress rule present |
-| `edge-02.openddil.cortex.edgy-solutions.com` | ingress rule present |
-| `region-east.openddil.cortex.edgy-solutions.com` | ingress rule present |
+| `<hub-host>` | ingress rule present, root/HQ |
+| `edge-01.<hub-host>` | ingress rule present |
+| `edge-02.<hub-host>` | ingress rule present |
+| `region-east.<hub-host>` | ingress rule present |
 
 **DNS is the operator's step.** All four must resolve to the ingress IP
 (`192.168.1.230`). If a screen does not load, check DNS before the cluster.

@@ -53,10 +53,12 @@ Separate browser profiles, not tabs — they need separate cookies.
 
 | profile | URL | login |
 |---|---|---|
-| **HQ** | `openddil.cortex.edgy-solutions.com` | `liaison.coalition` / `demo` |
-| **Region** | `region-east.openddil.cortex.edgy-solutions.com` | `operator.regioneast` / `demo` |
-| **Edge-01** | `edge-01.openddil.cortex.edgy-solutions.com` | `operator.atlantia` / `demo` |
-| **Edge-02** | `edge-02.openddil.cortex.edgy-solutions.com` | `operator.borduria` / `demo` |
+| **HQ** | `<hub-host>` | `liaison.coalition` / `demo` |
+| **Region** | `region-east.<hub-host>` | `operator.regioneast` / `demo` |
+| **Edge-01** | `edge-01.<hub-host>` | `operator.atlantia` / `demo` |
+| **Edge-02** | `edge-02.<hub-host>` | `operator.borduria` / `demo` |
+
+`<hub-host>` is the deployment's hub ingress host; each tier is served at `<tier>.<hub-host>`.
 
 **All four must be logged in before the first cut.** Keycloak is at the root;
 a severed tier cannot mint sessions.
