@@ -1084,3 +1084,17 @@ mappings:
     mode: upsert
 {{- end }}
 {{- end }}
+
+{{/*
+The hub frontend's deployment.json: configured released-records panes, plus
+the egress admission pane when releasability is on (the pane is then served
+through the hub PEP). One definition, so the ConfigMap and the pod's
+checksum annotation cannot disagree.
+*/}}
+{{- define "openddil.frontendDeploymentJson" -}}
+{{- $d := dict "releasedRecordsPanes" (.Values.frontend.releasedRecordsPanes | default list) -}}
+{{- if .Values.releasability.enabled -}}
+{{- $_ := set $d "egressPane" (dict "destination" .Values.egress.destination) -}}
+{{- end -}}
+{{- toJson $d -}}
+{{- end -}}

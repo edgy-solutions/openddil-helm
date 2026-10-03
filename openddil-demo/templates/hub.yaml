@@ -995,9 +995,9 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
-      {{- if .Values.frontend.releasedRecordsPanes }}
+      {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
       annotations:
-        checksum/deployment-config: {{ toJson .Values.frontend.releasedRecordsPanes | sha256sum | quote }}
+        checksum/deployment-config: {{ include "openddil.frontendDeploymentJson" . | sha256sum | quote }}
       {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
@@ -1068,7 +1068,7 @@ spec:
             - name: branding
               mountPath: /usr/share/nginx/html/branding
               readOnly: true
-            {{- if .Values.frontend.releasedRecordsPanes }}
+            {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
             # Only the hub view gets this: the tier frontends (tier-node.yaml)
             # have their own deployment.json carrying tier shape, not this.
             - name: deployment-config
@@ -1080,7 +1080,7 @@ spec:
           configMap:
             name: {{ .Values.frontend.branding.configMap | default (printf "%s-branding" .Release.Name) }}
             optional: true
-        {{- if .Values.frontend.releasedRecordsPanes }}
+        {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
         - name: deployment-config
           configMap:
             name: {{ .Release.Name }}-frontend-deployment-config
@@ -1099,10 +1099,14 @@ spec:
     - name: http
       port: {{ .Values.frontend.port }}
       targetPort: http
-{{- if .Values.frontend.releasedRecordsPanes }}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
 ---
 # The hub view's released-records panes (ADR-0046 §5): per-destination
 # tables the hub shell renders from .Values.frontend.releasedRecordsPanes.
+# With releasability on, it also carries `egressPane`: the hub serves the
+# egress admission pane through its PEP, so the hub view renders it, opening
+# on .Values.egress.destination. Without releasability there is no pane and
+# the key is absent.
 # Hub-only -- a tier frontend (tier-node.yaml's own deployment.json) carries
 # tier shape, never this. Minimal on purpose: no title/tier/fobs keys, so
 # every other field the app reads from deployment.json keeps its built-in
@@ -1115,7 +1119,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
 data:
   deployment.json: |
-    {"releasedRecordsPanes": {{ toJson .Values.frontend.releasedRecordsPanes }}}
+    {{ include "openddil.frontendDeploymentJson" . }}
 {{- end }}
 ---
 # Alias service so frontend nginx's hardcoded `toxiproxy:8475` resolves.
