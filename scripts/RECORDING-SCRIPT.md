@@ -1,9 +1,12 @@
 # Recording script — beat order
 
-Four browser profiles, four logins, two cuts, two heals. Roughly 12–15
-minutes of recording. Every number below was measured on 2026-09-09; if one
-disagrees on the day, **stop and check rather than narrate around it** —
-that disagreement is the finding.
+Four browser profiles, four logins, two connected beats (the C2 picture; a
+fault report to an action), two cuts, two heals. Roughly 18–22 minutes of
+recording. Every number below was measured on 2026-09-09 unless dated
+otherwise (BEATS 2a and 2b: 2026-10-03); if one disagrees on the day, **stop
+and check rather than narrate around it** — that disagreement is the finding.
+Lines marked `<dry run: …>` are placeholders the dry run fills in; do not
+record over one that is still open.
 
 Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 `cd ~/git/openddil/openddil-helm`.
@@ -47,6 +50,18 @@ every panel on every screen read FEED UNAVAILABLE, because one table's shape
 had grown to 10 MiB and the PEPs serving it were being OOMKilled. Nothing in
 the suite measured a byte of what the read path carries. This one does.
 
+**For BEATS 2a and 2b, also before the camera:**
+
+* The TAK device has the connection package imported
+  (`tak-client-certs.sh` output, `docs/tak-client-setup.md` §3–§4) **and the
+  stream enabled** — the package imports it disabled. The device's server
+  entry shows connected.
+* **No `helm upgrade` between the last fault report and the take.** Every
+  upgrade wipes Restate, and fault reports are not yet replayed from the
+  topic: after an upgrade the asset carries its BIT fault only, and BEAT 2b's
+  report must be filed again (measured 2026-10-03: the BIT-only event
+  re-appeared 3.5 minutes after the egress pods started).
+
 ## BEAT 1 — four profiles, four logins (before any cut)
 
 Separate browser profiles, not tabs — they need separate cookies.
@@ -65,6 +80,12 @@ a severed tier cannot mint sessions.
 
 *Narration:* four nodes, one codebase, each serving from its own store.
 
+*Identity, rung 1 — say it here, because BEATS 3 and 5 prove it:* each tier
+**decides locally and enforces locally**, against its own policy engine and
+its own copy of the entitlements, so a severed tier keeps answering for the
+people already signed in to it — **and it cannot log anybody new in.** That
+last clause is why all four logins happen now.
+
 ## BEAT 2 — the partition, at rest (~2 min)
 
 Show Ada and Bram side by side.
@@ -78,6 +99,77 @@ Show Ada and Bram side by side.
   would see 8 of the same rollup.
 
 *The beat:* the aggregate is no more visible than its least visible input.
+
+## BEAT 2a — the C2 picture: the fleet on TAK, and what crossed the boundary (~3 min)
+
+Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
+
+1. **TAK device — the fleet with readiness.** 9 tracks, `dis:1:1:1000`–`1008`
+   (measured 2026-10-03; `1005` is destroyed and still shown — a C2 viewer
+   needs to see the loss). Readiness reads as `<dry run: how a track shows
+   readiness on the device — icon, colour, remarks>`. `<dry run: whether
+   1008's array fault is visible on the device; point at it only if so>`.
+2. **The connection is the credential.** The device holds a client
+   certificate for exactly one CN; a device without it, or with a cert the
+   server does not list, is refused at the TLS handshake (measured
+   2026-10-03: no cert → *certificate required*, other device's cert → *bad
+   certificate*, 0 bytes either way).
+3. **HQ view — the egress admission pane.** "**N of M admitted**", a refused
+   count, and a **withheld** line. Measured 2026-10-03 for the C2 destination,
+   one viewer at a time at the hub:
+
+   | viewer | admitted | refused | withheld |
+   |---|---|---|---|
+   | `liaison.coalition` | 9 | 6 | 1 |
+   | `operator.regioneast` | 9 | 6 | 1 |
+   | `operator.atlantia` | 9 | 0 | 1 |
+   | `operator.borduria` | 1 | 6 | 1 |
+
+   Show two of these: the HQ profile (the liaison) and `operator.borduria`
+   in a **fifth browser profile** at `<hub-host>`, logged in before any cut.
+   `<dry run: confirm the fifth profile, or name the viewer switch used>`.
+4. **Say what each number means:**
+   * **admitted** — released to that destination, because the record's label
+     allows it;
+   * **refused** — the record exists and this viewer may see it, but its label
+     does not reach the destination's nations (`no_nation_overlap`), so it did
+     not cross;
+   * **withheld** — records with no label at all: counted, never described.
+     Not even the liaison is shown what they are.
+
+*The beat:* the boundary keeps a ledger, and each viewer reads only the part
+of it about records they could see anyway. Bram's 1 of 7 is the same gate,
+reading the same records, as the liaison's 9 of 15.
+
+## BEAT 2b — one fault, connected: from a technician's report to an action (~3 min)
+
+Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
+**HQ**.
+
+1. **Edge-01 — Ada files a fault report** on `dis:1:1:1008`: slot
+   `tr_module`, fault code `MRAD-ARR-0417`, a one-line note. The form answers
+   with an event id (HTTP 202).
+2. **Within about a minute, the event crosses the boundary** toward the
+   consumer's destination. It carries the asset's picture and the spares
+   view: four sites with on-hand counts and lead times, and the **nearest
+   spare: region-east, 2 on hand, 3 days** (measured 2026-10-03; every lead
+   time is from the parts-availability stand-in, and the event says so,
+   `lead_time_source: stand-in`).
+3. **The same report from Bram's side** (`dis:2:1:1001`, a BDR asset) is
+   released to a destination whose nations include BDR, and **refused** by an
+   ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
+   camera; it is the same ledger as BEAT 2a.
+4. **HQ — the action arrives** on `<actions pane>` (the released-records pane
+   the deployment configures for the action destination):
+   `<dry run: the action shown — task, part, source of the part — and the
+   time from report to action>`.
+   `<dry run: whether the figure the action cites is shown with the faulted
+   section highlighted; until then, do not mention a figure>`.
+
+*The beat:* `<dry run: one sentence, from what the action actually says>` —
+the report was filed at the edge, crossed the boundary once, under a label,
+and came back as an action, and HQ can show which records went out and which
+did not.
 
 ## READ THIS BEFORE BEAT 3 — the one indicator that disagrees
 
