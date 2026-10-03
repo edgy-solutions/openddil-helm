@@ -300,8 +300,15 @@ mapfile -t RESTATE_PODS  < <(discover_restate_runtimes)
 mapfile -t REDPANDA_PODS < <(discover pods "^${RELEASE}-redpanda-" | grep -v -- '-connect-' || true)
 mapfile -t ELECTRIC_PODS < <(discover pods "^${RELEASE}-(electric-sync|tier-electric-)")
 mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
+# egress-intake is a producer for this purpose: it writes intake_records from
+# a destination's returned artifacts over HTTP, and it reads its answers topic
+# by assignment with no committed group, so the census can never derive it.
+# Left running, it refills intake_records between phase 6 and phase 8, and it
+# holds partitions on a topic that phase 4 may recreate. It goes down in phase 2
+# and comes back in phase 9 with the other producers. Once back, it re-polls the
+# destination and the rows return. That is a refill, the same as every producer.
 mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
-  "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^dis-sim-edge-")
+  "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^dis-sim-edge-|^${RELEASE}-egress-intake\$")
 
 # JUDGMENT CALL 10 — SUPERSEDED. This used to be a hand-written name-pattern
 # list of state consumers to quiesce around phase 4's delete-and-recreate of
@@ -1014,6 +1021,7 @@ TABLES=(
   tactical_events
   edge_buffer_status
   inventory_items
+  intake_records
 )
 EXCLUDED_TABLES=(audit_log)  # ADR-0029 decision log. PERMANENT. See header.
 
