@@ -198,6 +198,61 @@ spec:
 # written once instead of per-tier. Empty tables cost ~nothing; schema
 # variants cost permanently.
 #
+# HOOK PHASE CHOSEN AT RENDER TIME, PER TIER, NOT HARD-CODED:
+#   install            -> post-install
+#   existing backend   -> pre-upgrade   (runs before Helm applies this
+#                          release's updated StatefulSets, so the old tier
+#                          pods are still the ones serving traffic when this
+#                          Job executes -- a tier projector that needs a new
+#                          table never gets the chance to start first and
+#                          fail against a store that doesn't carry it yet.
+#                          Constraint that comes with it: every migration
+#                          applied here must be expand-only for one release,
+#                          same as postgres-schema-init.yaml)
+#   new backend        -> post-upgrade  (a pre-upgrade hook against a
+#                          postgres StatefulSet that does not exist yet would
+#                          fail this hook, and a failed hook fails the whole
+#                          release -- see the atlas-apply note below for why
+#                          that case cannot instead be a runtime no-op)
+# tier-restate-bootstrap-{{ $tier.id }} still runs post-upgrade unconditionally,
+# after the new tier pods are up, which is what it needs regardless of branch.
+#
+# "existing backend" is decided by `lookup "v1" "Service" <namespace>
+# <this tier's postgres Service>` returning non-empty: a Service created by
+# a prior release is there on an upgrade before any hook runs, and cannot be
+# false-positive "existing" for a brand-new tier, because pre-upgrade hooks
+# run before Helm applies this release's ordinary resources. `lookup`
+# returns nothing under `helm template` and client-side dry runs (no live
+# cluster to query), so those render the install branch, or the new-backend
+# (post-upgrade) branch once rendered with `--is-upgrade`. Only a
+# server-side dry run (`helm upgrade --dry-run=server`) or a real
+# `helm upgrade` can see the existing-backend (pre-upgrade) branch, because
+# only those actually query the live API server.
+{{- $pgSvcName := printf "%s-tier-pg-%s" $root.Release.Name $tier.id }}
+{{- $schemaHook := "post-install" }}
+{{- if not $root.Release.IsInstall }}
+{{- if lookup "v1" "Service" $root.Release.Namespace $pgSvcName }}
+{{- $schemaHook = "pre-upgrade" }}
+{{- else }}
+{{- $schemaHook = "post-upgrade" }}
+{{- end }}
+{{- end }}
+#
+# ATLAS-APPLY HAS NO SHELL, SO THE PHASE MUST BE A TEMPLATE-TIME FACT, NOT A
+# RUNTIME ONE. An earlier version of this Job tried to keep a single
+# post-install,pre-upgrade,post-upgrade Job and have wait-postgres decide at
+# runtime (via a DNS check) whether to defer. That cannot work: wait-postgres
+# is an initContainer, atlas-apply is this Job's `containers:` entry, and
+# Kubernetes starts every `containers:` entry once every initContainer has
+# exited 0 -- there is no "succeeded, but skip the rest" signal an
+# initContainer can give. The arigaio/atlas image has no shell (see the
+# comment at atlas-apply below), so it cannot itself read a flag and no-op;
+# a runtime "defer" would still have atlas-apply attempt --url against a
+# postgres Service that does not exist yet, and fail the hook anyway. Only
+# one Job, with one hook annotation chosen before any of this runs, avoids
+# that: a post-upgrade-only Job's containers never start until post-upgrade,
+# by Helm's own hook-phase contract, no runtime decision required.
+#
 # NOT post-rollback: Atlas migrations are forward-only -- same reasoning as
 # postgres-schema-init.yaml. A refused re-apply fails this hook and blocks
 # every registration Job at a later weight.
@@ -208,11 +263,14 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": {{ $schemaHook }}
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
-  backoffLimit: 10
+  # 0, not 10: an unready store has a real problem retrying 10x would only
+  # delay surfacing, and SCHEMA_INIT_REFUSED is meant to fail this hook
+  # loudly and fast.
+  backoffLimit: 0
   template:
     metadata:
       labels:
@@ -241,6 +299,13 @@ spec:
         # Blocking in a container that DOES have a shell is the fix, and the
         # postgres image is the natural one: it ships pg_isready, so the
         # check is a real readiness probe rather than a port knock.
+        #
+        # No DNS branch here any more: the Service either exists (pre-upgrade
+        # branch, above) or this Job doesn't run until post-upgrade, by which
+        # point Helm has already applied the tier's postgres StatefulSet as
+        # an ordinary resource. So the only outcome left to distinguish is
+        # "resolves and becomes ready" vs. "never comes up" -- bounded at
+        # 300s (150 x 2s), matching topic-init-{{ $tier.id }}'s broker wait.
         - name: wait-postgres
           image: {{ include "openddil.thirdPartyImage" $tn.postgres.image }}
           resources:
@@ -251,7 +316,13 @@ spec:
             - |
               set -e
               echo "waiting for tier store {{ $tier.id }} ..."
+              attempts=0
               until pg_isready -h {{ $pgHost }} -p {{ $tn.postgres.port }} -U {{ $tn.postgres.auth.username }} -d {{ $tn.postgres.auth.database }}; do
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge 150 ]; then
+                  echo "SCHEMA_INIT_REFUSED postgres_unready {{ $tier.id }}"
+                  exit 1
+                fi
                 sleep 2
               done
               echo "tier store {{ $tier.id }} accepting connections"
@@ -270,6 +341,12 @@ spec:
           # connection idle and exits 1 ("unexpected transaction status idle"). A
           # fresh store crashed once per such file: 6 times, then succeeded on the 7th.
           # Files that need atomicity carry their own BEGIN/COMMIT.
+          #
+          # IDEMPOTENT BY CONSTRUCTION: Atlas records each applied migration
+          # file's revision in its own tracking table (`atlas_schema_revisions`,
+          # inside the target database) and `migrate apply` only applies
+          # files not already recorded there -- so re-running this Job against
+          # a store it already migrated is always safe.
           args:
             - migrate
             - apply
@@ -285,6 +362,15 @@ spec:
       volumes:
         - name: bundle-shared
           emptyDir: {}
+
+# topic-init-{{ $tier.id }} used to live here, gated additionally by
+# `tierNode.enabled`/`tierNode.tiers` -- narrower than the broker
+# StatefulSet's own predicate (infrastructure.yaml: edge unconditionally,
+# region only when tier-managed), so a default render or a `tierNode.tiers`
+# exclusion left that edge's broker with no topic-init at all, relying on
+# auto-create at broker defaults. Moved to infrastructure.yaml, into the
+# SAME range/if the broker StatefulSet renders from, so the two cannot
+# drift apart again (see that file's topic-init-<id> header comment).
 
 ---
 # ===========================================================================

@@ -244,11 +244,21 @@ done
 # change too and an old journal does not replay against changed code -- and
 # re-registered nothing against the wipe that normally follows.
 #
-# ALLOWLIST: postgres-schema-init and tier-schema-init-<tier> stay
-# post-install/post-upgrade ONLY, on purpose. Atlas migrations are
-# forward-only -- an older migration dir cannot take the DB back, and a
-# re-apply Atlas refuses FAILS the hook, blocking every registration Job at
-# a later weight (20/21). See the comment at each one's own annotation.
+# ALLOWLIST: postgres-schema-init and tier-schema-init-<tier> run
+# post-install,pre-upgrade with NO rollback stage at all, on purpose. Atlas
+# migrations are forward-only -- an older migration dir cannot take the DB
+# back, and a re-apply Atlas refuses FAILS the hook, blocking every
+# registration Job at a later weight (20/21). See the comment at each one's
+# own annotation.
+#
+# topic-init runs post-install,pre-upgrade,post-rollback: pre-upgrade so a
+# topic exists before the consumer that needs it starts, and the SAME
+# post-rollback it already carried before this phase moved from
+# post-upgrade to pre-upgrade -- topic creation is idempotent, so re-running
+# it after a rollback is still a correct no-op, and it needs no NEW
+# pre-rollback stage to cover a case post-rollback already covers. The
+# allowlist below accepts "pre-upgrade without pre-rollback" for exactly
+# these three Jobs, for exactly these reasons, not as a blanket exemption.
 #
 # hook-restate-wipe.yaml's pre-install/pre-upgrade/pre-rollback hooks are
 # gated by `restate.ephemeralOnUpgrade` (default false), so this guard sets
@@ -263,7 +273,7 @@ for variant in "default:" "tiernode:--set tierNode.enabled=true" "releasability:
   guard5_out=$(render $vargs --set restate.ephemeralOnUpgrade=true | "$PY" -c '
 import sys, re, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-allow_re = re.compile(r"-postgres-schema-init$|-tier-schema-init-")
+allow_re = re.compile(r"-postgres-schema-init$|-tier-schema-init-|-topic-init$")
 checked = 0
 bad = []
 for d in docs:
@@ -278,7 +288,10 @@ for d in docs:
     if "pre-upgrade" in hooks:
         checked += 1
         if "pre-rollback" not in hooks:
-            bad.append(f"FAIL: {kind}/{name}: pre-upgrade without pre-rollback ({hook})")
+            if allow_re.search(name):
+                print(f"  ok   : {kind}/{name} allowlisted -- schema-init carries no rollback stage at all (Atlas is forward-only); topic-init keeps its existing post-rollback rather than gaining a new pre-rollback")
+            else:
+                bad.append(f"FAIL: {kind}/{name}: pre-upgrade without pre-rollback ({hook})")
     if "post-upgrade" in hooks:
         checked += 1
         if "post-rollback" not in hooks:
@@ -454,6 +467,318 @@ if leaked:
     print("  FAIL [7e]: releasedRecordsPanes leaked into tier config(s): " + ", ".join(leaked)); sys.exit(1)
 print(f"  ok   [7e]: hub carries releasedRecordsPanes; {len(tiers)} tier-frontend-config(s) do not")
 ' || fail=1
+
+# --- guard 8: schema-init / topic-init choose their hook phase correctly ---
+# THE DEFECT MODELLED: a new release's consumer (a projector, a Restate
+# subscription) starting against a table or topic that doesn't exist yet,
+# because the Job that creates it was a post-upgrade hook -- which fires
+# AFTER the new Deployments/StatefulSets are already applied and their pods
+# are starting, not before. postgres-schema-init and the hub topic-init stay
+# hard-coded post-install,pre-upgrade: the hub backend always exists, so
+# there is no "new backend" case for them to get wrong. tier-schema-init-
+# <tier> and topic-init-<tier> cannot be hard-coded the same way, because a
+# pre-upgrade hook against a tier backend that doesn't exist yet (a tier
+# added in this same upgrade) would fail that hook and fail the whole
+# release. Each picks its OWN phase at RENDER TIME via `lookup "v1"
+# "Service" <namespace> <that tier's own Service>`: non-empty (an existing
+# backend) means pre-upgrade, empty (install, or a backend new this
+# upgrade) means post-install or post-upgrade respectively. Registration
+# Jobs (cm-service-bootstrap, logistics-fusion-bootstrap,
+# tier-restate-bootstrap-<tier>) stay post-upgrade on purpose -- they
+# register the NEW deployments, which must already be running.
+#
+# `lookup` returns empty under plain `helm template` (no live cluster), so
+# the ONLY way to exercise the pre-upgrade branch at all is a server-side
+# dry run or a real upgrade against a cluster that already has the
+# Service -- neither of which this script can do offline. What IS checked
+# offline, across two renders:
+#   - IsInstall (no --is-upgrade): lookup is empty AND Release.IsInstall is
+#     true, so every tier Job must render post-install.
+#   - --is-upgrade: lookup is still empty (no live cluster) but
+#     Release.IsInstall is now false, so every tier Job must render
+#     post-upgrade -- this is the "every tier looks new" case the real
+#     lookup would also produce against a cluster with no Service for it.
+# A hard-coded annotation would pass the IsInstall render (it can hard-code
+# "post-install") and then fail to move to "post-upgrade" under
+# --is-upgrade -- which is exactly what guard 8 checks -- but a hard-coded
+# "pre-upgrade" would ALSO never appear in either offline render, so a
+# content check on the TEMPLATE SOURCE (not the rendered YAML -- `lookup`
+# calls are consumed at render time and leave no trace in the output) also
+# confirms the lookup gate itself is still there in the file, not bypassed
+# by something that happens to render identically in these two cases.
+#
+# Second half of the guard: the bounded wait each of these Jobs runs before
+# creating anything (SCHEMA_INIT_REFUSED / TOPIC_INIT_REFUSED) must still be
+# present and still bounded at 300s (150 x 2s) -- a blanked bound or a
+# deleted REFUSED string would make an unready backend wedge the hook
+# forever instead of failing it loudly, same risk this whole guard exists
+# to catch for the hook-phase choice itself.
+echo
+echo "guard 8: schema-init / topic-init choose their hook phase correctly"
+
+TIER_NODE_TPL="$CHART/templates/tier-node.yaml"
+INFRA_TPL="$CHART/templates/infrastructure.yaml"
+g8_lookup_gate() {
+  # Template-SOURCE check: `lookup` is resolved away during rendering, so
+  # this cannot be checked against rendered YAML at all. Two call sites
+  # expected, in TWO DIFFERENT FILES: tier-schema-init-<tier> (against the
+  # tier's postgres Service) gates in tier-node.yaml, because tier postgres
+  # only exists under tierNode. topic-init-<id> (against that broker's
+  # Service) gates in infrastructure.yaml, co-located with the broker
+  # StatefulSet loop it must never drift from (round 4) -- it is NOT in
+  # tier-node.yaml any more.
+  local n_schema n_topic
+  n_schema=$(grep -c '{{- if lookup "v1" "Service"' "$TIER_NODE_TPL")
+  n_topic=$(grep -c '{{- if lookup "v1" "Service"' "$INFRA_TPL")
+  local bad=0
+  if [ "$n_schema" -lt 1 ]; then
+    echo "  FAIL: templates/tier-node.yaml has $n_schema {{- if lookup(\"v1\",\"Service\",...)}} gate(s), expected >= 1 (tier-schema-init-<tier>)"
+    bad=1
+  fi
+  if [ "$n_topic" -lt 1 ]; then
+    echo "  FAIL: templates/infrastructure.yaml has $n_topic {{- if lookup(\"v1\",\"Service\",...)}} gate(s), expected >= 1 (topic-init-<id>, co-located with the broker StatefulSet loop)"
+    bad=1
+  fi
+  [ "$bad" -ne 0 ] && return 1
+  echo "  lookup gate present: tier-node.yaml ($n_schema, schema-init) + infrastructure.yaml ($n_topic, topic-init)"
+  return 0
+}
+
+g8() { render "$@" | "$PY" -c '
+import os, sys, re, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+
+# Hub Jobs are NOT lookup-gated -- matched by exact name, so a tier Job
+# cannot borrow their always-static expectation by coincidence.
+HUB_SCHEMA_RE = re.compile(r"-postgres-schema-init$")
+HUB_TOPIC_RE = re.compile(r"-topic-init$")
+# Tier Jobs ARE lookup-gated -- matched by the trailing -<tier-id>, which is
+# exactly what distinguishes them from the hub names above.
+TIER_SCHEMA_RE = re.compile(r"-tier-schema-init-.+$")
+TIER_TOPIC_RE = re.compile(r"-topic-init-.+$")
+
+def classify(name):
+    if HUB_SCHEMA_RE.search(name):
+        return "hub_schema"
+    if TIER_SCHEMA_RE.search(name):
+        return "tier_schema"
+    if TIER_TOPIC_RE.search(name):
+        return "tier_topic"
+    if HUB_TOPIC_RE.search(name):
+        return "hub_topic"
+    return None
+
+def script_text(d):
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    text = []
+    for c in (pod.get("initContainers") or []) + (pod.get("containers") or []):
+        text.extend(str(x) for x in (c.get("command") or []) + (c.get("args") or []))
+    return "\n".join(text)
+
+BOUND_RE = re.compile(r"attempts.{0,20}-ge\s+150")
+is_upgrade_mode = os.environ.get("GUARD8_IS_UPGRADE") == "1"
+mode_label = "is-upgrade" if is_upgrade_mode else "install"
+
+jobs = []
+for d in docs:
+    if d.get("kind") != "Job":
+        continue
+    name = (d.get("metadata") or {}).get("name") or ""
+    tag = classify(name)
+    if tag:
+        jobs.append((tag, d))
+
+if not jobs:
+    print("FAIL: no schema-init/topic-init Jobs matched in this render -- guard proved nothing (vacuous-pass floor)")
+    sys.exit(1)
+
+bad = []
+tier_seen = 0
+for tag, d in jobs:
+    name = d["metadata"]["name"]
+    ann = (d.get("metadata") or {}).get("annotations") or {}
+    hook = ann.get("helm.sh/hook") or ""
+    hooks = set(h.strip() for h in hook.split(",") if h.strip())
+
+    if tag == "hub_schema":
+        expect = {"post-install", "pre-upgrade"}
+        if hooks != expect:
+            bad.append(f"FAIL: Job/{name} (hub, not lookup-gated) expected exactly {sorted(expect)}, got {sorted(hooks)}")
+    elif tag == "hub_topic":
+        expect = {"post-install", "pre-upgrade", "post-rollback"}
+        if hooks != expect:
+            bad.append(f"FAIL: Job/{name} (hub, not lookup-gated) expected exactly {sorted(expect)}, got {sorted(hooks)}")
+    elif tag == "tier_schema":
+        tier_seen += 1
+        expect = {"post-upgrade"} if is_upgrade_mode else {"post-install"}
+        if hooks != expect:
+            bad.append(f"FAIL: Job/{name} (lookup-gated, {mode_label} render) expected exactly {sorted(expect)}, got {sorted(hooks)}")
+    elif tag == "tier_topic":
+        tier_seen += 1
+        base = "post-upgrade" if is_upgrade_mode else "post-install"
+        expect = {base, "post-rollback"}
+        if hooks != expect:
+            bad.append(f"FAIL: Job/{name} (lookup-gated, {mode_label} render) expected exactly {sorted(expect)}, got {sorted(hooks)}")
+
+    # Content-level checks on the bounded-wait logic -- the hook-annotation
+    # checks above cannot tell a gutted wait script from an intact one.
+    script = script_text(d)
+    if tag in ("tier_schema",):
+        if not BOUND_RE.search(script):
+            bad.append(f"FAIL: Job/{name} wait-postgres has no 300s (150-attempt) bound")
+        if "SCHEMA_INIT_REFUSED" not in script:
+            bad.append(f"FAIL: Job/{name} wait-postgres never logs SCHEMA_INIT_REFUSED on timeout")
+    if tag in ("hub_topic", "tier_topic"):
+        if not BOUND_RE.search(script):
+            bad.append(f"FAIL: Job/{name} broker wait has no 300s (150-attempt) bound")
+        if "TOPIC_INIT_REFUSED" not in script:
+            bad.append(f"FAIL: Job/{name} broker wait never logs TOPIC_INIT_REFUSED on timeout")
+
+if os.environ.get("GUARD8_EXPECT_TIER_JOBS") == "1" and tier_seen == 0:
+    bad.append("FAIL: tierNode.enabled=true rendered no tier schema-init/topic-init Jobs -- vacuous-pass floor")
+
+for b in bad:
+    print("  " + b)
+print(f"  jobs checked: {len(jobs)}, tier jobs: {tier_seen}")
+sys.exit(1 if bad else 0)
+'; }
+
+g8_lookup_gate_out=$(g8_lookup_gate)
+g8_lookup_gate_status=$?
+printf '%s\n' "$g8_lookup_gate_out"
+[ "$g8_lookup_gate_status" -ne 0 ] && fail=1
+
+for variant in "install:" "tiernode-install:--set tierNode.enabled=true" "tiernode-upgrade:--set tierNode.enabled=true --is-upgrade"; do
+  vname="${variant%%:*}"
+  vargs="${variant#*:}"
+  # shellcheck disable=SC2086
+  case "$vname" in
+    tiernode-install) g8_out=$(GUARD8_EXPECT_TIER_JOBS=1 g8 $vargs) ;;
+    tiernode-upgrade) g8_out=$(GUARD8_EXPECT_TIER_JOBS=1 GUARD8_IS_UPGRADE=1 g8 $vargs) ;;
+    *) g8_out=$(g8 $vargs) ;;
+  esac
+  status=$?
+  printf '%s\n' "$g8_out" | sed "s/^/  [$vname] /"
+  [ "$status" -ne 0 ] && fail=1
+done
+
+# --- guard 8 (extended): every broker the chart creates gets exactly one ---
+# ---                     topic-init Job -----------------------------------
+# THE DEFECT MODELLED (round 3, found by inspection before it shipped):
+# topic-init-<id> rendered from tier-node.yaml, gated by `tierNode.enabled`
+# AND `tierNode.tiers` -- a predicate strictly narrower than the broker
+# StatefulSet loop's own (infrastructure.yaml: every edge unconditionally, a
+# region only when tier-managed). A default render, or a `tierNode.tiers`
+# subset excluding an edge, rendered that edge's broker with NO topic-init:
+# every topic on it would then exist only through auto-create, at broker
+# defaults (`cleanup.policy=delete` on a topic that must be retained by
+# KEY). Round 4 moved the Job into infrastructure.yaml, into the SAME
+# range/if the broker StatefulSet renders from, so the two cannot drift
+# apart by construction. This guard checks that structurally, across both
+# the default chart shape and the shape that most directly models the
+# defect (a tier-node subset that excludes an edge), rather than trusting
+# the file move by inspection.
+#
+# Three things checked per render:
+#   1. the set of non-hq <rel>-redpanda-<id> StatefulSets equals the set of
+#      <rel>-topic-init-<id> Jobs -- same cardinality AND same ids, not just
+#      the same count (a swapped id would pass a count-only check);
+#   2. each such Job's `rpk ... -X brokers=` target names ITS OWN tier's
+#      broker Service, not another tier's or the hub's;
+#   3. the topic spec set (the quoted "name|args" strings fed to the create
+#      loop) is IDENTICAL across every per-broker Job, and that common set
+#      is a subset of the hub Job's spec set -- the hub's extra specs are
+#      its HQ-only block (egress-c2-status et al.), never named here by
+#      value so this guard does not have to track that list by hand.
+echo
+echo "guard 8 (extended): every broker gets exactly one topic-init Job"
+
+g8_coverage() { render "$@" | "$PY" -c '
+import re, sys, yaml
+
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+
+STS_RE = re.compile(r"^t-redpanda-(?!hq$)(.+)$")
+JOB_RE = re.compile(r"^t-topic-init-(.+)$")
+
+def script_text(d):
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    text = []
+    for c in (pod.get("initContainers") or []) + (pod.get("containers") or []):
+        text.extend(str(x) for x in (c.get("command") or []) + (c.get("args") or []))
+    return "\n".join(text)
+
+broker_ids = set()
+job_ids = set()
+job_by_id = {}
+hub_job = None
+for d in docs:
+    name = (d.get("metadata") or {}).get("name") or ""
+    if d.get("kind") == "StatefulSet":
+        m = STS_RE.match(name)
+        if m:
+            broker_ids.add(m.group(1))
+    elif d.get("kind") == "Job":
+        if name == "t-topic-init":
+            hub_job = d
+        m = JOB_RE.match(name)
+        if m:
+            job_ids.add(m.group(1))
+            job_by_id[m.group(1)] = d
+
+bad = []
+if not broker_ids:
+    bad.append("FAIL: no non-hq redpanda StatefulSets matched -- vacuous-pass floor")
+if hub_job is None:
+    bad.append("FAIL: no hub topic-init Job (t-topic-init) matched -- vacuous-pass floor")
+
+if broker_ids != job_ids:
+    missing = broker_ids - job_ids
+    extra = job_ids - broker_ids
+    if missing:
+        bad.append(f"FAIL: broker(s) with NO topic-init Job: {sorted(missing)}")
+    if extra:
+        bad.append(f"FAIL: topic-init Job(s) with NO matching broker: {sorted(extra)}")
+
+SPEC_RE = re.compile(r"\"([a-z0-9][a-z0-9.-]*\|[^\"]*)\"")
+
+def specs_of(d):
+    return set(SPEC_RE.findall(script_text(d)))
+
+for tid, d in job_by_id.items():
+    text = script_text(d)
+    if f"brokers=t-redpanda-{tid}" not in text:
+        bad.append(f"FAIL: Job/t-topic-init-{tid} rpk broker does not target its own tier (t-redpanda-{tid})")
+
+tier_spec_sets = {tid: specs_of(d) for tid, d in job_by_id.items()}
+distinct = set(frozenset(s) for s in tier_spec_sets.values())
+if len(distinct) > 1:
+    bad.append(f"FAIL: per-broker topic spec sets are not identical across tiers: {sorted(len(s) for s in tier_spec_sets.values())} spec counts seen")
+elif tier_spec_sets:
+    common = next(iter(distinct))
+    if not common:
+        bad.append("FAIL: per-broker topic spec set is empty -- vacuous-pass floor")
+    elif hub_job is not None:
+        hub_specs = specs_of(hub_job)
+        if not common <= hub_specs:
+            bad.append(f"FAIL: per-broker topic spec set is not a subset of the hub Jobs spec set: extra={sorted(common - hub_specs)}")
+
+common_count = len(next(iter(distinct))) if distinct and len(distinct) == 1 else "n/a"
+for b in bad:
+    print("  " + b)
+print(f"  brokers: {len(broker_ids)}, topic-init Jobs: {len(job_ids)}, common spec count: {common_count}")
+sys.exit(1 if bad else 0)
+'; }
+
+for variant in "default:" "default-upgrade:--is-upgrade" "tiernode-all:--set tierNode.enabled=true" "tiernode-subset:--set tierNode.enabled=true --set tierNode.tiers={edge-01\\,edge-03}"; do
+  vname="${variant%%:*}"
+  vargs="${variant#*:}"
+  # shellcheck disable=SC2086
+  out=$(g8_coverage $vargs)
+  status=$?
+  printf '%s\n' "$out" | sed "s/^/  [$vname] /"
+  [ "$status" -ne 0 ] && fail=1
+done
 
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"

@@ -10,9 +10,22 @@
    atlas-apply → electric-publish is intrinsic to the initContainer
    sequence, no helm-hook-weight gymnastics for inter-step ordering.
 
-   Hook weight 10 places this AFTER topic-init (weight 5) and BEFORE
-   cm-service-bootstrap (weight 20) / logistics-fusion-bootstrap (21),
-   so cluster comes up: topics → schema → service registrations.
+   Hook weight 10 places this alongside topic-init (weight 5) in whichever
+   bucket is firing. On install both are post-install, ordered before
+   cm-service-bootstrap (weight 20) / logistics-fusion-bootstrap (21), so
+   cluster comes up: topics → schema → service registrations.
+
+   PRE-UPGRADE, NOT POST-UPGRADE. A pre-upgrade hook runs before Helm
+   applies this release's updated Deployments and StatefulSets, so the old
+   pods are still the ones serving traffic when this Job executes -- a
+   consumer that needs a new table never gets the chance to start first and
+   fail against a store that doesn't carry it yet. That ordering is also
+   the constraint: the migration runs while OLD code still reads this
+   database, so every migration applied here must be expand-only for one
+   release. Adding a column or a table is safe; a DROP or a rename must
+   wait a release until nothing old-code still depends on what's being
+   removed. Service registrations still run post-upgrade, after the new
+   pods are up, which is what they need.
 
    NOT post-rollback: Atlas migrations are forward-only, so an older
    migration dir cannot take the DB back, and a refused re-apply fails
@@ -30,7 +43,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,pre-upgrade
     "helm.sh/hook-weight": "10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:

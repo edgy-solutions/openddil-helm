@@ -317,6 +317,109 @@ spec:
       port: {{ $.Values.redpandaEdge.adminPort }}
       targetPort: admin
 ---
+# ===========================================================================
+# topic-init-{{ $edge.id }} — creates this tier's Kafka topics on its own broker
+# ===========================================================================
+# RENDERED FROM THE SAME RANGE AND THE SAME `if` AS THE BROKER STATEFULSET
+# ABOVE, ON PURPOSE -- not a second predicate claimed to match it. This Job
+# used to live in tier-node.yaml, gated ADDITIONALLY by `tierNode.enabled`
+# and `tierNode.tiers` -- a predicate strictly narrower than "every edge, or
+# a tier-managed region." A default render (tierNode.enabled=false, the
+# chart default) or a tier-node render whose `tierNode.tiers` excluded this
+# edge rendered this broker with NO topic-init at all: every topic on it
+# would then exist only through auto-create, at broker defaults --
+# `cleanup.policy=delete` on a topic that must be retained by KEY, silently
+# dropping an asset. That is the SAME failure shape the pre-split "BROKER
+# LIST" predicate caused once already (see the hub topic-init Job's header
+# comment below): two lists describing the same set of brokers, kept
+# apart, drifted. The fix there was deriving both loops from one predicate;
+# the fix here is deriving this Job from the identical range/if the
+# StatefulSet above uses, so there is no second copy of the predicate left
+# to drift.
+#
+# Same topic spec as the hub's topic-init (below) and every other tier's:
+# openddil.topicInitCreateLoop (_helpers.tpl) is the single shared
+# definition.
+#
+# HOOK PHASE CHOSEN AT RENDER TIME, PER TIER, same reasoning as
+# tier-schema-init-{{ $edge.id }} (tier-node.yaml):
+#   install            -> post-install
+#   existing backend   -> pre-upgrade   (so a consumer never starts before
+#                          its topic exists)
+#   new backend        -> post-upgrade  (a pre-upgrade hook against a broker
+#                          that does not exist yet would fail this hook, and
+#                          a failed hook fails the whole release)
+# "existing backend" is decided by `lookup "v1" "Service" <namespace> <this
+# tier's redpanda Service, $name above>` returning non-empty -- `lookup`
+# returns nothing under `helm template` and client-side dry runs, so those
+# render the install branch, or the new-backend branch once rendered with
+# `--is-upgrade`; only a server-side dry run or a real `helm upgrade` can
+# see the existing-backend branch, because only those actually query the
+# live API server.
+#
+# post-rollback stays on EVERY branch, unlike pre-upgrade/post-upgrade which
+# pick exactly one: re-creating an existing topic on a rollback is a no-op
+# (rpk topic create's || true swallows it), so there is no branch where
+# keeping it is wrong.
+{{- $topicHook := "post-install" }}
+{{- if not $.Release.IsInstall }}
+{{- if lookup "v1" "Service" $.Release.Namespace $name }}
+{{- $topicHook = "pre-upgrade" }}
+{{- else }}
+{{- $topicHook = "post-upgrade" }}
+{{- end }}
+{{- end }}
+{{- $brokerAddr := printf "%s%s:%d" $name (include "openddil.svcDomain" $) (int $.Values.redpandaEdge.internalPort) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $.Release.Name }}-topic-init-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $ | nindent 4 }}
+  annotations:
+    "helm.sh/hook": {{ $topicHook }},post-rollback
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $ | nindent 8 }}
+    spec:
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      containers:
+        - name: rpk
+          image: "{{ include "openddil.thirdPartyImage" $.Values.redpandaEdge.image }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $.Values.redpandaEdge.image.pullPolicy "root" $) }}
+          resources:
+            {{- toYaml $.Values.jobs.resources | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Probe with `rpk topic list`, not `rpk cluster health` -- same
+              # reasoning as the hub Job below: health hits the Admin API and
+              # falls back to localhost with no -X admin.hosts, which never
+              # succeeds from this pod. Bounded at 300s (150 x 2s), matching
+              # tier-schema-init-{{ $edge.id }}'s wait.
+              echo "Waiting for {{ $brokerAddr }} (Kafka API)..."
+              attempts=0
+              until rpk topic list -X brokers={{ $brokerAddr }} >/dev/null 2>&1; do
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge 150 ]; then
+                  echo "TOPIC_INIT_REFUSED broker_unready {{ $edge.id }}"
+                  exit 1
+                fi
+                sleep 2
+              done
+              {{- include "openddil.topicInitCreateLoop" (dict "broker" $brokerAddr) | nindent 14 }}
+---
 {{- end }}
 {{- end }}
 # =============================================================================
@@ -635,32 +738,36 @@ spec:
       targetPort: postgres
 ---
 # =============================================================================
-# Topic-init Job — creates all Kafka topics on every cluster
+# Topic-init Job (hub) — creates all Kafka topics on the hq broker
 # =============================================================================
-# Runs as a post-install/post-upgrade/post-rollback Helm hook so it fires AFTER the
-# StatefulSets are scheduled but creates topics idempotently (rpk topic
-# create returns nonzero if topic exists — the || true swallows it).
-{{- /* BROKER LIST -- must match the StatefulSet loop's predicate exactly.
-
-       This ranged over `.Values.edges` + hq while the broker StatefulSets
-       range over `openddil.tierList` filtered by `kind == edge OR
-       isTierManaged`. A tier-managed region therefore GOT a broker and never
-       got topic-init: region-east's declared-compacted topics all read
-       `cleanup.policy=delete DEFAULT_CONFIG`, because they existed only
-       because auto-create invented them at broker defaults. A latest-state
-       topic retained by AGE rather than by KEY can drop an asset entirely.
-
-       The two loops are now derived from the same predicate rather than
-       maintained in parallel, which is the only form of this fix that cannot
-       silently drift again the next time a tier kind is added. */ -}}
-{{- $topicInitBrokers := list }}
-{{- $tiTiers := include "openddil.tierList" . | fromYamlArray }}
-{{- range $tier := $tiTiers }}
-{{- if or (eq $tier.kind "edge") (include "openddil.isTierManaged" (dict "id" $tier.id "root" $)) }}
-{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-%s:%d" $.Release.Name $tier.id (int $.Values.redpandaEdge.internalPort)) }}
-{{- end }}
-{{- end }}
-{{- $topicInitBrokers = append $topicInitBrokers (printf "%s-redpanda-hq:%d" .Release.Name (int .Values.redpandaHq.kafkaPort)) }}
+# Runs as a post-install,pre-upgrade Helm hook. On install it fires AFTER the
+# StatefulSets are scheduled, because nothing exists to migrate into before
+# then. On upgrade it fires BEFORE the broker StatefulSets apply this
+# release's spec, so a topic a new consumer expects exists before that
+# consumer's new pod starts -- otherwise the pod comes up first and the topic
+# it depends on isn't there yet. Topic creation stays idempotent either way
+# (rpk topic create returns nonzero if the topic exists — the || true
+# swallows it), which is also what makes it safe to still run post-rollback:
+# re-creating an existing topic on a rollback is a no-op.
+#
+# The ordering constraint this creates: a topic's config changed here must be
+# additive for one release -- a partition/retention/compaction change a new
+# consumer depends on is fine, but deleting a topic a release-old consumer
+# still reads must wait a release, same as a database migration that must
+# stay expand-only across the same pre-upgrade/post-upgrade boundary.
+#
+# HUB-ONLY, NOT LOOKUP-GATED. This Job used to loop over every edge/region
+# broker too; that per-tier work now lives ABOVE, in THIS FILE, as its own
+# topic-init-<id> Job rendered from the identical range/if the broker
+# StatefulSet loop uses (edge unconditionally, region only when
+# tier-managed) -- not in tier-node.yaml, and not a second predicate claimed
+# to match that one. Each per-tier Job chooses its OWN hook phase at render
+# time via `lookup` against that tier's broker Service (see its header
+# comment above for the install/existing-backend/new-backend reasoning).
+# This Job keeps post-install,pre-upgrade unconditionally
+# because the hq broker is part of the hub stack this same chart always
+# creates -- there is no "new backend" case for hq to distinguish between
+# installs and upgrades, so there is nothing for a lookup to gate.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -668,7 +775,7 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade,post-rollback
+    "helm.sh/hook": post-install,pre-upgrade,post-rollback
     "helm.sh/hook-weight": "5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
@@ -695,117 +802,29 @@ spec:
             - -c
             - |
               set -e
-              # Wait for each broker's Kafka API, then create topics. The Helm
-              # hook fires right after the StatefulSets are created, so broker
-              # pods may still be warming. Probe with `rpk topic list` — a
-              # plain Kafka-API (9092) call, the same surface the topic-create
-              # calls below use. NOT `rpk cluster health`: that hits the Admin
-              # API (9644), and with no -X admin.hosts it falls back to
-              # localhost, never succeeds from this pod, and silently wedges
-              # the entire post-install hook chain. Bounded retry (~3min) so a
-              # genuinely-down broker fails the Job visibly, not forever.
-              for B in {{ range $topicInitBrokers }}{{ . }} {{ end }}; do
-                echo "Waiting for $B (Kafka API)..."
-                attempts=0
-                until rpk topic list -X brokers=$B >/dev/null 2>&1; do
-                  attempts=$((attempts + 1))
-                  if [ "$attempts" -ge 60 ]; then
-                    echo "ERROR: $B unreachable after ~3min — failing job." >&2
-                    exit 1
-                  fi
-                  sleep 3
-                done
-                echo "INFO: Initializing topics on $B"
-                # ---------------------------------------------------------
-                # compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
-                # ---------------------------------------------------------
-                # Restate's Kafka ingress is built on a librdkafka WITHOUT
-                # zstd support. One zstd batch on a subscribed topic kills
-                # the consumer task with
-                #   Decompression (codec 0x4) ... Local: Not implemented
-                # Restate restarts the task from its stored position, hits
-                # the same batch, and dies again -- forever. Fusion then
-                # receives ZERO invocations while every pod reads Running:
-                # no severity, no transitions, no tactical events, and a
-                # completeness gate refusing an empty table downstream.
-                #
-                # `compression.type=producer` -- the default these topics
-                # carried -- means "store whatever codec the CLIENT chose",
-                # and one of the clients chooses zstd. The default is not
-                # neutral here: it delegates a correctness-critical choice
-                # to whichever library happens to write the batch.
-                #
-                # NOT the ingress-*-raw topics' explicit zstd below. Those
-                # are deliberate for volume and Restate subscribes to none
-                # of them. Stated because that setting is the obvious
-                # suspect and is NOT the cause -- HQ's asset-cm-state,
-                # never altered by hand, read `producer (DEFAULT_CONFIG)`.
-                #
-                # Measured 2026-09-17 on the lab. This reaches the work
-                # cluster on upgrade, so it is a P0.1 gate, not a lab
-                # curiosity.
-                # A COMMENT MAY NOT LIVE INSIDE A LINE CONTINUATION.
-                # These notes sat between `for spec in \` and the first
-                # item. The backslash joins the next line, `#` then eats
-                # the rest of it, and the `for` loses its word list: the
-                # WHOLE script becomes a parse error, so nothing in this
-                # Job runs -- including the fix the comment documents.
-                # Cost: 7 backoff retries, a Failed hook, a release stuck
-                # in pending-upgrade, and the post-upgrade bootstrap that
-                # re-registers Restate never firing. Verified with `sh -n`
-                # (2026-09-17) rather than by reading. Keep prose ABOVE the
-                # `for`, and syntax-check this script when it changes.
-                for spec in \
-                  "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
-                  "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
-                  "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
-                  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
-                  "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
-                  "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000 -c compression.type=lz4" \
-                  "ingress-dis-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
-                  "ingress-proprietary-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
-                  "ingress-sim-a-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
-                  "ingress-weapons-capability-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
-                  "asset-capability-snapshot|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
-                  "asset-telemetry-windows|-p 8 -r 1 -c retention.ms=86400000 -c cleanup.policy=delete -c compression.type=lz4" \
-                  "asset-logistics-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "derived-sustainment|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
-                  "region-fleet-summary|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "region-top-factors|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "region-wear-trends|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                  "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
-                  "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
-                ; do
-                  topic="${spec%%|*}"
-                  args="${spec##*|}"
-                  # Create idempotently. BUT: if the topic was already auto-
-                  # created by redpanda (a producer/consumer connected before
-                  # this post-install hook completed), the create no-ops with
-                  # `|| true` and the intended -c configs are NEVER applied --
-                  # the topic silently keeps redpanda defaults (1MB
-                  # max.message.bytes, cleanup.policy=delete). That breaks
-                  # large-message topics like asset-element-telemetry (per-
-                  # asset element snapshots run several MB): the sim's produce
-                  # fails with MessageSizeTooLargeError and NO tiles ever land.
-                  # Observed on openddil-test 2026-07-31.
-                  #
-                  # So ALSO enforce the -c configs via alter-config, which
-                  # corrects a pre-existing/auto-created topic to the intended
-                  # spec. Idempotent: re-setting a config to its current value
-                  # is a no-op, so this is safe to run on every install/upgrade
-                  # and self-heals a topic that lost the create race. -p/-r are
-                  # stripped (partition/replica counts aren't config-altered
-                  # here); each `-c k=v` becomes `--set k=v`.
-                  rpk -X brokers=$B topic create $topic $args || true
-                  setargs=$(printf ' %s' "$args" | sed -E 's/ -p [0-9]+//; s/ -r [0-9]+//; s/ -c / --set /g')
-                  if [ -n "$setargs" ]; then
-                    rpk -X brokers=$B topic alter-config $topic $setargs || true
-                  fi
-                done
-                echo "INFO: Topics initialized on $B"
+              # Wait for the hq broker's Kafka API, then create topics. The
+              # Helm hook fires right after the StatefulSet is created, so the
+              # broker pod may still be warming. Probe with `rpk topic list` —
+              # a plain Kafka-API (9092) call, the same surface the
+              # topic-create calls below use. NOT `rpk cluster health`: that
+              # hits the Admin API (9644), and with no -X admin.hosts it falls
+              # back to localhost, never succeeds from this pod, and silently
+              # wedges the entire post-install hook chain. Bounded at 300s
+              # (150 x 2s), the same bound tier-schema-init-<tier> and each
+              # topic-init-<tier> apply to their own waits, so a genuinely-down
+              # broker fails the Job visibly instead of wedging the upgrade.
+              HQB={{ .Release.Name }}-redpanda-hq:{{ .Values.redpandaHq.kafkaPort }}
+              echo "Waiting for $HQB (Kafka API)..."
+              attempts=0
+              until rpk topic list -X brokers=$HQB >/dev/null 2>&1; do
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge 150 ]; then
+                  echo "TOPIC_INIT_REFUSED broker_unready hq"
+                  exit 1
+                fi
+                sleep 2
               done
+              {{- include "openddil.topicInitCreateLoop" (dict "broker" "$HQB") | nindent 14 }}
 
               # ---------------------------------------------------------
               # HQ-ONLY TOPICS -- the release boundary

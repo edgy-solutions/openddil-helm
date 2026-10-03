@@ -1098,3 +1098,114 @@ checksum annotation cannot disagree.
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}
+
+{{- /*
+openddil.topicInitCreateLoop — the one shared topic spec list
+
+Every topic-init Job — the hub-only one in infrastructure.yaml (hq broker)
+and each tier's topic-init-<id> in infrastructure.yaml (that tier's own
+broker, rendered from the same range/if as that tier's broker StatefulSet)
+— must create and config-enforce the identical set of topics. This
+is the only form of that fact that cannot drift the way the pre-split
+broker list once did: infrastructure.yaml's topic-init used to range over
+a SEPARATE predicate from the broker StatefulSet loop, and a tier-managed
+region got a broker and never got topic-init because the two lists were
+kept in parallel (see infrastructure.yaml's "BROKER LIST" history
+comment). A hub edit and a tier edit of two copies of this spec list would
+be the same failure mode one level up.
+
+Takes .broker — the host:port string passed to `-X brokers=`.
+*/ -}}
+{{- define "openddil.topicInitCreateLoop" -}}
+{{- $B := .broker }}
+echo "INFO: Initializing topics on {{ $B }}"
+# ---------------------------------------------------------
+# compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
+# ---------------------------------------------------------
+# Restate's Kafka ingress is built on a librdkafka WITHOUT
+# zstd support. One zstd batch on a subscribed topic kills
+# the consumer task with
+#   Decompression (codec 0x4) ... Local: Not implemented
+# Restate restarts the task from its stored position, hits
+# the same batch, and dies again -- forever. Fusion then
+# receives ZERO invocations while every pod reads Running:
+# no severity, no transitions, no tactical events, and a
+# completeness gate refusing an empty table downstream.
+#
+# `compression.type=producer` -- the default these topics
+# carried -- means "store whatever codec the CLIENT chose",
+# and one of the clients chooses zstd. The default is not
+# neutral here: it delegates a correctness-critical choice
+# to whichever library happens to write the batch.
+#
+# NOT the ingress-*-raw topics' explicit zstd below. Those
+# are deliberate for volume and Restate subscribes to none
+# of them. Stated because that setting is the obvious
+# suspect and is NOT the cause -- HQ's asset-cm-state,
+# never altered by hand, read `producer (DEFAULT_CONFIG)`.
+#
+# Measured 2026-09-17 on the lab. This reaches the work
+# cluster on upgrade, so it is a P0.1 gate, not a lab
+# curiosity.
+# A COMMENT MAY NOT LIVE INSIDE A LINE CONTINUATION.
+# These notes sat between `for spec in \` and the first
+# item. The backslash joins the next line, `#` then eats
+# the rest of it, and the `for` loses its word list: the
+# WHOLE script becomes a parse error, so nothing in this
+# Job runs -- including the fix the comment documents.
+# Cost: 7 backoff retries, a Failed hook, a release stuck
+# in pending-upgrade, and the post-upgrade bootstrap that
+# re-registers Restate never firing. Verified with `sh -n`
+# (2026-09-17) rather than by reading. Keep prose ABOVE the
+# `for`, and syntax-check this script when it changes.
+for spec in \
+  "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
+  "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
+  "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
+  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
+  "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000 -c compression.type=lz4" \
+  "ingress-dis-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+  "ingress-proprietary-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+  "ingress-sim-a-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+  "ingress-weapons-capability-raw|-p 8 -r 1 -c retention.ms=86400000 -c compression.type=zstd" \
+  "asset-capability-snapshot|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
+  "asset-telemetry-windows|-p 8 -r 1 -c retention.ms=86400000 -c cleanup.policy=delete -c compression.type=lz4" \
+  "asset-logistics-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "derived-sustainment|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
+  "region-fleet-summary|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "region-top-factors|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "region-wear-trends|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
+  "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  ; do
+  topic="${spec%%|*}"
+  args="${spec##*|}"
+  # Create idempotently. BUT: if the topic was already auto-
+  # created by redpanda (a producer/consumer connected before
+  # this post-install hook completed), the create no-ops with
+  # `|| true` and the intended -c configs are NEVER applied --
+  # the topic silently keeps redpanda defaults (1MB
+  # max.message.bytes, cleanup.policy=delete). That breaks
+  # large-message topics like asset-element-telemetry (per-
+  # asset element snapshots run several MB): the sim's produce
+  # fails with MessageSizeTooLargeError and NO tiles ever land.
+  # Observed on openddil-test 2026-07-31.
+  #
+  # So ALSO enforce the -c configs via alter-config, which
+  # corrects a pre-existing/auto-created topic to the intended
+  # spec. Idempotent: re-setting a config to its current value
+  # is a no-op, so this is safe to run on every install/upgrade
+  # and self-heals a topic that lost the create race. -p/-r are
+  # stripped (partition/replica counts aren't config-altered
+  # here); each `-c k=v` becomes `--set k=v`.
+  rpk -X brokers={{ $B }} topic create $topic $args || true
+  setargs=$(printf ' %s' "$args" | sed -E 's/ -p [0-9]+//; s/ -r [0-9]+//; s/ -c / --set /g')
+  if [ -n "$setargs" ]; then
+    rpk -X brokers={{ $B }} topic alter-config $topic $setargs || true
+  fi
+done
+echo "INFO: Topics initialized on {{ $B }}"
+{{- end -}}
