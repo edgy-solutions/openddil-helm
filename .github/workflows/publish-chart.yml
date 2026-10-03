@@ -14,15 +14,20 @@ name: Package and publish openddil-demo chart
 #
 # Triggers:
 #   * push to master with paths affecting openddil-demo/** (the chart)
-#     or this workflow file itself.
-#   * manual workflow_dispatch (for re-publish without a source change,
-#     e.g. after a registry hiccup).
+#     or this workflow file itself, or the overwrite guard script.
+#   * manual workflow_dispatch (to finish a publish a registry hiccup cut
+#     short; a version that did reach the registry is refused, not re-pushed).
 #
 # Versioning: the published OCI tag comes from openddil-demo/Chart.yaml's
 # `version:` field. Bump that line when you want a new artifact tag.
-# Same-version pushes OVERWRITE the existing tag at ghcr.io — by design,
-# but means version bumps are how you keep history. There is no `:latest`
-# tag for helm OCI charts; consumers must pin to a specific version.
+# A published version is never overwritten: before pushing, the run asks
+# the registry whether the tag exists (scripts/check-chart-version-
+# unpublished.sh) and fails if it does, or if the registry gives no clear
+# answer. A version is a pin, and a pin that a later push can silently
+# change is not one. So a change under openddil-demo/** (or to this file)
+# without a version bump fails this run; that failure is the guard working.
+# There is no `:latest` tag for helm OCI charts; consumers must pin to a
+# specific version.
 
 on:
   push:
@@ -30,6 +35,7 @@ on:
     paths:
       - "openddil-demo/**"
       - ".github/workflows/publish-chart.yml"
+      - "scripts/check-chart-version-unpublished.sh"
   workflow_dispatch:
 
 permissions:
@@ -71,6 +77,15 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             --username ${{ github.repository_owner }} \
             --password-stdin
+
+      - name: Refuse to overwrite a published version
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/check-chart-version-unpublished.sh \
+            "ghcr.io/${{ github.repository_owner }}/openddil/charts/openddil-demo" \
+            "${{ steps.chart_version.outputs.version }}"
 
       - name: Package chart
         run: helm package openddil-demo -d /tmp
