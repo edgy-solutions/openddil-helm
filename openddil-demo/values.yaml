@@ -931,6 +931,24 @@ egress:
     enabled: false
     config: []
     tokenSecret: ""
+  # A destination's OAuth2 client_credentials secret (client_credentials.py,
+  # forwarder.py's/intake.py's `auth`): `existingSecret` names a Kubernetes
+  # Secret created OUT OF BAND -- the chart never creates, renders or reads
+  # its value, only the mount. When set, the whole Secret (every key) is
+  # mounted read-only at /etc/openddil/egress-credentials/ into both
+  # egress-forwarder and egress-intake. The convention is key
+  # `client-secret`, referenced from a forwarder route's or an intake
+  # poll's `auth.client_secret_file`:
+  #   auth:
+  #     token_url: https://example.invalid/oauth/token
+  #     client_id: openddil-egress
+  #     client_secret_file: /etc/openddil/egress-credentials/client-secret
+  # Create the Secret from a file that lives outside any repo, and delete
+  # that file afterwards:
+  #   kubectl create secret generic <name> \
+  #     --from-file=client-secret=<path-outside-any-repo>
+  credentials:
+    existingSecret: ""
   # egress-stub-sink (stub_sink.py): the stand-in destination for whatever
   # does not have a real credential yet. STUB_SINK_DIR is an emptyDir at
   # /data -- the cluster's PVCs are NFS-backed, and an emptyDir survives a

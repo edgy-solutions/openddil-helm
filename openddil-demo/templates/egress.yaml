@@ -40,6 +40,7 @@ on egress.routes/.kinds/.assembler/.forwarder/.stubSink for the shapes.
 {{- $intakeConfigMountPath := "/etc/openddil/egress-intake" }}
 {{- $forwarderConfigMountPath := "/etc/openddil/egress-forwarder" }}
 {{- $forwarderTokenMountPath := "/etc/openddil/egress-forwarder-token" }}
+{{- $credentialsMountPath := "/etc/openddil/egress-credentials" }}
 {{- $stubArtifactsMountPath := "/etc/openddil/egress-stub-artifacts" }}
 {{- range $i, $r := .Values.egress.routes }}
 {{- if $r.group }}
@@ -397,6 +398,11 @@ spec:
               mountPath: {{ $kindsMountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.egress.credentials.existingSecret }}
+            - name: egress-credentials
+              mountPath: {{ $credentialsMountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: egress-intake-config
           configMap:
@@ -405,6 +411,19 @@ spec:
         - name: egress-kinds
           configMap:
             name: {{ .Release.Name }}-egress-kinds
+        {{- end }}
+        {{- if .Values.egress.credentials.existingSecret }}
+        # A destination's OAuth2 client secret (egress.credentials):
+        # created out of band, mounted whole, read-only. The chart never
+        # reads, creates or renders its value -- only the mount. `optional:
+        # true` means a Secret that hasn't arrived yet shows up as
+        # `no_credential` in the intake's own logs, not as this pod stuck
+        # in ContainerCreating holding up the upgrade.
+        - name: egress-credentials
+          secret:
+            secretName: {{ .Values.egress.credentials.existingSecret }}
+            optional: true
+            defaultMode: 0440
         {{- end }}
 {{- end }}
 {{- if .Values.egress.forwarder.enabled }}
@@ -468,6 +487,11 @@ spec:
               mountPath: {{ $forwarderTokenMountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.egress.credentials.existingSecret }}
+            - name: egress-credentials
+              mountPath: {{ $credentialsMountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: egress-forwarder-config
           configMap:
@@ -483,6 +507,19 @@ spec:
             items:
               - key: token
                 path: token
+        {{- end }}
+        {{- if .Values.egress.credentials.existingSecret }}
+        # A destination's OAuth2 client secret (egress.credentials):
+        # created out of band, mounted whole, read-only. The chart never
+        # reads, creates or renders its value -- only the mount. `optional:
+        # true` means a Secret that hasn't arrived yet shows up as
+        # `no_credential` in the forwarder's own logs, not as this pod
+        # stuck in ContainerCreating holding up the upgrade.
+        - name: egress-credentials
+          secret:
+            secretName: {{ .Values.egress.credentials.existingSecret }}
+            optional: true
+            defaultMode: 0440
         {{- end }}
 {{- end }}
 {{- if .Values.egress.stubSink.enabled }}

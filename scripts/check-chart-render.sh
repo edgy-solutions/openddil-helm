@@ -956,6 +956,84 @@ case "$g10_default_dest$g10_changed_dest" in
     ;;
 esac
 
+
+# --- guard 11: a destination's client secret mounts only into the --------
+# ---           forwarder and intake, read-only, and the chart never ------
+# ---           renders it -------------------------------------------------
+# THE SHAPE BEING GUARDED: egress.credentials.existingSecret names a Secret
+# created OUT OF BAND for a destination's OAuth2 client_credentials grant.
+# The chart's only job is the mount: the whole Secret, read-only, at
+# /etc/openddil/egress-credentials/, into egress-forwarder and egress-intake
+# ONLY -- never creating, rendering or reading the Secret's own value, and
+# never mounting it into any other pod. Empty (the default) must leave no
+# trace of it anywhere.
+echo
+echo "guard 11: destination client-secret mounts only into forwarder/intake"
+
+CRED_ARGS="--set releasability.enabled=true --set egress.forwarder.enabled=true --set egress.intake.enabled=true --set egress.credentials.existingSecret=example-creds"
+
+# shellcheck disable=SC2086
+render $CRED_ARGS | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+CRED_PATH = "/etc/openddil/egress-credentials"
+bad = []
+mounted = []
+for d in docs:
+    kind = d.get("kind")
+    name = (d.get("metadata") or {}).get("name", "")
+    if kind == "Secret" and name == "example-creds":
+        bad.append("rendered Secret/" + name + " -- the chart must never create this Secret")
+    if kind != "Deployment":
+        continue
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    for c in pod.get("containers") or []:
+        cname = c.get("name")
+        for vm in c.get("volumeMounts") or []:
+            mp = (vm.get("mountPath") or "").rstrip("/")
+            if mp == CRED_PATH:
+                mounted.append((name, cname))
+                if not vm.get("readOnly"):
+                    bad.append(name + "/" + str(cname) + ": mount is not readOnly")
+expected_suffixes = ("-egress-forwarder", "-egress-intake")
+unexpected = [n for n, _ in mounted if not n.endswith(expected_suffixes)]
+if unexpected:
+    bad.append("mounted into unexpected pod(s): " + ", ".join(sorted(set(unexpected))))
+missing = [suf for suf in expected_suffixes if not any(n.endswith(suf) for n, _ in mounted)]
+if missing:
+    bad.append("not mounted into: " + ", ".join(missing))
+if bad:
+    print("  FAIL: " + "; ".join(bad))
+    sys.exit(1)
+print("  ok   : mounted read-only into exactly forwarder+intake (" + str(len(mounted)) + " container(s)); no Secret/example-creds rendered")
+' || fail=1
+
+# Empty (default) existingSecret: no egress-credentials mount or volume
+# anywhere -- the vacuous-pass floor for the guard above.
+render --set releasability.enabled=true --set egress.forwarder.enabled=true --set egress.intake.enabled=true | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+CRED_PATH = "/etc/openddil/egress-credentials"
+bad = []
+for d in docs:
+    if d.get("kind") != "Deployment":
+        continue
+    name = (d.get("metadata") or {}).get("name", "")
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    for c in pod.get("containers") or []:
+        for vm in c.get("volumeMounts") or []:
+            mp = (vm.get("mountPath") or "").rstrip("/")
+            if mp == CRED_PATH:
+                bad.append(name + "/" + str(c.get("name")) + " mounts egress-credentials with existingSecret empty")
+    for v in pod.get("volumes") or []:
+        if "egress-credentials" in (v.get("name") or ""):
+            bad.append(name + " declares an egress-credentials volume with existingSecret empty")
+if bad:
+    print("  FAIL: " + "; ".join(bad))
+    sys.exit(1)
+print("  ok   : existingSecret empty -- no egress-credentials mount or volume anywhere")
+' || fail=1
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
