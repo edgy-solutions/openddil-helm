@@ -17,13 +17,18 @@ Baseline is **chart 0.1.63** (`openddil-helm@b8dd645`), the version the work clu
 - Ten chart commits had landed after the 0.1.71 bump (`91c1758`) without bumping it. The publish workflow
   overwrites the OCI tag on a same-version push, so the `0.1.71` tag was replaced ten times.
 - Do not install `0.1.71` by tag. What it held depended on when it was pulled.
+- Since `a0f2c06`, publish refuses a version that is already published. It asks the registry first and fails
+  the run on a hit. It was red-checked by republishing 0.1.72: the run failed at that step, and the 0.1.72
+  digest above did not change. A chart change without a version bump now fails publish, so `0.1.72` cannot
+  be overwritten the way `0.1.71` was.
 - Quote the version and the digest in every prediction and every change record.
 
 This file was the 0.1.71 package (pinned to `458d39b`). It was renamed when the version string was bumped. Every
 render and measurement in it was taken at `458d39b`, which carries the same templates.
 
 The lab has been on `458d39b` since 2026-10-03 (lab revision 77, deployed under the string 0.1.71), and all
-six predicted sections matched. It took the commits one at a time (revisions 69–77), never the whole jump at once. The jump
+six predicted sections matched. Revision 78 (2026-10-03) installed 0.1.72 itself, with one change: a new egress
+image, below. It took the commits one at a time (revisions 69–77), never the whole jump at once. The jump
 work makes is therefore a **render** here and has not been measured.
 
 Every count in this file is either a **render** (produced from the repository, reproducible on any
@@ -162,12 +167,13 @@ It supersedes `sha256:0f94d16c…` from the 0.1.68 package. It carries:
 - the destination registry;
 - the CM intake configuration.
 
-**Images of record on the lab at revision 77,** for the components this range added or changed. Each
-row is `<registry>/<image>@sha256:…`:
+**Images of record on the lab at revision 78,** for the components this range added or changed. Each
+row is `<registry>/<image>@sha256:…`. Only egress differs from revision 77 (`sha256:c43dd555…`). It is built
+from `openddil-demo@afbf19e`, which carries the intake fix described in §2.8:
 
 | image | digest |
 |---|---|
-| `openddil/egress` | `sha256:c43dd555ecb3eb325172a35b38d5d9d6d69e3343a0d21246f09c0d9b6cb18f99` |
+| `openddil/egress` | `sha256:dcaa659fc1df8095fa4533f8c566044a41d81ce138e39127fd361706078f7096` |
 | `openddil/frontend` | `sha256:4436c59b411bd2180882dc76c1f4f8c67b80cdc3ecb8a26a5d4ceb0db860c865` |
 | `openddil/cm-service` | `sha256:37fde7591ea9c45510978dd3ffd625f5a4976384adde3ea679d7d84da57129d7` |
 | `openddil/sensor-ingest` | `sha256:fbaf35aebf5f09166ab353b1fb17bb6f15375e64ac008a9235064b8982e606ab` |
@@ -405,9 +411,16 @@ Measured on the lab, second run (2026-10-03):
   came back.
   - The fourth artifact answers an event that existed only because a fault report had been filed. The reset
     clears filed reports, so that event is gone.
-  - The intake now defers that artifact on every poll. It should refuse it as `answered_record_unknown`.
-  - The intake's caught-up test never passes on an answers topic whose partitions are empty after the reset.
-    This is open against the intake, not the reset.
+  - That egress image deferred the artifact on every poll, when it should have refused it as
+    `answered_record_unknown`. Its caught-up test never passed on an answers topic whose partitions the reset had
+    emptied. It also read each partition from offset 0, which jumps to the end of a partition trimmed below a later
+    record and skips that record.
+  - **Fixed in the egress image above** (`openddil-demo@0ed44f2`, `afbf19e`), with each test failing first. A
+    partition that is empty at startup counts as caught up, and every partition is read from its log start.
+  - Measured at revision 78: the fourth artifact was refused `answered_record_unknown` on the intake's second poll,
+    with the missing id in the stored decision's detail. `intake_records` reads **4**, and no artifact is deferred.
+  - The refusal shows as the stored decision, an `INTAKE_DECISION` log line and a `refused:<reason>` counter. The
+    released-records pane lists admitted rows only, so no pane shows intake-time refusals.
 - **Everything else** matched the first run: the fleet, rollups, logins, panes, TAK picture and egress
   event, and the five pre-flight checks after.
 
