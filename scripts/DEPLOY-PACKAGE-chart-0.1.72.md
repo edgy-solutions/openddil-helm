@@ -354,7 +354,7 @@ withheld (unlabelled, shown to nobody).
 **It round-tripped on the lab at `458d39b` on 2026-10-03, twice.**
 - The first run used `scripts/reset-scenario.sh` unchanged since `b7f4ff7`, and is described in the list below. An
   earlier round trip on 2026-10-01 at 0.1.68 gave the same shape.
-- The second run, the same day, used `329dfc0`, which brings `intake_records` into the reset. It is described after
+- The second run, the same day, used `0f26421`, which brings `intake_records` into the reset. It is described after
   the gaps table.
 
 - The red check ran first. `--verify-only` against the live store gave rc=1 with 163 FAIL, so the zero
@@ -384,7 +384,7 @@ withheld (unlabelled, shown to nobody).
     sees it as a re-send.
 - The five pre-flight checks passed afterwards.
 
-What the reset does **not** cover, as of `329dfc0`:
+What the reset does **not** cover, as of `0f26421`:
 
 | state | reset today | effect |
 |---|---|---|
@@ -392,7 +392,7 @@ What the reset does **not** cover, as of `329dfc0`:
 | the TAK server's in-memory picture | outside the reset; the CoT adapter is quiesced and restarts | the server keeps running; its replay history after a reset is shorter |
 | reported faults (Restate) | cleared | a filed report is gone after a reset and must be filed again; telemetry-derived faults come back on their own |
 
-**`intake_records` is in the reset from `329dfc0`.** Phase 6 deletes it, and phase 8 asserts it at zero on every
+**`intake_records` is in the reset from `0f26421`.** Phase 6 deletes it, and phase 8 asserts it at zero on every
 postgres. `egress-intake` is quiesced with the producers, down in phase 2 and back in phase 9. It reads its answers
 topic by assignment with no committed group, so the consumer census cannot derive it; it is matched by name.
 
