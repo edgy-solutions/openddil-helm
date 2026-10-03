@@ -339,24 +339,47 @@ withheld (unlabelled, shown to nobody).
 
 0.1.68 §2.8 said that the reset was not yet proven end to end. **That line is replaced.**
 
-**It round-tripped on the lab on 2026-10-01**, at 0.1.68, with `scripts/reset-scenario.sh` at
-`b7f4ff7`.
-- Phase 8 is read while producers are quiesced. It measured every store, topic, Restate and Electric
-  instance at zero: 580 PASS and 1 FAIL.
-- The FAIL is the regional aggregator line. The check cannot measure it, because the aggregator emits
-  nothing from an empty state. The read after the restore showed the aggregator had been emptied.
-- The fleet, rollups, registrations and the four-profile login came back as predicted.
+**It round-tripped on the lab at `458d39b` on 2026-10-03**, with `scripts/reset-scenario.sh` unchanged since
+`b7f4ff7` (an earlier round trip on 2026-10-01 at 0.1.68 gave the same shape).
 
-**It has not yet run on `458d39b`.** This chart adds state that the reset does not know about:
+- The red check ran first. `--verify-only` against the live store gave rc=1 with 163 FAIL, so the zero
+  assertion can fail.
+- The run was `--red-check-topic-config`, rc=1 (the expected rc).
+  - The cluster was asserted, and pre-flight passed: 100 consumer groups, 0 undeclared.
+  - The derived quiesce set was 26 workloads, the egress gate, assembler, forwarder and CoT adapter
+    among them.
+  - All 4 Restate instances cleared in 1–2 passes. 66 topics were recreated, 0 "already exists".
+- **Phase 8**, read while the producers are quiesced: 627 PASS and 1 FAIL.
+  - Every store, topic, Restate and Electric reading was zero, and audit_log was unchanged.
+  - The FAIL is the regional aggregator line. The check cannot measure it, because the aggregator emits
+    nothing from an empty state.
+- **180 s after the restore**, the workload set was unchanged and the whole fleet was operational at every
+  store.
+  - The regional rollup showed no destroyed asset. That is the evidence that the aggregator had been
+    emptied.
+  - Registrations, the four-profile login, sign-out, the per-viewer egress panes, the PEP bypass block
+    and the TAK reader all matched the state before the reset.
+  - The egress pods came back with 0 restarts and 0 `STARTUP_REFUSED`. The gate logged one
+    `REGISTRY_VERSIONS` line, with the same versions.
+- **After the simulator's scripted destroy fired**, the baseline read was identical to the one taken
+  before the reset, apart from volume counters.
+- **Egress after the restore.** Within 21 s, a telemetry-derived fault event was rebuilt and admitted by
+  both routes. The stub received it once.
+  - Its event id is the same as before the reset, because ids are derived, not random. A destination
+    sees it as a re-send.
+- The five pre-flight checks passed afterwards.
+
+What the reset does **not** cover, as measured on that run:
 
 | state | reset today | effect |
 |---|---|---|
-| `intake_records` (hub store) | not in the reset's table list | survives a reset; phase 8 does not look at it |
-| egress topics and consumer groups | handled generically: captured, trimmed or recreated; the egress consumers are quiesced by their declarations | none expected |
-| the stub sink's received log (emptyDir) and the TAK server's in-memory picture | outside the reset | survive a reset until those pods restart |
-| fault reports (Restate) | cleared | a filed report is gone after a reset; telemetry-derived faults come back on their own |
+| `intake_records` (hub store) | not in the reset's table list | survived the reset with its rows; phase 8 does not look at it |
+| the stub sink's received log (emptyDir) | outside the reset | survives a reset until that pod restarts |
+| the TAK server's in-memory picture | outside the reset; the CoT adapter is quiesced and restarts | the server keeps running; its replay history after a reset is shorter |
+| reported faults (Restate) | cleared | a filed report is gone after a reset and must be filed again; telemetry-derived faults come back on their own |
 
-Do not run the reset at work until it has round-tripped on `458d39b`.
+Whether `intake_records` belongs in the reset is open. Until it is decided, a reset at work leaves returned
+artifacts in place.
 
 ### 2.9 Still true from the 0.1.68 package §2
 
