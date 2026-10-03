@@ -61,6 +61,10 @@ the suite measured a byte of what the read path carries. This one does.
   topic: after an upgrade the asset carries its BIT fault only, and BEAT 2b's
   report must be filed again (measured 2026-10-03: the BIT-only event
   re-appeared 3.5 minutes after the egress pods started).
+* **A scenario reset clears filed reports too**, by design. The BIT-only
+  event came back 21 s after the reset's restore (measured 2026-10-03). Wait
+  5 minutes after an upgrade or a reset before rolling, so the HQ pane shows
+  the BIT-only event before BEAT 2b files the report.
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
@@ -106,8 +110,11 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 
 1. **TAK device — the fleet with readiness.** 9 tracks, `dis:1:1:1000`–`1008`
    (measured 2026-10-03; `1005` is destroyed and still shown — a C2 viewer
-   needs to see the loss). Readiness reads as `<dry run: how a track shows
-   readiness on the device — icon, colour, remarks>`. `<dry run: whether
+   needs to see the loss). Nine is right, not eight. The destroyed track
+   stays on the picture because it says destroyed: operational status and
+   reporting status are two columns so that it can. **Point at `1005` and
+   say:** "that one's dead and still beaconing." Readiness reads as
+   `<dry run: how a track shows readiness on the device — icon, colour, remarks>`. `<dry run: whether
    1008's array fault is visible on the device; point at it only if so>`.
 2. **The connection is the credential.** The device holds a client
    certificate for exactly one CN; a device without it, or with a cert the
