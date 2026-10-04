@@ -100,8 +100,12 @@ printf '%s
 # folding them into the total — "12 unresolved" and "12 unresolved, all of
 # them munitions" call for different work.
 echo
+# "DIS-sourced" is decided by the row's declared provenance.source_protocol
+# field (ADR-0047: asset_id is opaque), not a `dis:` prefix on asset_id.
+# "DIS/IEEE-1278.1-binary" is the literal value the DIS ingress sets (see
+# openddil-demo/dynamic-mappings/sim-dis-mapping.yaml).
 MUNITION_HINT="$(q "SELECT count(*) FROM telemetry_latest_state
-                     WHERE asset_id LIKE 'dis:%'
+                     WHERE provenance->>'source_protocol' = 'DIS/IEEE-1278.1-binary'
                        AND coalesce(btrim(platform_variant),'') = '';")"
 echo "  note: the ontology recognises ZERO kind=2 (munition) entries (GD-11)."
 echo "        A scenario emitting munitions reports them unresolved here, and"
