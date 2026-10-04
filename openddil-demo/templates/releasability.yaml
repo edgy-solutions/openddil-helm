@@ -1,3 +1,4 @@
+{{- include "openddil.cmReportsFaultCodesGuard" . }}
 {{- if .Values.releasability.enabled }}
 {{- $root := . }}
 # =============================================================================
@@ -329,7 +330,7 @@ spec:
       annotations:
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
-          ) (ternary (list (toJson $root.Values.cmReports.faultCodes)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
+          ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -368,9 +369,9 @@ spec:
               value: {{ printf "http://%s-cm-intake%s:4197/cm-events" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
             - name: OPENDDIL_REPORT_SOURCE
               value: {{ $root.Values.cmReports.source | quote }}
-            {{- if $root.Values.cmReports.faultCodes }}
-            - name: OPENDDIL_FAULT_CODES_PATH
-              value: /etc/openddil/cm-fault-codes.json
+            {{- if $root.Values.cmReports.faultCatalog }}
+            - name: OPENDDIL_FAULT_CATALOG_PATH
+              value: /etc/openddil/cm-fault-catalog.json
             {{- end }}
             {{- end }}
             {{- if $root.Values.releasability.oidc.enabled }}
@@ -436,7 +437,7 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
-            {{- if $root.Values.cmReports.enabled }}
+            {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
               readOnly: true
@@ -445,16 +446,22 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
-        {{- if $root.Values.cmReports.enabled }}
+        {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:
             name: {{ $root.Release.Name }}-cm-fault-codes
         {{- end }}
-{{- if $root.Values.cmReports.enabled }}
+{{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---
-# The fixed list the PEP will accept a report's fault code against.
+# The per-platform-variant catalog the PEP will check a report's fault
+# code against (tools/fault_catalog/build_fault_catalog.py's output;
+# there is no global list -- see cmReports.faultCatalog in values.yaml).
 # Shared by every PEP that mounts it -- root pep and every tier-pep -- so
-# there is exactly one list, not one per tier.
+# there is exactly one catalog, not one per tier.
+#
+# The ConfigMap's own name stays `-cm-fault-codes` (not `-cm-fault-catalog`)
+# on purpose, to avoid an object rename on upgrade; only its data key and
+# the mounted filename changed.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -462,7 +469,7 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
 data:
-  cm-fault-codes.json: {{ toJson $root.Values.cmReports.faultCodes | quote }}
+  cm-fault-catalog.json: {{ toJson $root.Values.cmReports.faultCatalog | quote }}
 {{- end }}
 {{- if $root.Values.releasability.destinations.entries }}
 ---

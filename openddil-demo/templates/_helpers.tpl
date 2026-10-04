@@ -344,6 +344,20 @@ declines. One template, three consumers, no opportunity to disagree.
 {{ printf "%s/auth/callback" (include "openddil.publicOrigin" .) }}
 {{- end }}
 
+{{/*
+cmReports.faultCodes retired in favour of cmReports.faultCatalog: the flat
+list let an asset be offered, and the gateway accept, another platform
+variant's fault code. Called unconditionally, before any enabled-gating in
+every template that touches cmReports, so a values file still carrying the
+old key fails fast on `helm template`/`helm install` rather than silently
+being ignored.
+*/}}
+{{- define "openddil.cmReportsFaultCodesGuard" -}}
+{{- if .Values.cmReports.faultCodes }}
+{{- fail "cmReports.faultCodes (a global list) was replaced by cmReports.faultCatalog, generated per variant from the manual's fault-isolation modules" }}
+{{- end }}
+{{- end -}}
+
 {{- define "openddil.keycloakPublicUrl" -}}
 {{ printf "%s%s" (include "openddil.publicOrigin" .) (.Values.releasability.keycloak.basePath | trimSuffix "/") }}
 {{- end }}

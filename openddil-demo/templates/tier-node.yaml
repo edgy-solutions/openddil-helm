@@ -37,6 +37,7 @@
    * TREE-SHAPED CONFIG ONLY, not tree-shaped mechanism (ADR-0033 constraint
      5). Nothing here may assume strictly-tree data flow as an invariant.
 */}}
+{{- include "openddil.cmReportsFaultCodesGuard" . }}
 {{- if .Values.tierNode.enabled }}
 {{- $root := . -}}
 {{- $tn := .Values.tierNode -}}
@@ -997,7 +998,7 @@ spec:
             $tier.id
             ($tier.publicOrigin | default "")
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
-          ) (ternary (list (toJson $root.Values.cmReports.faultCodes)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
+          ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -1047,13 +1048,13 @@ spec:
               value: {{ printf "http://%s-tier-cm-intake-%s%s:4197/cm-events" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
             - name: OPENDDIL_REPORT_SOURCE
               value: {{ $root.Values.cmReports.source | quote }}
-            {{- if $root.Values.cmReports.faultCodes }}
-            # Unset (not an empty-list file) when no fault code is
+            {{- if $root.Values.cmReports.faultCatalog }}
+            # Unset (not an empty-catalog file) when no fault catalog is
             # configured — same "route exists, nothing to serve" shape as
             # EGRESS_PANE elsewhere: pep.py 404s the discrepancy route
             # rather than accepting writes against a taxonomy of zero.
-            - name: OPENDDIL_FAULT_CODES_PATH
-              value: /etc/openddil/cm-fault-codes.json
+            - name: OPENDDIL_FAULT_CATALOG_PATH
+              value: /etc/openddil/cm-fault-catalog.json
             {{- end }}
             {{- end }}
             {{- if and $root.Values.releasability.oidc.enabled $tier.publicOrigin }}
@@ -1124,7 +1125,7 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
-            {{- if $root.Values.cmReports.enabled }}
+            {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
               readOnly: true
@@ -1133,7 +1134,7 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
-        {{- if $root.Values.cmReports.enabled }}
+        {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:
             name: {{ $root.Release.Name }}-cm-fault-codes
