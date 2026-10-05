@@ -621,6 +621,13 @@ spec:
             # blind.
             - name: BRIDGE_CONSUMER_GROUP
               value: "bridge-group-{{ $edge.id }}"
+            # This is the hub-attached edge, not a tier bridge: its relay
+            # commits every 5.0s measured at rest, not the 0.5-1.5s of a
+            # tier bridge/uplink, so it needs its own exchange period
+            # rather than the module's tier-sized default. Threshold =
+            # 2*(E+H) = 2*(5+2) = 14s with no exchange before SEVERED.
+            - name: LINK_EXCHANGE_PERIOD_S
+              value: "5"
           ports:
             - name: metrics
               containerPort: {{ $root.Values.projector.port }}

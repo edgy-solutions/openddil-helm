@@ -691,10 +691,12 @@ spec:
             # link.
             - name: BUFFER_ROW_ID
               value: {{ $tier.id | quote }}
-            - name: TOXIPROXY_API_URL
-              value: {{ printf "http://%s-toxiproxy%s:8475" $root.Release.Name (include "openddil.svcDomain" $root) | quote }}
-            - name: HQ_LINK_PROXY
-              value: "hq-link"
+            # Reachability threshold input, not a toxiproxy address. Measured
+            # relay commit gaps at rest: 0.5-1.5s for tier bridges/uplinks.
+            # The monitor severs after 2*(E+H) = 2*(1.5+2) = 7s with no
+            # exchange, and restores after 2 consecutive exchanges.
+            - name: LINK_EXCHANGE_PERIOD_S
+              value: "1.5"
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL
