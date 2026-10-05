@@ -1105,6 +1105,19 @@ spec:
               value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
             - name: OPENDDIL_WAN_CONTROL_ROLES
               value: {{ $root.Values.releasability.wanControlRoles | quote }}
+            # P5: THIS TIER'S own uplink, if it has one (openddil.uplinkPort
+            # non-empty for a tier in openddil.uplinkLinks). Falls back to
+            # hq-link -- unreachable in practice for a tier PEP, since a
+            # tier is rendered only when it's an edge or a tier-managed
+            # region, and both are always in the link set -- so a tier PEP
+            # degrades to the pre-P5 shared link rather than naming nothing.
+            {{- $tierUplinkPort := include "openddil.uplinkPort" (dict "tier" $tier "root" $root) }}
+            {{- $tierWanUplink := "hq-link" }}
+            {{- if $tierUplinkPort }}{{- $tierWanUplink = printf "uplink-%s" $tier.id }}{{- end }}
+            - name: OPENDDIL_WAN_UPLINK
+              value: {{ $tierWanUplink | quote }}
+            - name: OPENDDIL_WAN_LINKS
+              value: {{ $tierWanUplink | quote }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE

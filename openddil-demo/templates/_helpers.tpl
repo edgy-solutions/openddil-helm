@@ -320,6 +320,40 @@ the frontend has a real proxy to enable/disable). Idempotent — POST to
 {{- end }}
 
 {{/*
+openddil.toxiproxyConfigJson — toxiproxy.json's content, as content.
+
+EXTRACTED SO THE CHECKSUM CAN HASH THE THING ITSELF, same reasoning as
+openddil.edgeBridgeConnectYaml: toxiproxy reads -config only at process
+start (see infrastructure.yaml's own comment on the container args), so a
+link-set change with no pod roll leaves new config on disk and the OLD set
+of proxies in the running process. Both the ConfigMap and the Deployment's
+checksum/config annotation render THIS, so the next field anyone adds to a
+proxy entry is covered automatically rather than covered if they remember.
+
+hq-link first (unconditional, unchanged shape), then one `uplink-<id>`
+proxy per entry of openddil.uplinkLinks — same port for toxiproxy's own
+listen address and for the upstream broker's dedicated listener, so no
+second port value needs to agree with it.
+*/}}
+{{- define "openddil.toxiproxyConfigJson" -}}
+{{- $root := . -}}
+{{- $proxies := list (dict
+      "name" "hq-link"
+      "listen" (printf "0.0.0.0:%d" (int $root.Values.toxiproxy.apiPort))
+      "upstream" (printf "%s-redpanda-hq%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.redpandaHq.kafkaPort))
+      "enabled" true) -}}
+{{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
+{{- $port := (.port | int) -}}
+{{- $proxies = append $proxies (dict
+      "name" (printf "uplink-%s" .id)
+      "listen" (printf "0.0.0.0:%d" $port)
+      "upstream" (printf "%s%s:%d" .parentBrokerService (include "openddil.svcDomain" $root) $port)
+      "enabled" true) -}}
+{{- end }}
+{{- toPrettyJson $proxies -}}
+{{- end }}
+
+{{/*
 ADR-0029 Slice 1 — the app's public origin, and the two URLs derived from it.
 
 DERIVED IN ONE PLACE, ON PURPOSE. The OIDC redirect URI must match EXACTLY
@@ -510,20 +544,103 @@ Usage:
 {{- end }}
 
 {{/*
+openddil.uplinkLinks — one entry per tier that bridges upward through
+toxiproxy (P5: a severable link PER TIER, not one shared hq-link).
+
+THE LINK SET is every tier of kind "edge", plus every region that is
+tier-managed (openddil.isTierManaged) — exactly the tiers that run a
+bridge (edge.yaml's edge-hq-bridge, or tier-node.yaml's tier-uplink-bridge
+for a managed region with children). Filtered from openddil.tierList, so
+entries keep its order.
+
+PORT is `.Values.toxiproxy.uplinkPortBase` plus THIS link's own index in
+THIS filtered list (not tierList's index), so ports are contiguous for
+the links that actually exist. Deterministic — no state needed, and
+the same number is reused for toxiproxy's listen port, the parent
+broker's extra listener and that broker's Service port.
+
+EFFECTIVE PARENT is the same resolution openddil.bridgeTarget has always
+made: `.parent | .region`, self-parent refused (a region's own `region:
+<own id>` is not a parent), falling back to hq when the resolved parent
+has no tier node of its own.
+
+SHAPE. Each entry:
+    id                    the tier's own id
+    port                  int; see above
+    parentBrokerHost      the parent's bare id, or "hq" for the fallback —
+                           matches against a broker loop's own tier id
+                           ($tier.id, or the literal "hq" for redpanda-hq)
+                           to find the links THAT broker must carry
+    parentBrokerService   the parent broker's k8s Service name
+                           (<release>-redpanda-<parent-id-or-hq>), with no
+                           svcDomain suffix — callers append their own
+    listenerName           "uplink_<index>" — underscore, not dash: this
+                           is a Kafka listener name, not a k8s object name
+
+Usage: {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
+*/}}
+{{- define "openddil.uplinkLinks" -}}
+{{- $root := . -}}
+{{- $out := list -}}
+{{- range (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if or (eq .kind "edge") (include "openddil.isTierManaged" (dict "id" .id "root" $root)) }}
+{{- $parent := .parent | default .region | default "" -}}
+{{- if eq $parent (.id | toString) }}{{- $parent = "" -}}{{- end -}}
+{{- $parentManaged := "" -}}
+{{- if $parent }}
+{{- $parentManaged = include "openddil.isTierManaged" (dict "id" $parent "root" $root) -}}
+{{- end }}
+{{- $parentBrokerHost := "hq" -}}
+{{- $parentBrokerService := printf "%s-redpanda-hq" $root.Release.Name -}}
+{{- if $parentManaged }}
+{{- $parentBrokerHost = $parent -}}
+{{- $parentBrokerService = printf "%s-redpanda-%s" $root.Release.Name $parent -}}
+{{- end }}
+{{- $index := len $out -}}
+{{- $out = append $out (dict
+      "id" .id
+      "port" (add (int $root.Values.toxiproxy.uplinkPortBase) $index)
+      "parentBrokerHost" $parentBrokerHost
+      "parentBrokerService" $parentBrokerService
+      "listenerName" (printf "uplink_%d" $index)) -}}
+{{- end }}
+{{- end }}
+{{- toYaml $out -}}
+{{- end }}
+
+{{/*
+openddil.uplinkPort — one tier's own uplink port, or "" if it has none.
+
+Usage: include "openddil.uplinkPort" (dict "tier" $tier "root" $root)
+*/}}
+{{- define "openddil.uplinkPort" -}}
+{{- $id := .tier.id -}}
+{{- $result := "" -}}
+{{- range (include "openddil.uplinkLinks" .root | fromYamlArray) }}
+{{- if eq .id $id }}{{- $result = (.port | int) -}}{{- end }}
+{{- end }}
+{{- $result -}}
+{{- end }}
+
+{{/*
 openddil.bridgeTarget — where a tier's bridge publishes.
 
 A tier publishes its derived state to ITS PARENT, not to HQ. That is what
 makes the tree recursive rather than two-level: an edge under a
 tier-managed region bridges to the REGION, and the region bridges to HQ.
 
-Falls back to HQ (via toxiproxy, which is the severable link) when the
-parent has no tier node — an edge whose region is not tier-managed still
-reaches HQ directly, which is today's topology and stays correct.
+P5: EVERY UPLINK IS SEVERABLE, not just the one to HQ. Before P5, a bridge
+to a MANAGED parent went direct to `redpanda-<parent>:9092` — nothing but
+sever-tier.sh's NetworkPolicy could cut it. Now every tier in
+openddil.uplinkLinks (every edge, plus every tier-managed region) publishes
+through its OWN toxiproxy proxy, `uplink-<id>`, at its own deterministic
+port (openddil.uplinkPort). The managed-parent direct path is gone.
 
-⚠ THE FALLBACK IS THE COMPATIBILITY PATH, NOT THE MODEL. If every tier in a
-subtree is managed, nothing should be addressing HQ but the top of that
-subtree. A bridge still pointing at toxiproxy under a managed region means
-the retarget did not reach it.
+Falls back to the old shared hq-link port only for a tier NOT in the link
+set — which, as of P5, SHOULD NOT HAPPEN: every caller today (an edge via
+edge.yaml, or a tier-managed region's uplink via tier-node.yaml) is always
+in openddil.uplinkLinks. Kept so an unanticipated caller degrades to a
+real (if unseverable) address instead of rendering an empty one.
 
 Usage: include "openddil.bridgeTarget" (dict "tier" $tier "root" $root)
 */}}
@@ -533,22 +650,11 @@ Usage: include "openddil.bridgeTarget" (dict "tier" $tier "root" $root)
        explicit `parent`; a raw `.Values.edges` entry carries `region`,
        which for an edge IS its parent. edge.yaml still ranges over
        `.Values.edges` for its udpPort and friends, so both spellings
-       arrive here.
-
-       SELF-PARENT IS REFUSED, not resolved. `region: <own id>` is how a
-       region is shaped, and treating that as a parent would have a tier
-       bridge to itself — the same violation the tier config hit an hour
-       ago, wearing a different value. No parent belongs to the root
-       alone, so anything that resolves to itself is treated as having
-       none and falls back to HQ. */ -}}
-{{- $parent := .tier.parent | default .tier.region | default "" -}}
-{{- if eq $parent (.tier.id | toString) }}{{- $parent = "" -}}{{- end -}}
-{{- $parentManaged := "" -}}
-{{- if $parent }}
-{{- $parentManaged = include "openddil.isTierManaged" (dict "id" $parent "root" $root) -}}
-{{- end }}
-{{- if $parentManaged -}}
-{{- printf "%s-redpanda-%s%s:%d" $root.Release.Name $parent (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) -}}
+       arrive here. openddil.uplinkLinks resolves the same way, from the
+       same two spellings. */ -}}
+{{- $port := include "openddil.uplinkPort" (dict "tier" .tier "root" $root) -}}
+{{- if $port -}}
+{{- printf "%s-toxiproxy%s:%s" $root.Release.Name (include "openddil.svcDomain" $root) $port -}}
 {{- else -}}
 {{- printf "%s-toxiproxy%s:%d" $root.Release.Name (include "openddil.svcDomain" $root) (int $root.Values.toxiproxy.apiPort) -}}
 {{- end -}}

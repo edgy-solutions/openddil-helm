@@ -15,6 +15,12 @@
 # hq-link proxy via toxiproxy's HTTP API severs the link for real (TCP socket
 # is closed, in-flight produces fail, consumer-group lag at the bridge climbs).
 # The frontend's WAN-link toggle hits /proxies/hq-link.
+#
+# P5: ONE PROXY PER TIER UPLINK, not just hq-link. openddil.uplinkLinks adds
+# an `uplink-<id>` proxy for every edge and every tier-managed region, each
+# severable on its own -- see openddil.bridgeTarget and
+# openddil.toxiproxyConfigJson (the content both this ConfigMap and the
+# Deployment's checksum/config annotation below render).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,16 +28,8 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
 data:
-  # Templated: upstream points at the k8s redpanda-hq service.
   toxiproxy.json: |
-    [
-      {
-        "name": "hq-link",
-        "listen": "0.0.0.0:{{ .Values.toxiproxy.apiPort }}",
-        "upstream": "{{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }}",
-        "enabled": true
-      }
-    ]
+{{- include "openddil.toxiproxyConfigJson" . | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,6 +45,12 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Toxiproxy reads -config only at process start (see the args
+        # comment below), so a link-set change -- a tier added or removed,
+        # or a parent flip -- needs this to roll the pod; nothing else
+        # would, since the ConfigMap's own content isn't in the pod spec.
+        checksum/config: {{ include "openddil.toxiproxyConfigJson" . | sha256sum }}
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 8 }}
@@ -80,6 +84,10 @@ spec:
               containerPort: {{ .Values.toxiproxy.apiPort }}
             - name: proxy
               containerPort: {{ .Values.toxiproxy.proxyPort }}
+            {{- range (include "openddil.uplinkLinks" . | fromYamlArray) }}
+            - name: {{ .listenerName | replace "_" "-" }}
+              containerPort: {{ .port | int }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/toxiproxy.json
@@ -107,6 +115,11 @@ spec:
     - name: proxy
       port: {{ .Values.toxiproxy.proxyPort }}
       targetPort: proxy
+    {{- range (include "openddil.uplinkLinks" . | fromYamlArray) }}
+    - name: {{ .listenerName | replace "_" "-" }}
+      port: {{ .port | int }}
+      targetPort: {{ .listenerName | replace "_" "-" }}
+    {{- end }}
 ---
 # =============================================================================
 # Redpanda — one single-broker StatefulSet per edge cluster
@@ -130,6 +143,20 @@ spec:
 {{- $edge := $tier }}
 {{- $name := printf "%s-redpanda-%s" $.Release.Name $edge.id }}
 {{- $component := printf "redpanda-%s" $edge.id }}
+{{- /* P5: this broker's OWN extra listeners -- one per uplink whose
+       EFFECTIVE PARENT (openddil.uplinkLinks) is this tier. A leaf edge
+       with no children of its own renders an empty list here, and the
+       args/ports below are then byte-identical to pre-P5. */ -}}
+{{- $childLinks := list -}}
+{{- range (include "openddil.uplinkLinks" $ | fromYamlArray) }}
+{{- if eq .parentBrokerHost $edge.id }}{{- $childLinks = append $childLinks . -}}{{- end }}
+{{- end }}
+{{- $extraKafkaAddr := "" -}}
+{{- $extraAdvertiseAddr := "" -}}
+{{- range $childLinks }}
+{{- $extraKafkaAddr = printf "%s,%s://0.0.0.0:%d" $extraKafkaAddr .listenerName (.port | int) -}}
+{{- $extraAdvertiseAddr = printf "%s,%s://%s-toxiproxy%s:%d" $extraAdvertiseAddr .listenerName $.Release.Name (include "openddil.svcDomain" $) (.port | int) -}}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -181,12 +208,18 @@ spec:
             - --node-id
             - "0"
             - --kafka-addr
-            - PLAINTEXT://0.0.0.0:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://0.0.0.0:{{ $.Values.redpandaEdge.outsidePort }}
+            # P5: plus one `uplink_<n>://0.0.0.0:<port>` per child link whose
+            # effective parent is THIS broker ($extraKafkaAddr above) --
+            # empty, hence no change, for a tier with no children.
+            - PLAINTEXT://0.0.0.0:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://0.0.0.0:{{ $.Values.redpandaEdge.outsidePort }}{{ $extraKafkaAddr }}
             - --advertise-kafka-addr
             # In-cluster clients hit the Service DNS; OUTSIDE listener kept for
             # kubectl port-forward debugging (advertise localhost so the
-            # forwarded client can resolve).
-            - PLAINTEXT://{{ $name }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://localhost:{{ $.Values.redpandaEdge.outsidePort }}
+            # forwarded client can resolve). Plus one matching
+            # `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>` per child
+            # link ($extraAdvertiseAddr above), so metadata for that
+            # listener answers with the severable toxiproxy address.
+            - PLAINTEXT://{{ $name }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://localhost:{{ $.Values.redpandaEdge.outsidePort }}{{ $extraAdvertiseAddr }}
             # NO AUTO-CREATED TOPICS.
             #
             # This is the FRESH-INSTALL path and it is deliberately not the only
@@ -231,6 +264,10 @@ spec:
               containerPort: {{ $.Values.redpandaEdge.outsidePort }}
             - name: admin
               containerPort: {{ $.Values.redpandaEdge.adminPort }}
+            {{- range $childLinks }}
+            - name: {{ .listenerName | replace "_" "-" }}
+              containerPort: {{ .port | int }}
+            {{- end }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/redpanda/data
@@ -316,6 +353,11 @@ spec:
     - name: admin
       port: {{ $.Values.redpandaEdge.adminPort }}
       targetPort: admin
+    {{- range $childLinks }}
+    - name: {{ .listenerName | replace "_" "-" }}
+      port: {{ .port | int }}
+      targetPort: {{ .listenerName | replace "_" "-" }}
+    {{- end }}
 ---
 # ===========================================================================
 # topic-init-{{ $edge.id }} — creates this tier's Kafka topics on its own broker
@@ -429,6 +471,21 @@ spec:
 # so the edge-hq-bridge's Kafka client is actually mediated by toxiproxy.
 # Without this, the bridge bootstraps through toxiproxy then jumps directly
 # to the broker, and DDIL sever never severs anything.
+#
+# P5: plus one extra listener per uplink whose effective parent is hq
+# itself (openddil.uplinkLinks, parentBrokerHost == "hq") -- same mechanism
+# as the per-tier brokers above, just keyed to the literal "hq" rather than
+# a tier id, since hq isn't a tierList entry.
+{{- $hqChildLinks := list -}}
+{{- range (include "openddil.uplinkLinks" . | fromYamlArray) }}
+{{- if eq .parentBrokerHost "hq" }}{{- $hqChildLinks = append $hqChildLinks . -}}{{- end }}
+{{- end }}
+{{- $hqExtraKafkaAddr := "" -}}
+{{- $hqExtraAdvertiseAddr := "" -}}
+{{- range $hqChildLinks }}
+{{- $hqExtraKafkaAddr = printf "%s,%s://0.0.0.0:%d" $hqExtraKafkaAddr .listenerName (.port | int) -}}
+{{- $hqExtraAdvertiseAddr = printf "%s,%s://%s-toxiproxy%s:%d" $hqExtraAdvertiseAddr .listenerName $.Release.Name (include "openddil.svcDomain" $) (.port | int) -}}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -477,11 +534,16 @@ spec:
             - --node-id
             - "0"
             - --kafka-addr
-            - PLAINTEXT://0.0.0.0:{{ .Values.redpandaHq.kafkaPort }},OUTSIDE://0.0.0.0:{{ .Values.redpandaHq.outsidePort }}
+            # P5: plus one `uplink_<n>://0.0.0.0:<port>` per $hqChildLinks
+            # entry above -- empty, hence no change, when nothing bridges
+            # straight to hq (every tier under a tier-managed subtree).
+            - PLAINTEXT://0.0.0.0:{{ .Values.redpandaHq.kafkaPort }},OUTSIDE://0.0.0.0:{{ .Values.redpandaHq.outsidePort }}{{ $hqExtraKafkaAddr }}
             - --advertise-kafka-addr
             # PLAINTEXT advertises TOXIPROXY (load-bearing — see docker-compose
             # comment + ADR for rationale). OUTSIDE for kubectl port-forward.
-            - PLAINTEXT://{{ .Release.Name }}-toxiproxy{{ include "openddil.svcDomain" . }}:{{ .Values.toxiproxy.apiPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}
+            # Plus one matching `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>`
+            # per $hqChildLinks entry, same reasoning as the per-tier brokers.
+            - PLAINTEXT://{{ .Release.Name }}-toxiproxy{{ include "openddil.svcDomain" . }}:{{ .Values.toxiproxy.apiPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}{{ $hqExtraAdvertiseAddr }}
             # NO AUTO-CREATED TOPICS.
             #
             # This is the FRESH-INSTALL path and it is deliberately not the only
@@ -526,6 +588,10 @@ spec:
               containerPort: {{ .Values.redpandaHq.outsidePort }}
             - name: admin
               containerPort: {{ .Values.redpandaHq.adminPort }}
+            {{- range $hqChildLinks }}
+            - name: {{ .listenerName | replace "_" "-" }}
+              containerPort: {{ .port | int }}
+            {{- end }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/redpanda/data
@@ -594,6 +660,11 @@ spec:
     - name: admin
       port: {{ .Values.redpandaHq.adminPort }}
       targetPort: 9644
+    {{- range $hqChildLinks }}
+    - name: {{ .listenerName | replace "_" "-" }}
+      port: {{ .port | int }}
+      targetPort: {{ .listenerName | replace "_" "-" }}
+    {{- end }}
 ---
 # =============================================================================
 # Redpanda broker alias Services — bare names for docker-compose-baked configs

@@ -261,6 +261,13 @@ toxiproxy:
     limits:   { cpu: 200m, memory: 256Mi }
   apiPort: 8474
   proxyPort: 8475
+  # Base port for the PER-TIER uplink proxies (openddil.uplinkLinks):
+  # one port per link, this value plus the link's index in that list.
+  # The same number is used in three places for a given link -- toxiproxy's
+  # listen address, the parent broker's extra `uplink_<n>` listener, and
+  # that broker's Service port -- so it is fully deterministic and needs
+  # no state. hq-link's own apiPort above is unaffected.
+  uplinkPortBase: 18400
 
 # --- Electric SQL -----------------------------------------------------------
 electric:
