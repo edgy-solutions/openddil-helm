@@ -596,6 +596,41 @@ back at the login screen with no error to read.
 {{- end -}}
 {{- end }}
 
+{{/*
+openddil.validateEdgeAttachment — render-time guard for `edges[].attachment`.
+
+An edge MAY declare `attachment: tier | hq` (see values.yaml's `edges:`
+comment). The declaration is optional, but when made it must agree with
+how the edge is actually deployed: `hq` for an edge that is NOT tier-managed
+(writes straight to HQ postgres), `tier` for one that is (projects into its
+own tier store). A declaration that disagrees with the topology, or spells
+the value wrong, fails the render outright — same reasoning as
+openddil.cmReportsFaultCodesGuard: a silently wrong label on the HQ screens
+is worse than a loud failure at template time.
+
+Called unconditionally from hub.yaml so a values file with a bad declaration
+fails `helm template`/`helm install` regardless of what else is enabled.
+
+Usage: {{ include "openddil.validateEdgeAttachment" . }}
+*/}}
+{{- define "openddil.validateEdgeAttachment" -}}
+{{- $root := . -}}
+{{- range $edge := $root.Values.edges }}
+{{- if $edge.attachment }}
+{{- if not (has $edge.attachment (list "tier" "hq")) }}
+{{- fail (printf "edge %s declares attachment: %s (must be \"tier\" or \"hq\")" $edge.id $edge.attachment) }}
+{{- end }}
+{{- $managed := eq (include "openddil.isTierManaged" (dict "id" $edge.id "root" $root)) "true" }}
+{{- if and (eq $edge.attachment "hq") $managed }}
+{{- fail (printf "edge %s is declared attachment: hq but has a tier node (tierNode.tiers)" $edge.id) }}
+{{- end }}
+{{- if and (eq $edge.attachment "tier") (not $managed) }}
+{{- fail (printf "edge %s is declared attachment: tier but has no tier node" $edge.id) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
 
 {{/*
 openddil.edgeBridgeTopics / openddil.tierUplinkTopics — the relay's topic
@@ -1102,13 +1137,24 @@ mappings:
 {{/*
 The hub frontend's deployment.json: configured released-records panes, plus
 the egress admission pane when releasability is on (the pane is then served
-through the hub PEP). One definition, so the ConfigMap and the pod's
-checksum annotation cannot disagree.
+through the hub PEP), plus the declared edge attachments (DECLARED ONLY,
+never inferred — an edge that says nothing about `attachment` is simply
+omitted from the list, same as the OSS default). One definition, so the
+ConfigMap and the pod's checksum annotation cannot disagree.
 */}}
 {{- define "openddil.frontendDeploymentJson" -}}
 {{- $d := dict "releasedRecordsPanes" (.Values.frontend.releasedRecordsPanes | default list) -}}
 {{- if .Values.releasability.enabled -}}
 {{- $_ := set $d "egressPane" (dict "destination" .Values.egress.destination) -}}
+{{- end -}}
+{{- $declaredEdges := list -}}
+{{- range .Values.edges }}
+{{- if .attachment }}
+{{- $declaredEdges = append $declaredEdges (dict "id" .id "attachment" .attachment) }}
+{{- end }}
+{{- end }}
+{{- if $declaredEdges -}}
+{{- $_ := set $d "edges" $declaredEdges -}}
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}

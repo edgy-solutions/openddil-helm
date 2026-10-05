@@ -13,6 +13,7 @@
      * projector-hq (HQ-cluster topic projection to postgres-hq)
      * frontend (nginx-served static + /proxies/ proxy to toxiproxy)
 */}}
+{{- include "openddil.validateEdgeAttachment" . }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
 {{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
     .Values.postgresHq.auth.username

@@ -66,6 +66,18 @@ jobs:
 # redpanda-connect + faust-edge + projector + edge-hq-bridge. The id is
 # embedded in service names, hostnames advertised to Kafka, and FAUST_APP_ID.
 # Region binding controls which faust-regional aggregator the edge feeds.
+#
+# Each entry may also carry `attachment: tier | hq` (optional, declared only
+# -- never inferred). It tells the HQ screens how this edge's rows reach
+# postgres, so they can label rows that will not survive a WAN cut the same
+# way a tiered edge's rows do:
+#   - tier: projects into its own tier store; survives an uplink cut; goes
+#     stale at HQ during one.
+#   - hq: writes straight to HQ; has no edge store; stays fresh at HQ during
+#     an uplink cut because HQ is where it lives.
+# A declaration must agree with the chart's own tierNode topology (checked by
+# openddil.validateEdgeAttachment at render time) -- omitting it is fine, but
+# a wrong one fails the render rather than mislabeling the screens.
 edges:
   # udpPort: container listen port. Same value (62040-62042) used as NodePort
   # if sensorIngest.externalAccess.enabled=true. Hold for in-cluster-only
