@@ -1,0 +1,28 @@
+{{- if and .Values.ingress.enabled .Values.ingress.httpsRedirect.enabled }}
+{{- /*
+   https-redirect-middleware.yaml — Traefik-only redirect from plain http to
+   https, for every host this chart serves over TLS.
+
+   Referenced by name from the root Ingress (when ingress.tls is set) and
+   from a tier's Ingress (when that tier's publicOrigin is https://) via the
+   traefik.ingress.kubernetes.io/router.middlewares annotation — see
+   openddil.ingressAnnotations in _helpers.tpl. A tier served over plain http
+   gets no reference and this Middleware does not apply to it.
+
+   traefik.io/v1alpha1 Middleware is a Traefik CRD, not part of core
+   Kubernetes or networking.k8s.io — rendering it against a cluster without
+   Traefik's CRDs installed fails the apply. That is why this is opt-in
+   (ingress.httpsRedirect.enabled, default false) rather than following
+   ingress.tls automatically.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Release.Name }}-https-redirect
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+{{- end }}

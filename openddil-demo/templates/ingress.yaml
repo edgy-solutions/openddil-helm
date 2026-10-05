@@ -18,9 +18,10 @@ metadata:
   name: {{ .Release.Name }}-frontend
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- $redirect := and .Values.ingress.httpsRedirect.enabled (not (empty .Values.ingress.tls)) }}
+  {{- with include "openddil.ingressAnnotations" (dict "root" . "redirect" $redirect) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- nindent 4 . }}
   {{- end }}
 spec:
   {{- with .Values.ingress.className }}

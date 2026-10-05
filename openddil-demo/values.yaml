@@ -1074,6 +1074,16 @@ ingress:
   # hosts need a DIFFERENT certificate from the root's.
   tierTlsSecretName: ""
 
+  # Redirect plain http to https on every host this chart serves over TLS
+  # (the root host when ingress.tls is set; a tier host when its publicOrigin
+  # is https://). Traefik only: renders a traefik.io/v1alpha1 Middleware
+  # (redirectScheme https, permanent) and references it from those Ingresses.
+  # Off by default because the Middleware CRD does not exist on other
+  # controllers. Without it, http to a TLS host still routes, and a Secure
+  # session cookie is then never sent back.
+  httpsRedirect:
+    enabled: false
+
 # --- Tier presentation node (ADR-0032 §d, Arc 1 Phase 3) --------------------
 # The deployable unit that makes a tier's own truth visible AT that tier, and
 # keeps it visible when the uplink is cut.

@@ -29,9 +29,11 @@ Frontend (port-forward):
 {{- end }}
 
 DDIL sever (toxiproxy):
-  The frontend's WAN-link toggle hits /proxies/hq-link which is proxied
-  through the frontend nginx to the toxiproxy daemon. Disabling the proxy
-  severs the edge-hq-bridge → redpanda-hq link for real (not simulated).
+  Each tier's own WAN toggle severs that tier's own uplink through
+  /proxies/uplink (toxiproxy uplink-<id>, to its parent broker). The root
+  (HQ) toggle severs HQ's own uplink, /proxies/hq-link, the advertised
+  address of the HQ broker's PLAINTEXT listener. Disabling a proxy severs
+  the link for real, not simulated.
 
 Tear down:
   helm -n {{ .Release.Namespace }} uninstall {{ .Release.Name }}

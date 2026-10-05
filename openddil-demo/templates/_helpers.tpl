@@ -694,6 +694,45 @@ back at the login screen with no error to read.
 {{- ternary "true" "false" (hasPrefix "https://" .origin) -}}
 {{- end }}
 
+{{/*
+openddil.ingressAnnotations — the annotations map for ONE Ingress object.
+
+Starts from ingress.annotations (the operator's own, shared by every
+Ingress this chart renders). When .redirect is true, this particular
+Ingress serves a TLS host and ingress.httpsRedirect.enabled is set, so the
+Traefik middleware that does the http->https redirect is referenced via
+traefik.ingress.kubernetes.io/router.middlewares -- appended with a comma
+if the operator already set that key (Traefik reads a comma-joined list),
+set outright otherwise.
+
+deepCopy is required: sprig's `set` mutates the map it is given, and
+ingress.annotations is read twice in one render (root Ingress, each tier
+Ingress) -- without the copy the second call would see the first call's
+middleware already appended and double it.
+
+Returns "" (nothing) when the resulting map is empty, so the call site's
+`with` skips the `annotations:` key entirely -- today's behaviour when
+ingress.annotations is {}.
+
+Usage: {{ include "openddil.ingressAnnotations" (dict "root" $root "redirect" $redirect) }}
+*/}}
+{{- define "openddil.ingressAnnotations" -}}
+{{- $root := .root -}}
+{{- $ann := deepCopy (.root.Values.ingress.annotations | default dict) -}}
+{{- if .redirect -}}
+{{- $key := "traefik.ingress.kubernetes.io/router.middlewares" -}}
+{{- $mw := printf "%s-%s-https-redirect@kubernetescrd" $root.Release.Namespace $root.Release.Name -}}
+{{- if hasKey $ann $key -}}
+{{- $ann = set $ann $key (printf "%s,%s" (get $ann $key) $mw) -}}
+{{- else -}}
+{{- $ann = set $ann $key $mw -}}
+{{- end -}}
+{{- end -}}
+{{- if $ann }}
+{{ toYaml $ann }}
+{{- end -}}
+{{- end }}
+
 {{- define "openddil.isTierManaged" -}}
 {{- if .root.Values.tierNode.enabled -}}
 {{- if empty .root.Values.tierNode.tiers -}}true

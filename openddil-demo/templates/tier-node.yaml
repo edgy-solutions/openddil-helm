@@ -1216,9 +1216,10 @@ metadata:
   name: {{ $root.Release.Name }}-tier-{{ $tier.id }}
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
-  {{- with $root.Values.ingress.annotations }}
+  {{- $tierRedirect := and $root.Values.ingress.httpsRedirect.enabled (ne $tierTlsSecret "") }}
+  {{- with include "openddil.ingressAnnotations" (dict "root" $root "redirect" $tierRedirect) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- nindent 4 . }}
   {{- end }}
 spec:
   {{- with $root.Values.ingress.className }}
