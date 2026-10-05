@@ -397,6 +397,12 @@ case "$ACTION" in
     # Force every flow to re-establish under the policy. Without this the
     # policy is applied and the traffic continues; see the header.
     join="$(printf '%s,' "${SITE[@]}")"; join="${join%,}"
+    # The tier's own relay, resolved BEFORE the restart (relay_components
+    # probes live pods). A leaf's is edge-hq-bridge-<id>, an intermediate's
+    # tier-uplink-<id>; the gate below must excuse whichever this tier has.
+    RELAYS="$(relay_components)"
+    relay_re="edge-hq-bridge"
+    for c in $RELAYS; do relay_re="${relay_re}|${c}"; done
     echo "  restarting ${#SITE[@]} site pod(s) so open connections re-establish under the policy"
     kubectl delete pod -n "$NS"       -l "app.kubernetes.io/component in (${join})" --wait=false >/dev/null 2>&1
 
@@ -406,7 +412,7 @@ case "$ACTION" in
     # TWO EXCLUSIONS, and the second is the interesting one:
     #   * Completed pods (finished Jobs) are not workloads and never
     #     become Ready.
-    #   * THE BRIDGE IS EXPECTED TO FAIL. Its entire job is to cross the
+    #   * THE RELAY IS EXPECTED TO FAIL. Its entire job is to cross the
     #     boundary this policy closes, so under a real sever it cannot
     #     start. Requiring the WHOLE site to be healthy contradicts what
     #     the test is for -- the first version of this gate did exactly
@@ -414,7 +420,7 @@ case "$ACTION" in
     #     that was 13/14 up and behaving correctly.
     deadline=$(( $(date +%s) + 300 ))
     while :; do
-      notready="$(kubectl get pods -n "$NS"         -l "app.kubernetes.io/component in (${join})"         --no-headers 2>/dev/null         | grep -v "Completed"         | grep -v "edge-hq-bridge"         | grep -vc " Running")"
+      notready="$(kubectl get pods -n "$NS"         -l "app.kubernetes.io/component in (${join})"         --no-headers 2>/dev/null         | grep -v "Completed"         | grep -v -E "$relay_re"         | grep -vc " Running")"
       [ "${notready:-1}" -eq 0 ] && break
       if [ "$(date +%s)" -gt "$deadline" ]; then
         echo "FAIL: the site did not return to Ready within 300s" >&2
@@ -431,7 +437,7 @@ case "$ACTION" in
     # CORROBORATION, not a requirement: the bridge SHOULD be unhealthy.
     # If it is happily Running while the site is severed, it is still
     # reaching HQ and the cut is not what it claims.
-    bstate="$(kubectl get pods -n "$NS" -l app.kubernetes.io/component=edge-hq-bridge-${TIER}                 --no-headers 2>/dev/null | grep -v Completed | awk '{print $3}' | head -1)"
+    bstate="$(kubectl get pods -n "$NS" -l app.kubernetes.io/component="$(echo "$RELAYS" | head -1)"                 --no-headers 2>/dev/null | grep -v Completed | awk '{print $3}' | head -1)"
     case "${bstate:-missing}" in
       Running) echo "  note: the bridge is Running — checked seconds after restart, so" ;
                echo "        it may simply not have failed its first publish yet. Only" ;
