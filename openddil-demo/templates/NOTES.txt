@@ -15,7 +15,7 @@ Verify a sensor-ingest is producing to its edge cluster:
 {{- if .Values.ingress.enabled }}
 
 Frontend:
-  http://{{ .Values.ingress.host }}/
+  {{ if .Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}/
 
   (Add an entry to /etc/hosts pointing {{ .Values.ingress.host }} at your
   ingress controller's external IP if you haven't set DNS yet.)

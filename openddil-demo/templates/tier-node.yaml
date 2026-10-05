@@ -1184,18 +1184,40 @@ spec:
 # being a control on the page and becomes a fact about where you connected.
 # It is also what the per-tier auth client needs, since a redirect URI is
 # per host.
+{{- $tierHost := $tier.publicOrigin | trimPrefix "https://" | trimPrefix "http://" }}
+{{- $tierTlsSecret := "" }}
+{{- if hasPrefix "https://" $tier.publicOrigin }}
+{{- $tierTlsSecret = $root.Values.ingress.tierTlsSecretName }}
+{{- if not $tierTlsSecret }}
+{{- if not (empty $root.Values.ingress.tls) }}
+{{- $tierTlsSecret = (first $root.Values.ingress.tls).secretName }}
+{{- end }}
+{{- end }}
+{{- if not $tierTlsSecret }}
+{{- fail (printf "tier %s publicOrigin (%s) is https but no TLS secret name could be resolved for its Ingress: ingress.tierTlsSecretName is empty, and ingress.tls has no entry with a usable secretName to fall back to. Set one of the two." $tier.id $tier.publicOrigin) }}
+{{- end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ $root.Release.Name }}-tier-{{ $tier.id }}
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
+  {{- with $root.Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- with $root.Values.ingress.className }}
   ingressClassName: {{ . }}
   {{- end }}
+  {{- if $tierTlsSecret }}
+  tls:
+    - hosts: [{{ $tierHost | quote }}]
+      secretName: {{ $tierTlsSecret | quote }}
+  {{- end }}
   rules:
-    - host: {{ $tier.publicOrigin | trimPrefix "https://" | trimPrefix "http://" | quote }}
+    - host: {{ $tierHost | quote }}
       http:
         paths:
           - path: /

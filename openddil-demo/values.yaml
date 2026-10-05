@@ -1056,6 +1056,16 @@ ingress:
   # tls:
   #   - hosts: [openddil.example.com]
   #     secretName: openddil-tls
+  # Secret served for every TIER host whose publicOrigin is https:// (see
+  # tierNode.tiers below). The chart never creates this Secret — it is
+  # expected to exist in the release namespace already, same as the root's
+  # own tls[].secretName above.
+  #
+  # Empty (default) -> use the secretName of ingress.tls[0], on the
+  # assumption that one certificate (wildcard or multi-SAN) already covers
+  # both the root host and every tier host. Set this only when the tier
+  # hosts need a DIFFERENT certificate from the root's.
+  tierTlsSecretName: ""
 
 # --- Tier presentation node (ADR-0032 §d, Arc 1 Phase 3) --------------------
 # The deployable unit that makes a tier's own truth visible AT that tier, and
