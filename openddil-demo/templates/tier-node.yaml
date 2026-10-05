@@ -1095,6 +1095,14 @@ spec:
               value: {{ join "," $root.Values.releasability.subjectScopedTables | quote }}
             - name: OPENDDIL_OVERSIGHT_ROLES
               value: {{ join "," $root.Values.releasability.oversightRoles | quote }}
+            # WAN sever/restore control. Base URL only -- the gateway
+            # appends /proxies/hq-link itself (gateway/pep.py). Port is
+            # toxiproxy's proxyPort (8475), which is actually the admin API
+            # port despite the name; see infrastructure.yaml's own comment.
+            - name: OPENDDIL_WAN_CONTROL_URL
+              value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
+            - name: OPENDDIL_WAN_CONTROL_ROLES
+              value: {{ $root.Values.releasability.wanControlRoles | quote }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE
