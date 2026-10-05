@@ -42,6 +42,8 @@ on egress.routes/.kinds/.assembler/.forwarder/.stubSink for the shapes.
 {{- $forwarderTokenMountPath := "/etc/openddil/egress-forwarder-token" }}
 {{- $credentialsMountPath := "/etc/openddil/egress-credentials" }}
 {{- $stubArtifactsMountPath := "/etc/openddil/egress-stub-artifacts" }}
+{{- $egressTrustExtraMountPath := "/etc/openddil/egress-trust-extra" }}
+{{- $egressTrustMountPath := "/etc/openddil/egress-trust" }}
 {{- range $i, $r := .Values.egress.routes }}
 {{- if $r.group }}
 {{- fail (printf "egress.routes[%d]: per-route 'group' is not supported -- every route shares the gate's ONE consumer group (routes.py refuses this too; see egress.yaml's comment on egress-gate-c2)" $i) }}
@@ -364,10 +366,54 @@ spec:
         # with the registries -- identical computation to the gate's
         # checksum/registries above (egress-gate-c2), on purpose.
         checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list (toJson .Values.releasability.destinations))) | sha256sum | quote }}
+        {{- if .Values.egress.trust.caConfigMap }}
+        checksum/egress-trust: {{ .Values.egress.trust.caConfigMap | sha256sum | quote }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.egress.trust.caConfigMap }}
+      # Extra CA trust (egress.trust.caConfigMap): assembles the image's own
+      # system CA bundle plus every PEM in the ConfigMap into one file on an
+      # emptyDir, so a destination behind a private/corporate CA verifies --
+      # IN ADDITION to the system bundle, never instead of it. See
+      # values.yaml's comment on egress.trust for the full contract.
+      initContainers:
+        - name: trust-bundle
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              system_bundle=/etc/ssl/certs/ca-certificates.crt
+              if [ ! -f "$system_bundle" ]; then
+                echo "trust-bundle: missing system CA bundle $system_bundle" >&2
+                exit 1
+              fi
+              cat "$system_bundle" > {{ $egressTrustMountPath }}/ca-bundle.crt
+              count=0
+              for f in {{ $egressTrustExtraMountPath }}/*; do
+                if [ -f "$f" ]; then
+                  cat "$f" >> {{ $egressTrustMountPath }}/ca-bundle.crt
+                  printf '\n' >> {{ $egressTrustMountPath }}/ca-bundle.crt
+                  count=$((count + 1))
+                fi
+              done
+              if [ "$count" -eq 0 ]; then
+                echo "trust-bundle: no CA files found in {{ $egressTrustExtraMountPath }}" >&2
+                exit 1
+              fi
+              echo "trust-bundle: $(grep -c 'BEGIN CERTIFICATE' {{ $egressTrustMountPath }}/ca-bundle.crt) certificates in bundle"
+          volumeMounts:
+            - name: egress-trust-extra
+              mountPath: {{ $egressTrustExtraMountPath }}
+              readOnly: true
+            - name: egress-trust
+              mountPath: {{ $egressTrustMountPath }}
       {{- end }}
       containers:
         - name: intake
@@ -387,6 +433,10 @@ spec:
               value: {{ $topazUrl | quote }}
             - name: LOG_LEVEL
               value: "INFO"
+            {{- if .Values.egress.trust.caConfigMap }}
+            - name: SSL_CERT_FILE
+              value: {{ printf "%s/ca-bundle.crt" $egressTrustMountPath | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.egress.resources | nindent 12 }}
           volumeMounts:
@@ -401,6 +451,11 @@ spec:
             {{- if .Values.egress.credentials.existingSecret }}
             - name: egress-credentials
               mountPath: {{ $credentialsMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.egress.trust.caConfigMap }}
+            - name: egress-trust
+              mountPath: {{ $egressTrustMountPath }}
               readOnly: true
             {{- end }}
       volumes:
@@ -424,6 +479,20 @@ spec:
             secretName: {{ .Values.egress.credentials.existingSecret }}
             optional: true
             defaultMode: 0440
+        {{- end }}
+        {{- if .Values.egress.trust.caConfigMap }}
+        # egress.trust.caConfigMap: created out of band, every key a PEM file
+        # of one or more CA certificates. `optional: false` here, unlike
+        # egress-credentials above -- a name set in values is a promise the
+        # ConfigMap exists, and the trust-bundle initContainer already fails
+        # the pod if it's missing or empty, so a silently-absent mount would
+        # just move that failure somewhere harder to read.
+        - name: egress-trust-extra
+          configMap:
+            name: {{ .Values.egress.trust.caConfigMap }}
+            optional: false
+        - name: egress-trust
+          emptyDir: {}
         {{- end }}
 {{- end }}
 {{- if .Values.egress.forwarder.enabled }}
@@ -461,10 +530,54 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "egress-forwarder" "root" .) | nindent 8 }}
       annotations:
         checksum/config: {{ toJson .Values.egress.forwarder.config | sha256sum | quote }}
+        {{- if .Values.egress.trust.caConfigMap }}
+        checksum/egress-trust: {{ .Values.egress.trust.caConfigMap | sha256sum | quote }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.egress.trust.caConfigMap }}
+      # Extra CA trust (egress.trust.caConfigMap): assembles the image's own
+      # system CA bundle plus every PEM in the ConfigMap into one file on an
+      # emptyDir, so a destination behind a private/corporate CA verifies --
+      # IN ADDITION to the system bundle, never instead of it. See
+      # values.yaml's comment on egress.trust for the full contract.
+      initContainers:
+        - name: trust-bundle
+          image: {{ $image }}
+          imagePullPolicy: {{ $pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              system_bundle=/etc/ssl/certs/ca-certificates.crt
+              if [ ! -f "$system_bundle" ]; then
+                echo "trust-bundle: missing system CA bundle $system_bundle" >&2
+                exit 1
+              fi
+              cat "$system_bundle" > {{ $egressTrustMountPath }}/ca-bundle.crt
+              count=0
+              for f in {{ $egressTrustExtraMountPath }}/*; do
+                if [ -f "$f" ]; then
+                  cat "$f" >> {{ $egressTrustMountPath }}/ca-bundle.crt
+                  printf '\n' >> {{ $egressTrustMountPath }}/ca-bundle.crt
+                  count=$((count + 1))
+                fi
+              done
+              if [ "$count" -eq 0 ]; then
+                echo "trust-bundle: no CA files found in {{ $egressTrustExtraMountPath }}" >&2
+                exit 1
+              fi
+              echo "trust-bundle: $(grep -c 'BEGIN CERTIFICATE' {{ $egressTrustMountPath }}/ca-bundle.crt) certificates in bundle"
+          volumeMounts:
+            - name: egress-trust-extra
+              mountPath: {{ $egressTrustExtraMountPath }}
+              readOnly: true
+            - name: egress-trust
+              mountPath: {{ $egressTrustMountPath }}
       {{- end }}
       containers:
         - name: forwarder
@@ -478,6 +591,10 @@ spec:
               value: {{ printf "%s/config.json" $forwarderConfigMountPath | quote }}
             - name: LOG_LEVEL
               value: "INFO"
+            {{- if .Values.egress.trust.caConfigMap }}
+            - name: SSL_CERT_FILE
+              value: {{ printf "%s/ca-bundle.crt" $egressTrustMountPath | quote }}
+            {{- end }}
           volumeMounts:
             - name: egress-forwarder-config
               mountPath: {{ $forwarderConfigMountPath }}
@@ -490,6 +607,11 @@ spec:
             {{- if .Values.egress.credentials.existingSecret }}
             - name: egress-credentials
               mountPath: {{ $credentialsMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.egress.trust.caConfigMap }}
+            - name: egress-trust
+              mountPath: {{ $egressTrustMountPath }}
               readOnly: true
             {{- end }}
       volumes:
@@ -520,6 +642,20 @@ spec:
             secretName: {{ .Values.egress.credentials.existingSecret }}
             optional: true
             defaultMode: 0440
+        {{- end }}
+        {{- if .Values.egress.trust.caConfigMap }}
+        # egress.trust.caConfigMap: created out of band, every key a PEM file
+        # of one or more CA certificates. `optional: false` here, unlike
+        # egress-credentials above -- a name set in values is a promise the
+        # ConfigMap exists, and the trust-bundle initContainer already fails
+        # the pod if it's missing or empty, so a silently-absent mount would
+        # just move that failure somewhere harder to read.
+        - name: egress-trust-extra
+          configMap:
+            name: {{ .Values.egress.trust.caConfigMap }}
+            optional: false
+        - name: egress-trust
+          emptyDir: {}
         {{- end }}
 {{- end }}
 {{- if .Values.egress.stubSink.enabled }}

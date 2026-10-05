@@ -968,6 +968,21 @@ egress:
   #     --from-file=client-secret=<path-outside-any-repo>
   credentials:
     existingSecret: ""
+  # Extra CA trust for the forwarder and intake Deployments, for a
+  # destination behind a private/corporate CA (never a way to disable
+  # verification -- forwarder.py/intake.py still verify TLS, just against a
+  # bigger trust store). `caConfigMap` names a ConfigMap created OUT OF BAND
+  # -- the chart never creates it -- whose every key is a PEM file of one or
+  # more CA certificates:
+  #   kubectl create configmap <name> \
+  #     --from-file=corp-ca.pem=<path-outside-any-repo>
+  # When set, an initContainer concatenates the image's own system CA bundle
+  # with every file in the ConfigMap into one file on an emptyDir, and
+  # SSL_CERT_FILE points both containers at it -- the extra CAs are trusted
+  # IN ADDITION to the system bundle, which is never replaced. Empty (the
+  # default): no initContainer, no env, no volumes -- unchanged behaviour.
+  trust:
+    caConfigMap: ""
   # egress-stub-sink (stub_sink.py): the stand-in destination for whatever
   # does not have a real credential yet. STUB_SINK_DIR is an emptyDir at
   # /data -- the cluster's PVCs are NFS-backed, and an emptyDir survives a
