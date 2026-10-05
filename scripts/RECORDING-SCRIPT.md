@@ -13,9 +13,9 @@ Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 
 ## Caveats from the full run-through (2026-10-05) — read before recording
 
-Every beat was run in order with four profiles, a reset between BEAT 2b and
-the cuts, and both cuts driven from the WAN slider. Where the beats below
-disagree with what was measured, the measurement is here:
+Every beat was run in order with four profiles. BEAT 3 was cut from the WAN
+slider and again with `sever-tier.sh`; BEAT 5 with `sever-tier.sh`. Where the
+beats below disagree with what was measured, the measurement is here:
 
 * **BEAT 0:** the advancing check can report `region rollups … FROZEN` over
   its 20 s window while the rollup is moving: it emits in bursts. Re-run
@@ -27,32 +27,40 @@ disagree with what was measured, the measurement is here:
   ASSETS` (sometimes `—` for the region) while the list below reads `AOR
   ASSETS (15)`. The header counts assets placed on the map, and there is no
   FOB topology. Point at the list, not the header.
-* **Edge screens flicker to `LINK: STALE`, cut or no cut.** Live updates
-  reach the edge browsers more than 10 s apart, so the indicator (and
-  sometimes an asset's own STALE tag) trips while the tier's data is 1 s
-  old. Measured in 3 of 6 samples with the link healthy. If it shows on
-  camera, say it is the screen's feed, not the link.
-* **Drive both cuts from the WAN slider** (supervisor only:
-  `liaison.coalition` on the HQ screen). Then the indicator agrees with the
-  story: every tier reads severed within 3 s. "READ THIS BEFORE BEAT 3"
-  applies only if you cut with `sever-tier.sh`.
-* **BEAT 3 from the slider:** no `SEVERED and PROVEN` and no 60 s wait;
-  nothing restarts. **Edge screens are not "unaffected"**: their data is
-  (9 and 6, fresh), but their HQ-link indicator reads down too, because
-  they cannot reach HQ either.
+* **An edge screen can show `LINK: STALE` for a second at rest.** Measured
+  once in 150 s on one edge screen, link healthy, on two separate runs. The
+  cause is the browser, not the link: over plain HTTP a browser opens at most
+  six connections to a host, the edge page holds eight live feeds, and the
+  link row waits its turn for up to ~20 s. The region screen's feeds change
+  every second and do not show it. If it shows on camera, say it is the
+  screen's feed, not the link.
+* **The LINK indicator now follows reachability** (probe plus the age of the
+  last exchange), so it agrees with the story under the slider AND under
+  `sever-tier.sh`. Measured times to flip: **region ~10 s, the HQ view of
+  the HQ-attached edge ~16 s**; back up in **~9 s and ~15 s**. Leave that
+  long before pointing at a screen.
+* **BEAT 3 from the slider** (supervisor only: `liaison.coalition` on the HQ
+  screen): no `SEVERED and PROVEN` and no 60 s wait; nothing restarts. The
+  region screen stays reachable and reads severed. **The edge screens stay
+  `LINK UP`**: their link is to the region, which is still there.
+* **BEAT 3 from `sever-tier.sh --from-parent`** restarts the region's pods
+  and closes its ingress: **the region screen becomes unreachable** (502 at
+  login) for the length of the cut, and **both edge rows read severed for
+  ~5 s** while their parent restarts. Use the slider for BEAT 3.
 * **BEAT 4 from the slider:** HQ converges in **under 10 s** (measured 464 s
   stale → 4 s), not ~2 minutes. Still say the number moved.
-* **BEAT 5 cannot be produced from the slider.** It has one link (region and
-  the edge-03 bridge → HQ); it cannot cut edge-01 from the region, so the
-  discriminating pair never appears and the beat replays BEAT 3. Use
-  `sever-tier.sh edge-01` (with the indicator caveat), add a second proxy,
-  or leave the beat out.
+* **BEAT 5 needs `sever-tier.sh edge-01`.** The slider has one link and
+  cannot cut edge-01 from the region. Under the script cut **edge-01's own
+  screen is unreachable** (502 at login), so show the beat from the region
+  and HQ screens: edge-01 reads severed ~8 s after its probe fails, and
+  edge-02, the region and HQ stay `LINK UP` throughout.
 * **The HQ-attached edge is invisible.** Under a cut HQ keeps edge-03 fresh
   (1–5 s) while the tier edges go stale, but edge-03's only asset is
   unlabelled and shown to no one, so no screen draws its row or its
   HQ-ATTACHED label. Do not promise it on camera.
 * **BEAT 6 options 1 and 2** are about the relay's backoff after a
-  `sever-tier.sh` cut. A slider heal converges in under 10 s with neither.
+  `sever-tier.sh` cut. `--restart-relay-on-heal` brought edge-01 back in
+  ~5 s after the heal was proven.
 * **At rest, HQ's region rollup row** can trail the edge rows by ~25 s
   (bursty emission). It is not a stall.
 
@@ -223,52 +231,30 @@ the report was filed at the edge, crossed the boundary once, under a label,
 and came back as an action, and HQ can show which records went out and which
 did not.
 
-## READ THIS BEFORE BEAT 3 — the one indicator that disagrees
+## Before BEAT 3 — what the LINK indicator tracks
 
-`sever-tier.sh` cuts with a **NetworkPolicy**. The LINK UP / LINK DOWN
-indicator on the screens is driven by `hq_link_severed`, which probes
-**toxiproxy's `hq-link`** — the frontend's WAN toggle, a different mechanism
-entirely.
-
-**So during a script-driven cut the indicator will read LINK UP while the
-data visibly stops.** Measured 2026-09-19 through a full severance: the flag
-stayed `false` the whole time, while `bridge_group_lag` climbed 2713 → 3020
-and `probe_healthy` went false beside it — both live, both correct.
-
-Two honest ways to handle it, and one dishonest one:
-
-* **Drive the beat from the WAN toggle instead**, so the indicator agrees
-  with the story. Simplest if the toggle severs what you want severed.
-* **Say plainly what it tracks** — "that indicator follows the WAN simulator;
-  the buffer depth climbing is the real reading" — and point at the buffer.
-* **Do not let it pass unremarked.** This demo's whole claim is that the
-  screens refuse to show something they cannot support. An indicator
-  contradicting the story, in the beat about honest degradation, is the one
-  thing it cannot afford.
-
-Recorded as a finding, not fixed: whether that flag should track reachability
-rather than the simulator is a semantics decision, not a typo.
+The LINK indicator on every screen follows **reachability**: the tier's own
+probe of its uplink, plus the age of the last exchange over it, with
+hysteresis so one late exchange does not flip it. It no longer follows the
+WAN simulator alone, so a cut made by either mechanism reads the same way.
+It takes **~10 s** to read severed on the region and **~16 s** for HQ's view
+of the HQ-attached edge; wait that long before pointing at a screen.
 
 ## BEAT 3 — dimension 1, region cut from HQ (~4 min)
 
-```
-bash scripts/sever-tier.sh region-east on openddil --from-parent
-```
-
-Expect `SEVERED and PROVEN`. Then **wait ~60s** for the site to restart under
-the policy before pointing at screens.
+On the HQ screen as `liaison.coalition`, move the **WAN slider** to cut.
 
 **Watch, in this order:**
 
-1. **Region screen — still live.** Its sample time keeps advancing. It is
-   serving from its own store, its own authorizer, its own broker.
-2. **Region still receiving its edges.** Fleet counts hold at 14; the rollup
-   keeps updating. *This is the point of `--from-parent`: the region lost its
-   parent, not its children.*
+1. **Region screen — still live, and says it is cut.** Its sample time keeps
+   advancing and its uplink reads severed within ~10 s. It is serving from
+   its own store, its own authorizer, its own broker.
+2. **Region still receiving its edges.** Fleet counts hold; the rollup keeps
+   updating. *The region lost its parent, not its children.*
 3. **HQ screen — stale, with an indicator.** HQ's region view freezes at its
    pre-cut value and the age grows. **Not wrong, not empty** — the last thing
    HQ knew, labelled as old.
-4. **Edge screens — unaffected.**
+4. **Edge screens — unaffected**, `LINK UP`: their uplink is the region.
 
 *The beat:* a severed tier is not a failed tier. HQ says "I last heard this
 12 minutes ago," which is true, rather than showing a number it cannot
@@ -276,13 +262,10 @@ support or a blank where a fleet was.
 
 ## BEAT 4 — heal (~1 min)
 
-```
-bash scripts/sever-tier.sh region-east off openddil
-```
-
-HQ's region view converges within ~2 minutes. **Say the number moved** — 12
-minutes stale to 20 seconds — because convergence that cannot be seen to move
-is indistinguishable from a screen that was never stale.
+Move the WAN slider back. HQ's region view converges in **under 10 s**, and
+the region's indicator reads `LINK UP` again within ~10 s. **Say the number
+moved** — minutes stale to seconds — because convergence that cannot be seen
+to move is indistinguishable from a screen that was never stale.
 
 ## BEAT 5 — dimension 2, edge-01 cut (~4 min)
 
@@ -290,13 +273,17 @@ is indistinguishable from a screen that was never stale.
 bash scripts/sever-tier.sh edge-01 on openddil
 ```
 
+Expect `SEVERED and PROVEN` (~40 s; the script restarts edge-01's pods).
+**Do not show edge-01's own screen**: the cut closes its ingress too, so it
+will not load. Show the beat from the region and HQ screens.
+
 **Watch the discriminating pair — this is the strongest beat in the demo:**
 
-1. **Edge-01 screen — still live**, serving its own assets locally.
-2. **Region screen — edge-01's assets go stale, edge-02's stay fresh.** Two
-   groups of rows on one screen with different ages. Measured: 4m46s vs 0.6s.
-3. **HQ — the two-hop read.** Edge-01 stale by ~4m, **while the region's own
-   rollup is 6 seconds old**.
+1. **Region screen — edge-01 reads severed, edge-02 stays `LINK UP`.**
+   Edge-01's assets go stale while edge-02's stay fresh: two groups of rows
+   on one screen with different ages. Measured: 4m46s vs 0.6s.
+2. **HQ — the two-hop read.** Edge-01 stale by minutes, **while the region's
+   own rollup is seconds old**.
 
 *The beat, and say it plainly:* HQ can tell **a quiet edge from a downed
 region uplink**, because it carries both ages instead of fusing them. Under
