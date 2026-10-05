@@ -11,6 +11,51 @@ record over one that is still open.
 Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 `cd ~/git/openddil/openddil-helm`.
 
+## Caveats from the full run-through (2026-10-05) — read before recording
+
+Every beat was run in order with four profiles, a reset between BEAT 2b and
+the cuts, and both cuts driven from the WAN slider. Where the beats below
+disagree with what was measured, the measurement is here:
+
+* **BEAT 0:** the advancing check can report `region rollups … FROZEN` over
+  its 20 s window while the rollup is moving: it emits in bursts. Re-run
+  once; a second FROZEN is real.
+* **BEAT 2 numbers have moved** (the fleet gained one ATL asset): **Ada sees
+  9, the liaison 15**. Bram sees **6 on the Edge-02 screen** and **7 on the
+  HQ screen**. Region partials are `ATL` 8, `ATL,BDR` 1, `BDR` 6 (sum 15).
+* **Region screen header** reads `AREA OF RESPONSIBILITY: REGION-EAST 0
+  ASSETS` (sometimes `—` for the region) while the list below reads `AOR
+  ASSETS (15)`. The header counts assets placed on the map, and there is no
+  FOB topology. Point at the list, not the header.
+* **Edge screens flicker to `LINK: STALE`, cut or no cut.** Live updates
+  reach the edge browsers more than 10 s apart, so the indicator (and
+  sometimes an asset's own STALE tag) trips while the tier's data is 1 s
+  old. Measured in 3 of 6 samples with the link healthy. If it shows on
+  camera, say it is the screen's feed, not the link.
+* **Drive both cuts from the WAN slider** (supervisor only:
+  `liaison.coalition` on the HQ screen). Then the indicator agrees with the
+  story: every tier reads severed within 3 s. "READ THIS BEFORE BEAT 3"
+  applies only if you cut with `sever-tier.sh`.
+* **BEAT 3 from the slider:** no `SEVERED and PROVEN` and no 60 s wait;
+  nothing restarts. **Edge screens are not "unaffected"**: their data is
+  (9 and 6, fresh), but their HQ-link indicator reads down too, because
+  they cannot reach HQ either.
+* **BEAT 4 from the slider:** HQ converges in **under 10 s** (measured 464 s
+  stale → 4 s), not ~2 minutes. Still say the number moved.
+* **BEAT 5 cannot be produced from the slider.** It has one link (region and
+  the edge-03 bridge → HQ); it cannot cut edge-01 from the region, so the
+  discriminating pair never appears and the beat replays BEAT 3. Use
+  `sever-tier.sh edge-01` (with the indicator caveat), add a second proxy,
+  or leave the beat out.
+* **The HQ-attached edge is invisible.** Under a cut HQ keeps edge-03 fresh
+  (1–5 s) while the tier edges go stale, but edge-03's only asset is
+  unlabelled and shown to no one, so no screen draws its row or its
+  HQ-ATTACHED label. Do not promise it on camera.
+* **BEAT 6 options 1 and 2** are about the relay's backoff after a
+  `sever-tier.sh` cut. A slider heal converges in under 10 s with neither.
+* **At rest, HQ's region rollup row** can trail the edge rows by ~25 s
+  (bursty emission). It is not a stall.
+
 ---
 
 ## BEAT 0 — pre-flight (before the camera)
