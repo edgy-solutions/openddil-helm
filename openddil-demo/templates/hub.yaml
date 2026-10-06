@@ -777,6 +777,10 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # See checksum/effector-declared-load on projector-hq below for why
+        # this hashes the rendered body in the pod template.
+        checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" . | sha256sum }}
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 8 }}
@@ -810,6 +814,11 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/proto:/app/src"
+            # Same file every projector instance mounts -- declared load is
+            # a property of the launcher asset/variant, not of which
+            # service admits its Fire. See the ConfigMap below.
+            - name: EFFECTOR_DECLARED_LOAD_PATH
+              value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
           ports:
             - name: http
               containerPort: {{ .Values.logisticsFusion.port }}
@@ -820,11 +829,16 @@ spec:
             - name: bundle-shared
               mountPath: /ontology
               subPath: ontology
+            - name: effector-declared-load
+              mountPath: /etc/openddil/effector-declared-load
           resources:
             {{- toYaml .Values.logisticsFusion.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        - name: effector-declared-load
+          configMap:
+            name: {{ .Release.Name }}-effector-declared-load
 ---
 apiVersion: v1
 kind: Service

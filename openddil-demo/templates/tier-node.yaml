@@ -1304,6 +1304,10 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # See checksum/effector-declared-load on projector-hq (hub.yaml)
+        # for why this hashes the rendered body in the pod template.
+        checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
@@ -1351,6 +1355,12 @@ spec:
               value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
+            # Same ConfigMap this tier's projector mounts (see
+            # tier-effector-declared-load above) -- declared load is a
+            # property of the launcher, not of which service admits its
+            # Fire.
+            - name: EFFECTOR_DECLARED_LOAD_PATH
+              value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
           ports:
             - containerPort: 9081
           resources:
@@ -1362,9 +1372,14 @@ spec:
             - name: bundle-shared
               mountPath: /ontology
               subPath: ontology
+            - name: effector-declared-load
+              mountPath: /etc/openddil/effector-declared-load
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        - name: effector-declared-load
+          configMap:
+            name: {{ $root.Release.Name }}-tier-effector-declared-load-{{ $tier.id }}
 ---
 apiVersion: v1
 kind: Service
