@@ -1505,6 +1505,11 @@ releasability:
     # empty rather than refused — which is the accurate statement about it.
     - tactical_events
     - asset_telemetry_windows
+    # Effector tracking: one row per Fire/Detonation event_urn, labelled
+    # from the launcher the same way tactical_events is. The declared-load
+    # table and the per-launcher counts view are NOT listed: neither carries
+    # labels, and this list controls what the PEP will serve.
+    - effector_launch
     # Joined 2026-09-08. The rollups, labelled by COMPOSITION: the aggregator
     # intersects its contributors' releasable_to over the same snapshot the
     # counts come from, so an aggregate is no more visible than its least
