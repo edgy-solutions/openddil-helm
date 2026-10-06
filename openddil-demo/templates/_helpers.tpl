@@ -803,6 +803,7 @@ three places must be written in one.
 {{- $t := list -}}
 {{- if not $managed }}{{- $t = append $t "raw-sensor-stream" -}}{{- end -}}
 {{- $t = append $t "tactical-events" -}}
+{{- $t = append $t "effector-events" -}}
 {{- if $managed -}}
 {{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-telemetry" "asset-element-inventory" "derived-sustainment") -}}
 {{- end -}}
@@ -810,7 +811,7 @@ three places must be written in one.
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "region-fleet-summary" "region-top-factors" "region-wear-trends") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends") -}}
 {{- end }}
 
 {{/*
@@ -1368,6 +1369,7 @@ for spec in \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
   "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
   "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000 -c compression.type=lz4" \
