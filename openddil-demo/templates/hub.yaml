@@ -934,12 +934,6 @@ metadata:
     # DEFAULT (projector_config.yaml in openddil-projector), not visible in
     # this chart. Same set as the per-edge projector Deployments in
     # edge.yaml, here on the hq broker.
-    # hashes the rendered declared-load body, same
-    # reasoning as checksum/projector-config on the tier projector: a
-    # ConfigMap change with no checksum annotation updates the object and
-    # never restarts the pod, so a bumped declared load would silently
-    # not reload until something else happened to roll this Deployment.
-    checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" . | sha256sum }}
     openddil.io/consumer-groups: {{ join " " $projectorHqPairs | quote }}
 spec:
   replicas: 1
@@ -948,6 +942,14 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Hashes the rendered declared-load body, same reasoning as
+        # checksum/projector-config on the tier projector: a ConfigMap
+        # change with no checksum in the POD TEMPLATE updates the object
+        # and restarts nothing, so a bumped declared load would not reload
+        # until something else rolled this Deployment. On the Deployment's
+        # own metadata it would roll nothing either.
+        checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" . | sha256sum }}
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 8 }}

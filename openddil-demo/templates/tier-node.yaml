@@ -593,9 +593,6 @@ metadata:
     # openddil.tierProjectorGroupIds (_helpers.tpl), not re-typed -- so this
     # can never disagree with the mapping set actually mounted below.
     openddil.io/consumer-groups: {{ join " " $tierProjectorPairs | quote }}
-    # see checksum/effector-declared-load on
-    # projector-hq (hub.yaml) for why this must hash the rendered body.
-    checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
 spec:
   replicas: 1
   selector:
@@ -619,6 +616,8 @@ spec:
         # the first change to anything outside the tuple, which is the
         # defect that produced this rule in the first place.
         checksum/projector-config: {{ include "openddil.tierProjectorConfig" (dict "tier" $tier "root" $root) | sha256sum }}
+        # Same rule for the declared-load ConfigMap mounted below.
+        checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-projector-%s" $tier.id) "root" $root) | nindent 8 }}
