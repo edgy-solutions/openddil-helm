@@ -517,6 +517,29 @@ projector:
     limits:   { cpu: 500m, memory: 512Mi }
   port: 8084
 
+# DIS Fire/Detonation launch records. Mounted into
+# every projector that carries the effector_launch mapping (projector-hq,
+# a non-tier-managed edge's own root projector, and every tier projector):
+# see openddil.effectorDeclaredLoadYaml (_helpers.tpl), the ConfigMaps
+# rendered from it in hub.yaml/edge.yaml/tier-node.yaml, and
+# EFFECTOR_DECLARED_LOAD_PATH/EFFECTOR_TERMINAL_TIMEOUT_S on each projector
+# container.
+#
+# OSS DEFAULT IS EMPTY, same posture as edge_assignment above: no launcher
+# variants or declared loads are customer or lab reality, so this chart
+# ships none. An overlay (or the compose demo fixture) supplies its own
+# `asset`/`variant` maps.
+effectors:
+  # Detonation timeout sweep (src/effector_sweep.py): a Fire with no
+  # Detonation within this many seconds is marked unresolved
+  # (effector_unresolved_total). 300s matches the module's own code
+  # default; set here too so a values.yaml reader sees the number that is
+  # actually live rather than having to open the other repo to find it.
+  terminalTimeoutSeconds: 300
+  declaredLoad:
+    asset: {}
+    variant: {}
+
 edgeHqBridge:
   image:
     repository: docker.redpanda.com/redpandadata/connect

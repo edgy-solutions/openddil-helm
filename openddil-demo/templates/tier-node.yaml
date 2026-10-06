@@ -556,6 +556,22 @@ spec:
 
 ---
 # ===========================================================================
+# tier-effector-declared-load-{{ $tier.id }} config
+# ===========================================================================
+# Same rendered content every projector mounts (openddil.effectorDeclaredLoadYaml,
+# _helpers.tpl). One ConfigMap per tier because each tier runs on its own
+# broker/store, not because the content differs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-tier-effector-declared-load-{{ $tier.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  effector-declared-load.yaml: |
+    {{- include "openddil.effectorDeclaredLoadYaml" $root | nindent 4 }}
+---
+# ===========================================================================
 # tier-projector-{{ $tier.id }} — reads THIS tier, writes THIS tier
 # ===========================================================================
 # The reachback closed in one object: KAFKA_BROKERS and POSTGRES_DSN both
@@ -577,6 +593,9 @@ metadata:
     # openddil.tierProjectorGroupIds (_helpers.tpl), not re-typed -- so this
     # can never disagree with the mapping set actually mounted below.
     openddil.io/consumer-groups: {{ join " " $tierProjectorPairs | quote }}
+    # see checksum/effector-declared-load on
+    # projector-hq (hub.yaml) for why this must hash the rendered body.
+    checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
 spec:
   replicas: 1
   selector:
@@ -701,6 +720,12 @@ spec:
               value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
+            # see the identical pair on projector-hq
+            # (hub.yaml) for what these do.
+            - name: EFFECTOR_DECLARED_LOAD_PATH
+              value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
+            - name: EFFECTOR_TERMINAL_TIMEOUT_S
+              value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
           resources:
             {{- toYaml $root.Values.projector.resources | nindent 12 }}
           volumeMounts:
@@ -709,12 +734,17 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            - name: effector-declared-load
+              mountPath: /etc/openddil/effector-declared-load
       volumes:
         - name: tier-projector-config
           configMap:
             name: {{ $root.Release.Name }}-tier-projector-config-{{ $tier.id }}
         - name: bundle-shared
           emptyDir: {}
+        - name: effector-declared-load
+          configMap:
+            name: {{ $root.Release.Name }}-tier-effector-declared-load-{{ $tier.id }}
 
 ---
 # ===========================================================================

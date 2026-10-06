@@ -897,6 +897,23 @@ spec:
           emptyDir: {}
 ---
 # ===========================================================================
+# effector-declared-load config, HQ instance
+# ===========================================================================
+# Same rendered content every projector mounts (openddil.effectorDeclaredLoadYaml,
+# _helpers.tpl) — declared load is a property of the launcher, not of which
+# projector admits its Fire. One ConfigMap per projector instance because
+# each runs on its own cluster/broker, not because the content differs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-effector-declared-load
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  effector-declared-load.yaml: |
+    {{- include "openddil.effectorDeclaredLoadYaml" . | nindent 4 }}
+---
+# ===========================================================================
 # projector-hq — HQ-cluster topic projection to postgres-hq
 # ===========================================================================
 # Same image as per-edge projector; different broker (hq), different
@@ -913,10 +930,16 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 4 }}
   annotations:
-    # 11-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # 12-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
     # DEFAULT (projector_config.yaml in openddil-projector), not visible in
     # this chart. Same set as the per-edge projector Deployments in
     # edge.yaml, here on the hq broker.
+    # hashes the rendered declared-load body, same
+    # reasoning as checksum/projector-config on the tier projector: a
+    # ConfigMap change with no checksum annotation updates the object and
+    # never restarts the pod, so a bumped declared load would silently
+    # not reload until something else happened to roll this Deployment.
+    checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" . | sha256sum }}
     openddil.io/consumer-groups: {{ join " " $projectorHqPairs | quote }}
 spec:
   replicas: 1
@@ -960,6 +983,13 @@ spec:
               value: "region-unspecified"
             - name: BUFFER_MONITOR_ENABLED
               value: "false"
+            # declared-load reload path + the
+            # Detonation timeout sweep's window, same two env vars on
+            # every projector that carries the effector_launch mapping.
+            - name: EFFECTOR_DECLARED_LOAD_PATH
+              value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
+            - name: EFFECTOR_TERMINAL_TIMEOUT_S
+              value: {{ .Values.effectors.terminalTimeoutSeconds | quote }}
           ports:
             - name: metrics
               containerPort: {{ .Values.projector.port }}
@@ -967,11 +997,16 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            - name: effector-declared-load
+              mountPath: /etc/openddil/effector-declared-load
           resources:
             {{- toYaml .Values.projector.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        - name: effector-declared-load
+          configMap:
+            name: {{ .Release.Name }}-effector-declared-load
 ---
 # ===========================================================================
 # frontend

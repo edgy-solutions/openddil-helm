@@ -1115,7 +1115,7 @@ it with more steps.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-11-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+12-topic consumer-group set (SPEC-consumer-declarations.md Part A).
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1123,13 +1123,16 @@ non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
 back to the image's baked-in root config at
 /app/src/config/projector_config.yaml in the openddil-projector repo. That
 file is this list's source of truth; this is a mirror of it, written once so
-every caller shares one list instead of re-typing 11 names.
+every caller shares one list instead of re-typing 12 names.
 
 Values measured from the live lab census (expected-declared.tsv), since the
-source file lives in a different repo this chart does not vendor.
+source file lives in a different repo this chart does not vendor. The 12th
+(projector-effector-launch) was added the same way the
+other 11 were: by reading the handler list that file actually carries, not
+by re-deriving it from this chart.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-logistics-status projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1230,6 +1233,18 @@ mappings:
     # SHORTER window than a leaf, not a longer one: the region is where the
     # volume lands and where the shape is read from.
     retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
+  # DIS Fire/Detonation launch records. mode: custom,
+  # same as the root default's entry (openddil-projector
+  # src/config/projector_config.yaml) -- the handler owns its own Postgres
+  # I/O, so NO retention_hours/asset_ttl_hours here either: see that file's
+  # comment for why ageing this table out would make
+  # effector_launcher_counts.expended (a running SUM) rebound upward.
+  - topic: effector-events
+    handler: effector_launch
+    table: effector_launch
+    consumer_group: tier-projector-effector-launch-{{ $tier.id }}
+    decode_as: json
+    mode: custom
   - topic: asset-element-telemetry
     handler: asset_element_telemetry
     table: asset_element_telemetry
@@ -1277,6 +1292,34 @@ mappings:
     consumer_group: tier-projector-region-wear-{{ $tier.id }}
     decode_as: openddil.regional.v1.RegionWearTrends
     mode: upsert
+{{- end }}
+{{- end }}
+
+{{/*
+openddil.effectorDeclaredLoadYaml -- the declared-load
+fixture, as ConfigMap content (effector-declared-load.yaml).
+
+Rendered from .Values.effectors.declaredLoad once and reused by every
+ConfigMap that mounts it (hub.yaml's projector-hq, edge.yaml's per-edge
+root projector, tier-node.yaml's tier projector) -- same values, same
+bytes, every instance, because declared load is a property of the
+launcher asset/variant, not of which projector happens to admit its Fire.
+openddil-projector/src/effector_declared_load.py accepts either top-level
+key, `asset` and/or `variant`.
+*/}}
+{{- define "openddil.effectorDeclaredLoadYaml" -}}
+{{- $dl := .Values.effectors.declaredLoad | default (dict) -}}
+asset:
+{{- if $dl.asset }}
+{{ toYaml $dl.asset | indent 2 }}
+{{- else }}
+  {}
+{{- end }}
+variant:
+{{- if $dl.variant }}
+{{ toYaml $dl.variant | indent 2 }}
+{{- else }}
+  {}
 {{- end }}
 {{- end }}
 

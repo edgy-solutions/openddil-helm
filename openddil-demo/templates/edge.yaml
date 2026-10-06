@@ -537,6 +537,22 @@ spec:
 {{- range include "openddil.projectorGroupIds" $root | splitList " " }}
 {{- $projectorPairs = append $projectorPairs (printf "%s/%s" $edge.id .) }}
 {{- end }}
+# ===========================================================================
+# effector-declared-load-{{ $edge.id }} config
+# ===========================================================================
+# Same rendered content every projector mounts (openddil.effectorDeclaredLoadYaml,
+# _helpers.tpl). One ConfigMap per instance because each runs on its own
+# cluster/broker, not because the content differs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-effector-declared-load-{{ $edge.id }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  effector-declared-load.yaml: |
+    {{- include "openddil.effectorDeclaredLoadYaml" $root | nindent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -545,12 +561,15 @@ metadata:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 4 }}
   annotations:
-    # 11-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # 12-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
     # DEFAULT (projector_config.yaml in openddil-projector), not visible in
     # this chart. This Deployment is the ROOT projector reading an
     # untier-managed edge's own broker (see NOT DEPLOYED FOR A TIER-MANAGED
     # EDGE below), so it carries the full root set, same as projector-hq.
     openddil.io/consumer-groups: {{ join " " $projectorPairs | quote }}
+    # see checksum/effector-declared-load on
+    # projector-hq (hub.yaml) for why this must hash the rendered body.
+    checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
 spec:
   replicas: 1
   selector:
@@ -628,6 +647,12 @@ spec:
             # 2*(E+H) = 2*(5+2) = 14s with no exchange before SEVERED.
             - name: LINK_EXCHANGE_PERIOD_S
               value: "5"
+            # see the identical pair on projector-hq
+            # (hub.yaml) for what these do.
+            - name: EFFECTOR_DECLARED_LOAD_PATH
+              value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
+            - name: EFFECTOR_TERMINAL_TIMEOUT_S
+              value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
           ports:
             - name: metrics
               containerPort: {{ $root.Values.projector.port }}
@@ -635,11 +660,16 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            - name: effector-declared-load
+              mountPath: /etc/openddil/effector-declared-load
           resources:
             {{- toYaml $root.Values.projector.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        - name: effector-declared-load
+          configMap:
+            name: {{ $root.Release.Name }}-effector-declared-load-{{ $edge.id }}
 {{- end }}
 ---
 {{- end }}

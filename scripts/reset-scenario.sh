@@ -1022,7 +1022,16 @@ TABLES=(
   edge_buffer_status
   inventory_items
   intake_records
+  effector_launch
 )
+# effector_declared_load is deliberately NOT in TABLES. It is the declared
+# munitions-per-launcher-variant config, not run data — the projector
+# reloads it wholesale from EFFECTOR_DECLARED_LOAD_PATH at every startup
+# (src/effector_declared_load.py), so clearing it here would only leave the
+# table empty until the next pod restart re-populated it, while the
+# effector_launch rows it's compared against (effector_launcher_counts) ARE
+# reset above. Clearing config tables on a scenario reset is not what this
+# script is for.
 EXCLUDED_TABLES=(audit_log)  # ADR-0029 decision log. PERMANENT. See header.
 
 # Declared heartbeats: deleted in phase 6 like every table above, but NOT
