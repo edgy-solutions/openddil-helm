@@ -1113,6 +1113,11 @@ spec:
               value: {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
             - name: OPENDDIL_SESSION_TTL_SECONDS
               value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            # HOW LONG BEFORE THE RENEWAL POINT (the ID token's expiry, or the
+            # ceiling if sooner) renewal is attempted — see REFRESH_LEAD_S in
+            # oidc.py. Lets a live tab renew ahead of it instead of racing it.
+            - name: OPENDDIL_SESSION_REFRESH_LEAD_SECONDS
+              value: {{ $root.Values.releasability.oidc.refreshLeadSeconds | quote }}
             - name: OPENDDIL_LABELED_TABLES
               # Tables that can be partitioned, therefore tables that may be
               # served. Anything else is refused with cause `unlabelable` —

@@ -1455,9 +1455,16 @@ releasability:
     clientSecret: "openddil-pep-dev-secret"
     # DDIL PARAMETER, not a security constant. Existing sessions survive a
     # severed link; new logins do not, because the code exchange is a live
-    # call to the token endpoint. Long enough to outlast a plausible severance
-    # window, short enough to bound a stolen cookie.
-    sessionTtlSeconds: 43200
+    # call to the token endpoint. This is the ABSOLUTE CEILING on a session
+    # (oidc.py's hard_expires) — renewal never extends past it, only up to
+    # it. A deployment that wants sessions to outlast a longer severance
+    # window sets this in its own overlay, not here.
+    sessionTtlSeconds: 900
+    # How long before the session's renewal point (the ID token's expiry,
+    # or the ceiling if sooner) renewal is attempted — see get_session in
+    # oidc.py. Keeps a tab that is making requests right up
+    # to the deadline from losing the race between "renew" and "expired."
+    refreshLeadSeconds: 60
     # `Lax`, deliberately. `Strict` breaks the login round trip when the IdP
     # is on a different SITE — the post-callback navigation is attributed to
     # the cross-site initiator and the cookie is withheld, so the user lands
