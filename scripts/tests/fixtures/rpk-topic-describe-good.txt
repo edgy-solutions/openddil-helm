@@ -1,0 +1,6 @@
+TOPIC          synthetic-topic-x
+PARTITIONS     1
+REPLICAS       1
+
+PARTITION  LEADER  EPOCH  REPLICAS  LOG-START-OFFSET  HIGH-WATERMARK
+0          0       1      [0]       0                 42

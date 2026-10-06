@@ -344,13 +344,32 @@ if [ -f "$EXPECTED_EMPTY" ]; then
   # SPARSE tables: empty is expected only WHILE THE PRODUCER IS ALIVE.
   # Parsed separately from declared-empty because it is a different claim --
   # "nothing produces this here" versus "this producer speaks rarely".
+  #
+  # EACH ENTRY NAMES ITS OWN PRODUCER. `tactical_events`'s producer is the
+  # fusion derive stage; `effector_launch`'s is its own projector consumer
+  # group, and fusion's verdict says nothing about it. DECLARED_SPARSE is
+  # therefore "table<TAB>producer" lines, not a bare table list -- a sparse
+  # entry with no `producer:` key defaults to `derive-stage` (backward
+  # compatible with every entry written before this key existed).
   DECLARED_SPARSE="$(sed -n '/^expected_empty:/,$p' "$EXPECTED_EMPTY" | awk '
-    /^  [a-z_][a-z_0-9]*:[[:space:]]*$/ { tbl = $1; sub(":", "", tbl); next }
-    /^    sparse:[[:space:]]*true[[:space:]]*$/ { if (tbl != "") print tbl }')"
+    /^  [a-z_][a-z_0-9]*:[[:space:]]*$/ {
+      if (tbl != "" && sparse) emit()
+      tbl = $1; sub(":", "", tbl); sparse = 0; producer = ""
+      next
+    }
+    /^    sparse:[[:space:]]*true[[:space:]]*$/ { sparse = 1; next }
+    /^    producer:[[:space:]]*/ {
+      producer = $0
+      sub(/^[^:]*:[[:space:]]*/, "", producer); gsub(/[[:space:]]+$/, "", producer)
+      next
+    }
+    END { if (tbl != "" && sparse) emit() }
+    function emit() { print tbl "\t" (producer == "" ? "derive-stage" : producer) }')"
+  DECLARED_SPARSE_NAMES="$(printf '%s\n' "$DECLARED_SPARSE" | cut -f1 | sed '/^$/d')"
   echo "  declared-empty: $(printf '%s' "$DECLARED_EMPTY" | tr '\n' ' ')"
   echo "                  (from $EXPECTED_EMPTY, in scope for: $THIS_STORE${TIER:+ $TIER}${TIER_KIND:+ [$TIER_KIND]})"
-  [ -n "$DECLARED_SPARSE" ] && \
-    echo "  declared-sparse: $(printf '%s' "$DECLARED_SPARSE" | tr '\n' ' ') (empty OK only while the producer is completing)"
+  [ -n "$DECLARED_SPARSE_NAMES" ] && \
+    echo "  declared-sparse: $(printf '%s' "$DECLARED_SPARSE_NAMES" | tr '\n' ' ') (empty OK only while each one's own producer is alive)"
 else
   echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
   echo "                  every empty labelled table will be reported as"
@@ -489,8 +508,15 @@ excused_region_rollup_rows() {
 #
 # The table cannot be its own evidence. If it is empty there is no newest row
 # to age against retention, so the checkable condition is not "past retention"
-# but "the producer is demonstrably completing" -- measured by
-# check-derive-stage.sh, which asks whether fusion completes invocations.
+# but "the producer is demonstrably completing" -- measured per entry, by a
+# probe that NAMES its producer rather than by one script for every table.
+# `tactical_events`'s producer is check-derive-stage.sh, which asks whether
+# fusion completes invocations. `effector_launch`'s producer is its own
+# projector consumer group, which fusion's verdict says nothing about --
+# check-effector-consumer.sh measures that one instead. producer_state()
+# below takes the producer name from the entry and reads the matching result
+# file; it used to come from one script for every entry, and now comes per
+# entry (ontology/expected-empty.yaml's `producer:` key).
 #
 #   empty AND producer completing      -> sparse   (green, with the reason)
 #   empty AND producer not completing  -> stopped  (a finding)
@@ -499,7 +525,8 @@ excused_region_rollup_rows() {
 # THE THIRD BRANCH IS THE LOAD-BEARING ONE. Absence of evidence buys nothing:
 # a gate that treats "nobody measured" as "probably fine" is the reassuring
 # zero this whole file was written to refuse. So this FAILS CLOSED to the
-# behaviour it had before the category existed.
+# behaviour it had before the category existed. An unrecognised producer
+# name falls in this same branch -- never read as sparse-green.
 #
 # Same shape as the relay stall probe's `destination reachable` clause: an
 # absence is benign only when something else proves the source is alive.
@@ -509,28 +536,99 @@ DERIVE_RESULT="${OPENDDIL_DERIVE_RESULT:-${TMPDIR:-/tmp}/openddil-derive-stage.r
 # stayed green, so a verdict from that long ago says nothing about this run.
 DERIVE_MAX_AGE_S="${OPENDDIL_DERIVE_MAX_AGE_S:-1800}"
 
+EFFECTOR_CONSUMER_RESULT="${OPENDDIL_EFFECTOR_CONSUMER_RESULT:-${TMPDIR:-/tmp}/openddil-effector-consumer.result}"
+EFFECTOR_CONSUMER_MAX_AGE_S="${OPENDDIL_EFFECTOR_CONSUMER_MAX_AGE_S:-1800}"
+
+# The rpk consumer group check-effector-consumer.sh is expected to have
+# measured, AT THIS STORE -- the tier form on a tier run, the root form
+# otherwise. A root run's result naming a tier's group (or vice versa) says
+# nothing about this store's own projector, same reasoning as the namespace
+# check below, one level more specific.
+if [ -n "$TIER" ]; then
+  EFFECTOR_EXPECTED_GROUP="tier-projector-effector-launch-${TIER}"
+else
+  EFFECTOR_EXPECTED_GROUP="projector-effector-launch"
+fi
+
 producer_state() {
-  # -> "completing" | "not_completing" | "unmeasured:<why>"
-  [ -f "$DERIVE_RESULT" ] || { echo "unmeasured:no result file at $DERIVE_RESULT"; return; }
-  local epoch verdict age now
-  epoch="$(sed -n 's/^epoch=//p' "$DERIVE_RESULT" | head -1)"
-  verdict="$(sed -n 's/^verdict=//p' "$DERIVE_RESULT" | head -1)"
+  # $1 = producer name, from the sparse entry's `producer:` key (or the
+  # `derive-stage` default). -> "completing" | "not_completing" |
+  # "unmeasured:<why>"
+  local producer="$1" result max_age ok_verdict bad_verdict
+  case "$producer" in
+    derive-stage)
+      result="$DERIVE_RESULT"; max_age="$DERIVE_MAX_AGE_S"
+      ok_verdict="COMPLETING"; bad_verdict="NOT_COMPLETING"
+      ;;
+    effector-launch)
+      result="$EFFECTOR_CONSUMER_RESULT"; max_age="$EFFECTOR_CONSUMER_MAX_AGE_S"
+      ok_verdict="ALIVE"; bad_verdict="NOT_ALIVE"
+      ;;
+    *)
+      # UNKNOWN PRODUCER IS UNMEASURED, NEVER SPARSE-GREEN. A typo in the
+      # ontology file (or a value from before this key existed and this
+      # script) must not silently buy an empty table a pass.
+      echo "unmeasured:unknown producer '$producer'"
+      return
+      ;;
+  esac
+
+  [ -f "$result" ] || { echo "unmeasured:no result file at $result"; return; }
+
+  local epoch verdict age now line_ns
+  epoch="$(sed -n 's/^epoch=//p' "$result" | head -1)"
+  verdict="$(sed -n 's/^verdict=//p' "$result" | head -1)"
   case "$epoch" in ''|*[!0-9]*) echo "unmeasured:unreadable timestamp"; return ;; esac
   now="$(date -u +%s)"
   age=$(( now - epoch ))
-  if [ "$age" -gt "$DERIVE_MAX_AGE_S" ]; then
-    echo "unmeasured:result is ${age}s old, older than ${DERIVE_MAX_AGE_S}s"
+  if [ "$age" -gt "$max_age" ]; then
+    echo "unmeasured:result is ${age}s old, older than ${max_age}s"
     return
   fi
+
+  # NAMESPACE CHECK. A result measured against a different namespace is a
+  # measurement about a different deployment and says nothing about this
+  # one -- applied to BOTH producers, but only when the file carries the
+  # line: an older derive-stage result written before this line existed is
+  # still read exactly as before.
+  line_ns="$(sed -n 's/^namespace=//p' "$result" | head -1)"
+  if [ "$producer" = "effector-launch" ] && [ -z "$line_ns" ]; then
+    echo "unmeasured:result names no namespace"
+    return
+  fi
+  if [ -n "$line_ns" ] && [ "$line_ns" != "$NS" ]; then
+    echo "unmeasured:result is for namespace $line_ns"
+    return
+  fi
+
+  # GROUP CHECK (effector-launch only). A tier store's sparse entry is
+  # answered only by a result measuring THAT tier's own consumer group; a
+  # root run needs the root group. The probe has always written both lines,
+  # so here (unlike derive-stage) a missing line is unmeasured, not excused.
+  if [ "$producer" = "effector-launch" ]; then
+    local line_group
+    line_group="$(sed -n 's/^group=//p' "$result" | head -1)"
+    if [ "$line_group" != "$EFFECTOR_EXPECTED_GROUP" ]; then
+      echo "unmeasured:result is for group $line_group, expected $EFFECTOR_EXPECTED_GROUP"
+      return
+    fi
+  fi
+
   case "$verdict" in
-    COMPLETING)     echo "completing" ;;
-    NOT_COMPLETING) echo "not_completing" ;;
+    "$ok_verdict")  echo "completing" ;;
+    "$bad_verdict") echo "not_completing" ;;
     *)              echo "unmeasured:verdict=${verdict:-<empty>}" ;;
   esac
 }
 
 is_declared_sparse() {
-  grep -qx "$1" <<<"${DECLARED_SPARSE:-}"
+  grep -qx "$1" <<<"${DECLARED_SPARSE_NAMES:-}"
+}
+
+# The producer named for table $1's sparse declaration, or `derive-stage`
+# if the entry carried no `producer:` key (backward compatible default).
+producer_for_table() {
+  awk -F'\t' -v t="$1" '$1==t{print $2; found=1} END{if(!found) print "derive-stage"}' <<<"${DECLARED_SPARSE:-}"
 }
 
 reason_for() {
@@ -717,21 +815,24 @@ while IFS='|' read -r t n nn nr; do
       declared_tables="$declared_tables $t"
     elif is_declared_sparse "$t"; then
       # SPARSE: empty is expected only WHILE THE PRODUCER IS ALIVE. The third
-      # term comes from check-derive-stage.sh, and an unmeasured or stale
-      # verdict buys nothing -- see producer_state() for why that branch is
-      # the load-bearing one.
-      case "$(producer_state)" in
+      # term comes per entry now (ontology/expected-empty.yaml's `producer:`
+      # key), not from one script for every table, and an unmeasured or
+      # stale verdict buys nothing -- see producer_state() for why that
+      # branch is the load-bearing one.
+      prod="$(producer_for_table "$t")"
+      pstate="$(producer_state "$prod")"
+      case "$pstate" in
         completing)
-          printf '%-28s %8s %12s %16s   (empty - SPARSE, producer completing)\n' "$t" "$n" "$nn" "$nr"
+          printf '%-28s %8s %12s %16s   (empty - SPARSE, producer %s alive)\n' "$t" "$n" "$nn" "$nr" "$prod"
           sparse_tables="$sparse_tables $t"
           ;;
         not_completing)
-          printf '%-28s %8s %12s %16s   <-- EMPTY and PRODUCER STOPPED\n' "$t" "$n" "$nn" "$nr"
+          printf '%-28s %8s %12s %16s   <-- EMPTY and PRODUCER STOPPED (%s)\n' "$t" "$n" "$nn" "$nr" "$prod"
           stopped_tables="$stopped_tables $t"
           ;;
         unmeasured:*)
-          why="$(producer_state)"; why="${why#unmeasured:}"
-          printf '%-28s %8s %12s %16s   <-- EMPTY, PRODUCER UNMEASURED\n' "$t" "$n" "$nn" "$nr"
+          why="${pstate#unmeasured:}"
+          printf '%-28s %8s %12s %16s   <-- EMPTY, PRODUCER UNMEASURED (%s)\n' "$t" "$n" "$nn" "$nr" "$prod"
           printf '%28s   (%s)\n' "" "$why"
           unmeasured_tables="$unmeasured_tables $t"
           ;;
@@ -976,25 +1077,29 @@ if [ "$unlabelled" -gt 0 ]; then
 fi
 
 if [ -n "$stopped_tables" ]; then
-  echo "GATE FAILS: sparse table(s) empty AND their producer is not completing:$stopped_tables"
+  echo "GATE FAILS: sparse table(s) empty AND their own producer is not completing:$stopped_tables"
   echo
   echo "These tables are declared sparse, which permits an empty table ONLY"
-  echo "while the producer is demonstrably alive. check-derive-stage.sh says"
-  echo "it is not completing, so the emptiness is the downstream half of that"
-  echo "outage -- not the rare-event case the declaration describes."
+  echo "while EACH ONE'S OWN producer is demonstrably alive (see each row"
+  echo "above for which producer named it and what it said). The emptiness"
+  echo "is the downstream half of that outage -- not the rare-event case the"
+  echo "declaration describes."
   exit 1
 fi
 
 if [ -n "$unmeasured_tables" ]; then
   echo "GATE FAILS: sparse table(s) empty with NO FRESH producer measurement:$unmeasured_tables"
   echo
-  echo "A sparse declaration is conditional on the producer being alive, and"
-  echo "nothing has measured that recently. Absence of evidence buys nothing:"
-  echo "treating 'nobody looked' as 'probably fine' is the reassuring zero"
-  echo "this gate exists to refuse."
+  echo "A sparse declaration is conditional on its own producer being alive,"
+  echo "and nothing has measured that recently (see each row above for which"
+  echo "producer and why). Absence of evidence buys nothing: treating"
+  echo "'nobody looked' as 'probably fine' is the reassuring zero this gate"
+  echo "exists to refuse."
   echo
-  echo "Run:  bash scripts/check-derive-stage.sh 60"
-  echo "then re-run this gate. It publishes the verdict this reads."
+  echo "Run the named producer's probe, then re-run this gate:"
+  echo "  derive-stage probe:    bash scripts/check-derive-stage.sh 60"
+  echo "  effector-launch probe: bash scripts/check-effector-consumer.sh"
+  echo "Each publishes the result file this gate reads for its own producer."
   exit 1
 fi
 

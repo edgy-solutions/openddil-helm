@@ -1,0 +1,10 @@
+GROUP        synthetic-group-x
+COORDINATOR  0
+STATE        Stable
+BALANCER     range
+MEMBERS      1
+
+TOTAL-LAG    57
+
+TOPIC              PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  MEMBER-ID       CLIENT-ID         HOST
+synthetic-topic-x  0          43              100             57   rdkafka-abc123  synthetic-client  10.0.0.5

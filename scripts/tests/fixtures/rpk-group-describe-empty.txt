@@ -1,0 +1,10 @@
+GROUP        synthetic-group-x
+COORDINATOR  0
+STATE        Empty
+BALANCER     range
+MEMBERS      0
+
+TOTAL-LAG    0
+
+TOPIC              PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  MEMBER-ID  CLIENT-ID  HOST
+synthetic-topic-x  0          0               0               0   -          -          -

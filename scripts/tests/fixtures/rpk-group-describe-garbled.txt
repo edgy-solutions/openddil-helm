@@ -1,0 +1,2 @@
+dial tcp 10.0.0.9:9092: i/o timeout
+rpk: unable to request metadata: context deadline exceeded
