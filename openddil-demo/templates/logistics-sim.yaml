@@ -60,8 +60,11 @@ metadata:
     # service publishes per tick, on HQ (see this file's own header
     # comment). CODE DEFAULT, not a value this chart sets -- there is no
     # LOGISTICS_SIM_OUTPUT_TOPIC env to derive it from, same situation as
-    # LOGISTICS_SIM_INPUT_TOPIC below.
-    openddil.io/produces-topics: "hq/asset-element-telemetry"
+    # LOGISTICS_SIM_INPUT_TOPIC below. "parts-availability" is the spare-
+    # parts stand-in's topic, also a CODE DEFAULT (parts_availability.topic
+    # in the service's default config, which this chart does not override);
+    # the stand-in always runs, on its own interval, on HQ.
+    openddil.io/produces-topics: "hq/asset-element-telemetry hq/parts-availability"
 spec:
   replicas: 1
   strategy:

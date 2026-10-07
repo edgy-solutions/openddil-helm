@@ -1125,6 +1125,8 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 #   tier-cm / tier-fusion  their state topic + tactical-events, tier broker
 #   tier-cm-intake         cm-events, tier broker
 #   cm-intake (hub)        cm-events, hub broker
+#   sensor-ingest-<e>      ingress-dis-raw
+#   logistics-sim          asset-element-telemetry + parts-availability, hq
 #   faust-regional-<r>     fan-in, the three region-* outputs and its table
 #                          changelog, on the tier broker when <r> is a tier,
 #                          else on hq (names as measured on a live broker)
@@ -1192,6 +1194,11 @@ for name in decl:
         want[name] = {f"{t}/cm-events"}
     elif name.endswith("-cm-intake"):
         want[name] = {"hq/cm-events"}
+    elif "-sensor-ingest-" in name:
+        e = name.split("-sensor-ingest-", 1)[1]
+        want[name] = {f"{e}/ingress-dis-raw"}
+    elif name.endswith("-logistics-sim"):
+        want[name] = {"hq/asset-element-telemetry", "hq/parts-availability"}
     elif "-faust-regional-" in name:
         r = name.split("-faust-regional-", 1)[1]
         b = r if r in TIERS else "hq"
@@ -1208,7 +1215,8 @@ for name in decl:
 kinds = {"faust-edge", "redpanda-connect", "cm-service", "logistics-fusion-service",
          "egress-gate-c2", "egress-assembler", "egress-intake",
          "tier-cm-intake-", "tier-cm-", "tier-fusion-", "-cm-intake$",
-         "faust-regional-region-east", "faust-regional-region-west"}
+         "faust-regional-region-east", "faust-regional-region-west",
+         "sensor-ingest-", "-logistics-sim$"}
 # A trailing "$" anchors at the end of the name: the hub cm-intake is a
 # substring of every tier-cm-intake-<t>, so plain "in" could not tell
 # whether the hub one rendered.
