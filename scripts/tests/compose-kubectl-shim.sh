@@ -256,6 +256,28 @@ kubectl() {
       return $?
       ;;
 
+    # ---- kubectl get deploy -n NS NAME -o name (existence probe) ---------
+    # reset-scenario.sh's exercise-reset-record write uses this exact shape
+    # to ask "does ${RELEASE}-exercise-control exist" before applying the
+    # record ConfigMap. Compose never runs that Deployment (it is a chart
+    # object), so this answers "absent" (non-zero, no output) rather than
+    # falling into the catch-all below, which would answer rc=0/empty --
+    # a SILENT SUCCESS that reset-scenario.sh's `if ! kubectl ...` reads as
+    # "exists", and a compose reset would then try to apply a record for a
+    # Deployment that was never there.
+    # ---- kubectl get deploy -n NS NAME -o name (existence probe) ---------
+    # reset-scenario.sh's exercise-reset-record write uses this exact shape
+    # to ask "does ${RELEASE}-exercise-control exist" before applying the
+    # record ConfigMap. Compose never runs that Deployment (it is a chart
+    # object), so this answers "absent" (non-zero, no output) rather than
+    # falling into the catch-all below, which would answer rc=0/empty --
+    # a SILENT SUCCESS that reset-scenario.sh's `if ! kubectl ...` reads as
+    # "exists", and a compose reset would then try to apply a record for a
+    # Deployment that was never there.
+    *"get deploy -n "*" -o name"*)
+      return 1
+      ;;
+
     *)
       _shim_warn_once "unhandled:$1 $2 $3" "unhandled kubectl call ('$argstr') -- returning empty"
       return 0

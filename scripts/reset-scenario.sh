@@ -2512,6 +2512,40 @@ emergency_restore_scales() {
 }
 
 # ===========================================================================
+# EXERCISE RESET RECORD -- the exercise control adapter's own "when did a
+# clean reset last happen" state (see exercise/control.py's read_reset).
+# Written only from the end of a COMPLETED, PASSING run, so an operator
+# checking the adapter's panel sees exactly what this script actually
+# asserted, never a guess:
+#   - a HALTED run never reaches this call at all (halt_reset exits
+#     directly, before RUN_COMPLETED is ever set — see its own definition);
+#   - a run that completed but did NOT pass (OVERALL_FAIL=1) is refused
+#     here explicitly, by the caller checking OVERALL_FAIL before calling
+#     this function at all. "Completed" and "passed" are not the same
+#     question, and only the second one writes the record.
+# Absent Deployment (exercise control not installed on this release) ->
+# nothing applied, one line printed saying why.
+# ===========================================================================
+write_exercise_reset_record() {
+  local name="${RELEASE}-exercise-control"
+  if ! kubectl get deploy -n "$NS" "$name" -o name >/dev/null 2>&1; then
+    echo "exercise-reset-record: not written -- no $name Deployment in" \
+         "namespace $NS (exercise control is not installed on this release)"
+    return 0
+  fi
+  if $DRY_RUN; then
+    echo "exercise-reset-record: not written -- dry run (would write" \
+         "${RELEASE}-exercise-reset-record)"
+    return 0
+  fi
+  local at
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
+    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\"}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+# ===========================================================================
 # PHASE 4 ORDERING — bridge graph, topological sort, destination stability.
 #
 # A reset once trimmed hq before region-east while region-east's own
@@ -4128,4 +4162,15 @@ echo "reset-scenario: producers restored. This script asserts zero at rest" \
 # run_phase call like every other phase.
 run_phase "10 subscription liveness" phase10_subscription_liveness
 RUN_COMPLETED=true
+# A failed/halted reset never writes the record -- a halt never reaches this
+# line (halt_reset exits directly, above), and a completed-but-failing run
+# is refused explicitly here rather than inside the write function, so the
+# gate is visible at the one call site instead of buried in it.
+if [ "$OVERALL_FAIL" -eq 0 ]; then
+  write_exercise_reset_record
+else
+  echo "exercise-reset-record: not written -- this run completed but did" \
+       "not pass (OVERALL_FAIL=$OVERALL_FAIL); a failed reset never writes" \
+       "the record"
+fi
 exit "$OVERALL_FAIL"
