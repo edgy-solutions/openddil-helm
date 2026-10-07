@@ -1125,6 +1125,9 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 #   tier-cm / tier-fusion  their state topic + tactical-events, tier broker
 #   tier-cm-intake         cm-events, tier broker
 #   cm-intake (hub)        cm-events, hub broker
+#   faust-regional-<r>     fan-in, the three region-* outputs and its table
+#                          changelog, on the tier broker when <r> is a tier,
+#                          else on hq (names as measured on a live broker)
 echo
 echo "guard 13: each produces-topics declaration covers what its workload writes"
 G13_VALUES="$(mktemp)"
@@ -1164,6 +1167,7 @@ FAUST_EDGE_SENDS = ["telemetry-latest-state", "asset-telemetry-windows",
                     "tactical-events", "derived-sustainment"]
 FAUST_EDGE_TABLES = ["asset_state", "prognostics_accumulators"]
 CONNECT_SENDS = ["raw-sensor-stream", "effector-events", "ingress-dlq"]
+TIERS = {"region-east"}
 want = {}
 for name in decl:
     if "-faust-edge-" in name:
@@ -1188,6 +1192,13 @@ for name in decl:
         want[name] = {f"{t}/cm-events"}
     elif name.endswith("-cm-intake"):
         want[name] = {"hq/cm-events"}
+    elif "-faust-regional-" in name:
+        r = name.split("-faust-regional-", 1)[1]
+        b = r if r in TIERS else "hq"
+        table = "region_" + r.replace("-", "_") + "_assets_latest"
+        want[name] = {f"{b}/{r}-fan-in", f"{b}/region-fleet-summary",
+                      f"{b}/region-top-factors", f"{b}/region-wear-trends",
+                      f"{b}/region-{r}-aggregator-{table}-changelog"}
     elif "-tier-cm-" in name:
         t = name.split("-tier-cm-", 1)[1]
         want[name] = {f"{t}/asset-cm-state", f"{t}/tactical-events"}
@@ -1196,7 +1207,8 @@ for name in decl:
         want[name] = {f"{t}/asset-logistics-status", f"{t}/tactical-events"}
 kinds = {"faust-edge", "redpanda-connect", "cm-service", "logistics-fusion-service",
          "egress-gate-c2", "egress-assembler", "egress-intake",
-         "tier-cm-intake-", "tier-cm-", "tier-fusion-", "-cm-intake$"}
+         "tier-cm-intake-", "tier-cm-", "tier-fusion-", "-cm-intake$",
+         "faust-regional-region-east", "faust-regional-region-west"}
 # A trailing "$" anchors at the end of the name: the hub cm-intake is a
 # substring of every tier-cm-intake-<t>, so plain "in" could not tell
 # whether the hub one rendered.
