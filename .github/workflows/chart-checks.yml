@@ -18,6 +18,7 @@ on:
     paths:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
+      - "scripts/check-entity-assignment.sh"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
@@ -27,6 +28,7 @@ on:
     paths:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
+      - "scripts/check-entity-assignment.sh"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
@@ -73,6 +75,16 @@ jobs:
       # The guards lint cannot express.
       - name: Render integrity guards
         run: ./scripts/check-chart-render.sh
+
+      # Does the render actually carry the DIS entity allow-list that
+      # sensorIngest.entityAssignment (values.yaml) declares?
+      # templates/edge.yaml's own render-time validation already refuses a
+      # MALFORMED map (bad id, duplicate id, unknown edge, an edge with no
+      # entries while the list is non-empty) -- this catches a well-formed
+      # map that renders the WRONG thing: an id dropped from a sidecar, or
+      # copied into a second one.
+      - name: Entity assignment coverage
+        run: ./scripts/check-entity-assignment.sh ./openddil-demo
 
       # Does the chart emit a tier config the FRONTEND will accept?
       #
