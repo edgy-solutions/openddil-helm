@@ -10,6 +10,40 @@
      * projector (Kafka → Postgres projection for ElectricSQL consumers)
 */}}
 {{- $root := . -}}
+{{- /* sensorIngest.entityAssignment (values.yaml) -- validated and grouped
+   by edge ONCE here, outside the range below, so a failure names the
+   whole list's state rather than whichever edge happens to render first.
+   Produces $entityIdsByEdge: edge id -> sorted list of admitted DIS ids. */ -}}
+{{- $entityAssignment := $root.Values.sensorIngest.entityAssignment | default list }}
+{{- $validEdgeIds := list }}
+{{- range $root.Values.edges }}
+{{- $validEdgeIds = append $validEdgeIds .id }}
+{{- end }}
+{{- $seenEntityIds := dict }}
+{{- $entityIdsByEdge := dict }}
+{{- range $entityAssignment }}
+{{- $entityId := .id }}
+{{- $assignedEdge := .edge }}
+{{- if not (regexMatch "^dis:[0-9]+:[0-9]+:[0-9]+$" ($entityId | toString)) }}
+{{- fail (printf "sensorIngest.entityAssignment: malformed id %q -- must match dis:<site>:<application>:<entity>" $entityId) }}
+{{- end }}
+{{- if hasKey $seenEntityIds $entityId }}
+{{- fail (printf "sensorIngest.entityAssignment: id %q is assigned to more than one edge (%s and %s)" $entityId (get $seenEntityIds $entityId) $assignedEdge) }}
+{{- end }}
+{{- $_ := set $seenEntityIds $entityId $assignedEdge }}
+{{- if not (has $assignedEdge $validEdgeIds) }}
+{{- fail (printf "sensorIngest.entityAssignment: entry for id %q names edge %q, which is not in edges[]" $entityId $assignedEdge) }}
+{{- end }}
+{{- $existingIds := get $entityIdsByEdge $assignedEdge | default list }}
+{{- $entityIdsByEdge = set $entityIdsByEdge $assignedEdge (append $existingIds $entityId | sortAlpha) }}
+{{- end }}
+{{- if gt (len $entityAssignment) 0 }}
+{{- range $validEdgeIds }}
+{{- if not (hasKey $entityIdsByEdge .) }}
+{{- fail (printf "sensorIngest.entityAssignment: edge %q has no entries while the list is non-empty -- a sidecar given no list admits every entity it hears, so this edge would be wide open while its neighbours are scoped" .) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- range .Values.edges }}
 {{- $edge := . }}
 {{- $edgeBroker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $edge.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
@@ -92,6 +126,13 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/proto:/app"
+            {{- if hasKey $entityIdsByEdge $edge.id }}
+            # Per-edge DIS entity allow-list (sensorIngest.entityAssignment,
+            # values.yaml). Comma-joined, sorted ids; the sidecar image
+            # reads this to admit only these entities on its UDP port.
+            - name: DIS_ADMITTED_ENTITY_IDS
+              value: {{ get $entityIdsByEdge $edge.id | join "," | quote }}
+            {{- end }}
           ports:
             - name: dis-udp
               protocol: UDP

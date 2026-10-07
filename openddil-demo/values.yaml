@@ -449,6 +449,27 @@ sensorIngest:
   # `kubectl exec` to inject test PDUs from inside.
   externalAccess:
     enabled: false
+  # Per-edge DIS entity allow-list. A LIST of {id: "dis:S:A:E", edge: <one
+  # of edges[].id>} -- one entry per admitted entity, not one entry per
+  # edge. Empty (the default) renders no DIS_ADMITTED_ENTITY_IDS env at
+  # all, and behaviour is unchanged: the sensor-ingest sidecar admits
+  # every entity it hears on its UDP port, same as today.
+  #
+  # Non-empty, every sensor-ingest Deployment gets DIS_ADMITTED_ENTITY_IDS
+  # set to the sorted, comma-joined ids assigned to its own edge (the
+  # sidecar image already reads this env var). Validated at render time
+  # (templates/edge.yaml): every id must match ^dis:[0-9]+:[0-9]+:[0-9]+$,
+  # no id may appear twice, every `edge` must name a real edges[].id, and
+  # once this list is non-empty every edge needs at least one entry here --
+  # a sidecar given no list admits every entity it hears, so a silently
+  # unlisted edge would be wide open while its neighbours were scoped.
+  #
+  # Example:
+  #   entityAssignment:
+  #     - { id: "dis:1:1:1", edge: edge-01 }
+  #     - { id: "dis:1:1:2", edge: edge-01 }
+  #     - { id: "dis:2:1:7", edge: edge-02 }
+  entityAssignment: []
 
 redpandaConnect:
   image:
