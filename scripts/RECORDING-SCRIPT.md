@@ -267,6 +267,58 @@ the region's indicator reads `LINK UP` again within ~10 s. **Say the number
 moved** — minutes stale to seconds — because convergence that cannot be seen
 to move is indistinguishable from a screen that was never stale.
 
+## BEAT 3m — the move: march order, move, emplace (~6 min) — DRAFT
+
+Connected at the start; BEAT 3's cut and BEAT 4's heal sit inside this beat.
+Screens: **Edge-01**, **Region**, **HQ** (as `liaison.coalition`). Asset: the
+interceptor launcher `dis:1:1:1009` at edge-01.
+
+The lab stand-in drives the launcher from a posture schedule. Its clock, `t0`,
+is the sim process start; the reset restarts the sim. Posture is decided once,
+at edge-01, and every other tier carries that decision and its time.
+
+| t0 + | sim action | posture at edge-01 (measured 2026-10-07) | logistics picture |
+|---|---|---|---|
+| 0 | raise | `emplaced` at **~t0+40** after a restart (see note) | launcher ready, 5/5 on hand |
+| 120 / 180 / 240 | fires 2, 1, 1 | `emplaced` | **remaining 1/5 (expended 4)**, DEGRADED |
+| 300 | stow | `march_ordered`, immediate | unchanged; the launcher is packing up |
+| 330 | move | `moving` at **t0+340** (10 s hold) | unchanged; the asset is in transit |
+| 390 | stop | `emplacing` at **t0+410** (20 s hold) | unchanged |
+| 420 | raise | `emplaced`, immediate | ready again, still 1/5 |
+
+Note on the first row: a sim restart briefly runs two sim pods for the same
+entity (the old one keeps sending "moving" for its 30 s shutdown grace), so the
+first `emplaced` comes ~20 s later than the 20 s hold alone. Only the first
+transition after a restart is affected; the later holds were exact.
+
+**The cut, tied to the move:**
+
+1. Wait until HQ shows `march_ordered` (from ~t0+300).
+2. At ~t0+320, on HQ, move the **WAN slider** to cut (BEAT 3). The region
+   reads severed within ~10 s.
+3. **While cut**, edge-01 and the region see `moving` (t0+340), then
+   `emplacing` (t0+410), then `emplaced` (t0+420). HQ holds `march_ordered`,
+   labelled stale, its age growing.
+4. At ~t0+430, heal (BEAT 4). HQ converges to `emplaced`, and its
+   posture-since reads **t0+420: the edge's time, not the heal time.**
+
+*The beat:* the move happened while HQ could not see it. When the link came
+back, HQ shows not only where the launcher is now but when it got there, as
+decided at the edge.
+
+Placeholders (do not record over one that is still open):
+
+- `<dry run: the screen that shows posture. At frontend HEAD (2026-10-07) no
+  pane renders the posture column; it is in every tier's store. Until a pane
+  shows it, do not narrate posture on camera.>`
+- `<co-located simulator: the route, the emplacement site, the march order's
+  issuing echelon and its timing, authored on the simulator side. The times
+  above are the lab stand-in's schedule, not the scenario's.>`
+- `<co-located simulator: whether the fires come before the move (as in the
+  stand-in) or after re-emplacement.>`
+- `<dry run: HQ's posture convergence time after the heal, and the measured
+  posture-since at HQ against the edge's.>`
+
 ## BEAT 5 — dimension 2, edge-01 cut (~4 min)
 
 ```
