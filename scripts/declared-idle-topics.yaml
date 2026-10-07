@@ -42,7 +42,10 @@ topics:
     revisit: >-
       A feed that does carry loadout — AFSim/VR-Forces, or a customer source —
       changes this from declared to expected-flowing, and this entry should be
-      removed rather than amended.
+      removed rather than amended. That producer must stamp provenance.edge_id
+      on every snapshot: when other nodes run their own fusion, logistics
+      fusion holds (never derives) an asset whose inputs name no producing
+      edge, so an unstamped capability-only asset would never get a status.
 
   asset-element-telemetry:
     status: held
