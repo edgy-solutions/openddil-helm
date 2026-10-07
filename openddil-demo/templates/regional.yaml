@@ -47,6 +47,28 @@
 {{- range $sourceIds }}
 {{- $regionalPairs = append $regionalPairs (printf "%s/region-%s-source-%s" . $region.id .) }}
 {{- end }}
+{{- /* Declared produces-topics. The
+       aggregator sub-app's outputs all land on $aggHqBrokerId -- SAME
+       variable the consumer-groups block above already computes, per the
+       "Its outputs land on the region broker too" note on
+       REGIONAL_HQ_BROKERS below. $regionFanInTopic is read again (not
+       re-typed) by REGIONAL_FAN_IN_TOPIC further down -- the source sub-
+       apps fan each source's state IN to this one topic, on the
+       aggregator's own broker, for the aggregator to read.
+       region-fleet-summary / region-top-factors / region-wear-trends are
+       CODE DEFAULTS (the aggregator's own topic names), not chart values.
+       The changelog is the aggregator's one Faust Table
+       (openddil.faustRegionalAggregatorTable), named from the SAME
+       $region.id this whole file already keys on. */ -}}
+{{- $regionFanInTopic := printf "%s-fan-in" $region.id }}
+{{- $regionAggregatorAppId := printf "region-%s-aggregator" $region.id }}
+{{- $regionalProduces := list
+    (printf "%s/%s" $aggHqBrokerId $regionFanInTopic)
+    (printf "%s/region-fleet-summary" $aggHqBrokerId)
+    (printf "%s/region-top-factors" $aggHqBrokerId)
+    (printf "%s/region-wear-trends" $aggHqBrokerId)
+    (printf "%s/%s" $aggHqBrokerId (include "openddil.faustChangelogTopic" (dict "appId" $regionAggregatorAppId "table" (include "openddil.faustRegionalAggregatorTable" $region.id))))
+  }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,6 +78,9 @@ metadata:
     {{- include "openddil.selectorLabels" (dict "component" (printf "faust-regional-%s" $region.id) "root" $root) | nindent 4 }}
   annotations:
     openddil.io/consumer-groups: {{ join " " $regionalPairs | quote }}
+    # openddil.io/produces-topics -- see the $regionalProduces comment
+    # above.
+    openddil.io/produces-topics: {{ join " " $regionalProduces | quote }}
 spec:
   replicas: 1
   selector:
@@ -129,7 +154,7 @@ spec:
               value: {{ $hqBroker | quote }}
               {{- end }}
             - name: REGIONAL_FAN_IN_TOPIC
-              value: {{ printf "%s-fan-in" $region.id | quote }}
+              value: {{ $regionFanInTopic | quote }}
             - name: REGIONAL_HEARTBEAT_INTERVAL_S
               value: "30"
             - name: REGIONAL_TOP_FACTORS_N

@@ -20,6 +20,10 @@
    renders that this edge's redpanda-connect could reach. See cmReports
    .eventReport's values.yaml comment. */ -}}
 {{- $eventReportOn := and $root.Values.cmReports.enabled $root.Values.cmReports.eventReport.eventType $root.Values.tierNode.enabled (or (not $root.Values.tierNode.tiers) (has $edge.id $root.Values.tierNode.tiers)) }}
+{{- /* sensor-ingest's own output topic -- one variable, read by both the
+   KAFKA_TOPIC env below and the produces-topics annotation, so the two can
+   never drift apart. */ -}}
+{{- $sensorIngestTopic := "ingress-dis-raw" }}
 
 # ===========================================================================
 # sensor-ingest-{{ $edge.id }} — DIS UDP ingestion
@@ -31,6 +35,12 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics -- same
+    # shape as openddil.io/consumer-groups, space-separated <broker-id>/
+    # <topic> pairs, on the workload that ORIGINATES the records. Reads the
+    # SAME $sensorIngestTopic the KAFKA_TOPIC env below reads.
+    openddil.io/produces-topics: {{ printf "%s/%s" $edge.id $sensorIngestTopic | quote }}
 spec:
   replicas: 1
   selector:
@@ -71,7 +81,7 @@ spec:
             - name: KAFKA_BROKERS
               value: {{ $edgeBroker | quote }}
             - name: KAFKA_TOPIC
-              value: "ingress-dis-raw"
+              value: {{ $sensorIngestTopic | quote }}
             - name: OPENDDIL_EDGE_ID
               value: {{ $edge.id | quote }}
             - name: OPENDDIL_REGION_ID
@@ -187,6 +197,14 @@ metadata:
     # bundle), not a value this chart sets -- identical across edges since
     # only the broker differs per pod.
     openddil.io/consumer-groups: {{ printf "%s/connect-dis-mapper" $edge.id | quote }}
+    # openddil.io/produces-topics -- the
+    # mapper reads ingress-dis-raw (sensor-ingest's own output, above) on
+    # this edge's broker and writes the mapped record back to the SAME
+    # broker. "raw-sensor-stream" is, like connect-dis-mapper above, a CODE
+    # DEFAULT baked into the same connect.yaml, not a value this chart sets.
+    # The same connect.yaml also routes effector PDUs to effector-events and
+    # unparseable records to ingress-dlq on this broker.
+    openddil.io/produces-topics: {{ printf "%s/raw-sensor-stream %s/effector-events %s/ingress-dlq" $edge.id $edge.id $edge.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -272,6 +290,17 @@ spec:
         - name: bundle-shared
           emptyDir: {}
 ---
+{{- /* faust-edge's own app id -- ONE expression, read by the consumer-
+   groups annotation below, FAUST_APP_ID in env, and the changelog topics
+   in produces-topics, so none of the three can drift from the others. */ -}}
+{{- $faustEdgeAppId := printf "openddil-%s" $edge.id }}
+{{- $faustEdgeProduces := list }}
+{{- range (list "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "derived-sustainment") }}
+{{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id .) }}
+{{- end }}
+{{- range (include "openddil.faustEdgeTables" . | fromYamlArray) }}
+{{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id (include "openddil.faustChangelogTopic" (dict "appId" $faustEdgeAppId "table" .))) }}
+{{- end }}
 # ===========================================================================
 # faust-edge-{{ $edge.id }} — per-asset processing + prognostics
 # ===========================================================================
@@ -285,7 +314,16 @@ metadata:
   annotations:
     # Group == the Faust app id, SAME expression as FAUST_APP_ID below
     # (Faust defaults a consumer group to the app's own app_id).
-    openddil.io/consumer-groups: {{ printf "%s/openddil-%s" $edge.id $edge.id | quote }}
+    openddil.io/consumer-groups: {{ printf "%s/%s" $edge.id $faustEdgeAppId | quote }}
+    # openddil.io/produces-topics --
+    # the four topics this app sends to, all CODE DEFAULTS in the app
+    # rather than values this chart sets: telemetry-latest-state (decoded
+    # state), asset-telemetry-windows (window summaries), tactical-events
+    # (threshold events) and derived-sustainment (the prognostics agent,
+    # registered into this same Faust app). Plus one changelog per Faust
+    # Table this app keeps (openddil.faustEdgeTables above). All on this
+    # edge's own broker.
+    openddil.io/produces-topics: {{ join " " $faustEdgeProduces | quote }}
 spec:
   replicas: 1
   selector:
@@ -314,7 +352,7 @@ spec:
             - name: PYTHONPATH
               value: "/app"
             - name: FAUST_APP_ID
-              value: {{ printf "openddil-%s" $edge.id | quote }}
+              value: {{ $faustEdgeAppId | quote }}
             - name: KAFKA_BROKERS
               value: {{ $edgeBroker | quote }}
             - name: OPENDDIL_EDGE_ID
@@ -410,6 +448,13 @@ metadata:
     # in _helpers.tpl), not re-typed -- so this can never disagree with what
     # the bridge actually commits under.
     openddil.io/consumer-groups: {{ printf "%s/%s" $edge.id (include "openddil.edgeBridgeConnectYaml" (dict "edge" $edge "root" $root "edgeBroker" $edgeBroker) | fromYaml).input.kafka.consumer_group | quote }}
+    # No openddil.io/produces-topics here:
+    # a bridge forwards records between two clusters, it does not originate
+    # them, so it has no local "writer" identity for the census to quiesce.
+    # The reset instead reads this Deployment's own DEST_HOST/DEST_PORT env
+    # below as a bridge-graph edge (source broker = this consumer-groups
+    # pair's broker-id, destination = whatever toxiproxy proxy listens on
+    # DEST_PORT) to order phase 4's trim sources-before-destinations.
 spec:
   replicas: 1
   selector:

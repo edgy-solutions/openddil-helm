@@ -1034,6 +1034,165 @@ if bad:
 print("  ok   : existingSecret empty -- no egress-credentials mount or volume anywhere")
 ' || fail=1
 
+# --- guard 12: every Kafka-producing workload declares produces-topics -----
+# THE DEFECT MODELLED: openddil.io/produces-topics is declared beside
+# openddil.io/consumer-groups so reset-scenario.sh can tell which
+# Deployment/StatefulSet to quiesce for a topic it finds live local
+# writes on. A Deployment/StatefulSet that sets one of the env
+# vars below but carries no (or a malformed) produces-topics annotation is
+# exactly the gap the writer census halts on, undetected, at render time.
+#
+# ENV VAR NAMES ENUMERATED (one appearance in any container is enough to
+# mark the workload a known Kafka producer):
+#   KAFKA_TOPIC                 sensor-ingest
+#   FAUST_APP_ID                faust-edge, faust-regional
+#   CM_KAFKA_BROKERS             cm-service, tier-cm-<id>
+#   FUSION_KAFKA_BROKERS         logistics-fusion-service, tier-fusion-<id>
+#   ASSET_REGISTRY_OUTPUT_TOPIC  asset-registry-service
+#   LOGISTICS_SIM_HQ_BROKERS     logistics-sim
+#   OPENDDIL_EGRESS_SINK_TOPIC   egress-gate-c2
+#   REGIONAL_FAN_IN_TOPIC        faust-regional
+# This is NOT every writer in the chart (egress-assembler/egress-intake
+# carry none of these env vars; guard 13 checks their declarations) and
+# bridges are excluded on purpose (their own comment explains why; they
+# forward, not originate).
+echo
+echo "guard 12: every Kafka-producing workload declares produces-topics"
+render --set releasability.enabled=true \
+       --set egress.assembler.enabled=true \
+       --set egress.intake.enabled=true \
+       --set tierNode.enabled=true \
+       --set-string tierNode.tiers[0]=region-east | "$PY" -c '
+import sys, re, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+PRODUCER_ENV_NAMES = {
+    "KAFKA_TOPIC", "FAUST_APP_ID", "CM_KAFKA_BROKERS", "FUSION_KAFKA_BROKERS",
+    "ASSET_REGISTRY_OUTPUT_TOPIC", "LOGISTICS_SIM_HQ_BROKERS",
+    "OPENDDIL_EGRESS_SINK_TOPIC", "REGIONAL_FAN_IN_TOPIC",
+}
+PAIR_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
+missing, malformed, checked = [], [], 0
+for d in docs:
+    kind = d.get("kind")
+    if kind not in ("Deployment", "StatefulSet"):
+        continue
+    pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+    env_names = set()
+    for c in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+        for e in c.get("env") or []:
+            if e.get("name"):
+                env_names.add(e["name"])
+    hit = env_names & PRODUCER_ENV_NAMES
+    if not hit:
+        continue
+    checked += 1
+    name = (d.get("metadata") or {}).get("name", "")
+    ann = ((d.get("metadata") or {}).get("annotations") or {})
+    value = ann.get("openddil.io/produces-topics")
+    label = kind + "/" + name
+    if not value:
+        missing.append(label + " (env: " + str(sorted(hit)) + ")")
+        continue
+    bad_pairs = [p for p in value.split() if not PAIR_RE.match(p)]
+    if not value.split() or bad_pairs:
+        malformed.append(label + ": " + repr(value))
+if checked == 0:
+    print("  FAIL: no workload with a known Kafka-producer env var was rendered -- this guard proved nothing")
+    sys.exit(1)
+if missing or malformed:
+    if missing:
+        print("  FAIL: missing openddil.io/produces-topics: " + "; ".join(missing))
+    if malformed:
+        print("  FAIL: malformed openddil.io/produces-topics pair(s): " + "; ".join(malformed))
+    sys.exit(1)
+print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well-formed produces-topics annotation")
+' || fail=1
+
+# --- guard 13: each declaration covers what its workload writes ------------
+# THE DEFECT MODELLED: guard 12 passes on ANY well-formed annotation, so a
+# workload that declares one topic but writes four is invisible until a
+# live census halts on the other three. This guard renders a fixture with
+# two extra egress routes, two assembler entries (one duplicate output) and
+# one intake entry, then checks each workload's declaration is a SUPERSET
+# of what it writes:
+#   faust-edge-<e>         the app's four send targets (code defaults in the
+#                          app, pinned here) + its two table changelogs
+#   redpanda-connect-<e>   raw-sensor-stream, effector-events, ingress-dlq
+#   cm-service / fusion    their state topic + tactical-events
+#   egress-gate-c2         every route's sink_topic (c2's + the fixture's)
+#   egress-assembler       every entry's output_topic
+#   egress-intake          every entry's onward_topic
+echo
+echo "guard 13: each produces-topics declaration covers what its workload writes"
+G13_VALUES="$(mktemp)"
+cat > "$G13_VALUES" <<'G13'
+releasability:
+  enabled: true
+egress:
+  routes:
+    - {name: g13-a, source_topic: g13-src, destination: "system:g13-a", sink_topic: g13-sink-a}
+    - {name: g13-b, source_topic: g13-src, destination: "system:g13-b", sink_topic: g13-sink-b}
+  assembler:
+    enabled: true
+    config:
+      - {name: g13-a1, trigger_topic: g13-t1, output_topic: g13-out}
+      - {name: g13-a2, trigger_topic: g13-t2, output_topic: g13-out}
+  intake:
+    enabled: true
+    config:
+      - {name: g13-i1, onward_topic: g13-onward}
+G13
+render -f "$G13_VALUES" | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+decl = {}
+for d in docs:
+    if d.get("kind") not in ("Deployment", "StatefulSet"):
+        continue
+    md = d.get("metadata") or {}
+    v = (md.get("annotations") or {}).get("openddil.io/produces-topics")
+    decl[md.get("name", "")] = set((v or "").split())
+FAUST_EDGE_SENDS = ["telemetry-latest-state", "asset-telemetry-windows",
+                    "tactical-events", "derived-sustainment"]
+FAUST_EDGE_TABLES = ["asset_state", "prognostics_accumulators"]
+CONNECT_SENDS = ["raw-sensor-stream", "effector-events", "ingress-dlq"]
+want = {}
+for name in decl:
+    if "-faust-edge-" in name:
+        e = name.split("-faust-edge-", 1)[1]
+        want[name] = {f"{e}/{t}" for t in FAUST_EDGE_SENDS} | \
+                     {f"{e}/openddil-{e}-{t}-changelog" for t in FAUST_EDGE_TABLES}
+    elif "-redpanda-connect-" in name:
+        e = name.split("-redpanda-connect-", 1)[1]
+        want[name] = {f"{e}/{t}" for t in CONNECT_SENDS}
+    elif name.endswith("-cm-service"):
+        want[name] = {"hq/asset-cm-state", "hq/tactical-events"}
+    elif name.endswith("-logistics-fusion-service"):
+        want[name] = {"hq/asset-logistics-status", "hq/tactical-events"}
+    elif name.endswith("-egress-gate-c2"):
+        want[name] = {"hq/g13-sink-a", "hq/g13-sink-b"}
+    elif name.endswith("-egress-assembler"):
+        want[name] = {"hq/g13-out"}
+    elif name.endswith("-egress-intake"):
+        want[name] = {"hq/g13-onward"}
+kinds = {"faust-edge", "redpanda-connect", "cm-service", "logistics-fusion-service",
+         "egress-gate-c2", "egress-assembler", "egress-intake"}
+seen = {k for k in kinds for n in want if k in n}
+fail = False
+if seen != kinds:
+    print("  FAIL: fixture did not render: " + ", ".join(sorted(kinds - seen)) + " -- this guard proved nothing for them")
+    fail = True
+for name in sorted(want):
+    short = want[name] - decl[name]
+    if short:
+        print(f"  FAIL: {name} writes but does not declare: {sorted(short)}")
+        fail = True
+if fail:
+    sys.exit(1)
+print(f"  ok   : {len(want)} workload(s), every declaration covers its writes")
+' || fail=1
+rm -f "$G13_VALUES"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

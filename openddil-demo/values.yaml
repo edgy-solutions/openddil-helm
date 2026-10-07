@@ -956,14 +956,16 @@ egress:
   # into a declared kind's record. `config` is OPENDDIL_ASSEMBLER_CONFIG's
   # own JSON list (assembler.py's AssemblerRoute shape, including the
   # optional per-route `battle_condition` map) -- this chart passes every
-  # entry through as opaque JSON and never interprets it.
+  # entry through as opaque JSON. The one field it reads is each entry's
+  # `output_topic`, to declare it in openddil.io/produces-topics.
   assembler:
     enabled: false
     config: []
   # egress-intake: polls a destination's artifacts by kind, per ADR-0046 §5,
   # and turns each into a record the rest of the pipeline can carry. `config`
   # is OPENDDIL_EGRESS_INTAKE_CONFIG's own JSON list, passed through as
-  # opaque JSON and never interpreted by this chart. Off by default, same
+  # opaque JSON; the chart reads only each entry's `onward_topic`, to
+  # declare it in openddil.io/produces-topics. Off by default, same
   # reason as the assembler: a release that sets neither renders egress.yaml
   # exactly as it rendered before either existed.
   intake:

@@ -1302,6 +1302,13 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics --
+    # "asset-logistics-status" is this tier's own writer of the same topic
+    # name the root logistics-fusion-service produces (hub.yaml), onto
+    # THIS TIER'S OWN broker rather than hq. CODE DEFAULT, not a value this
+    # chart sets. Plus tactical-events, emitted by the same service.
+    openddil.io/produces-topics: {{ printf "%s/asset-logistics-status %s/tactical-events" $tier.id $tier.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -1414,6 +1421,13 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-%s" $tier.id) "root" $root) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics --
+    # "asset-cm-state" is this tier's own writer of the same topic name
+    # the root cm-service produces (hub.yaml), onto THIS TIER'S OWN broker
+    # rather than hq. CODE DEFAULT, not a value this chart sets. Plus
+    # tactical-events, emitted by the same service.
+    openddil.io/produces-topics: {{ printf "%s/asset-cm-state %s/tactical-events" $tier.id $tier.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -2032,6 +2046,11 @@ metadata:
     # Group PARSED from the generated connect.yaml
     # (openddil.tierUplinkConnectYaml in _helpers.tpl), not re-typed.
     openddil.io/consumer-groups: {{ printf "%s/%s" $tier.id $tierUplinkGroup | quote }}
+    # No openddil.io/produces-topics here:
+    # a bridge forwards records between two clusters, it does not originate
+    # them. The reset reads this Deployment's own DEST_HOST/DEST_PORT env
+    # below as a bridge-graph edge instead (see edge-hq-bridge's identical
+    # note in edge.yaml).
 spec:
   replicas: 1
   selector:

@@ -390,6 +390,14 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "cm-service" "root" .) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics --
+    # "asset-cm-state" is cm-service's one output topic, on hq. CODE
+    # DEFAULT, not a value this chart sets -- CM_KAFKA_BROKERS below names
+    # only the broker, never the topic. Same topic name, different
+    # producer, exists per-tier as tier-cm-<id> (tier-node.yaml). It also
+    # emits tactical-events on CM transitions, same broker.
+    openddil.io/produces-topics: "hq/asset-cm-state hq/tactical-events"
 spec:
   replicas: 1
   selector:
@@ -610,6 +618,11 @@ metadata:
     # is a CODE DEFAULT group prefix (asset-registry-service), not visible
     # in this chart.
     openddil.io/consumer-groups: {{ join " " $assetRegistryPairs | quote }}
+    # openddil.io/produces-topics -- the
+    # SAME .Values.assetRegistry.outputTopic value ASSET_REGISTRY_OUTPUT_
+    # TOPIC reads below, on hq (this service has one writer by design,
+    # ADR-0028).
+    openddil.io/produces-topics: {{ printf "hq/%s" .Values.assetRegistry.outputTopic | quote }}
 spec:
   replicas: 1   # Single writer by design (ADR-0028). DO NOT scale up.
   strategy:
@@ -779,6 +792,15 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics --
+    # "asset-logistics-status" is this service's one output topic, on hq.
+    # CODE DEFAULT, not a value this chart sets -- FUSION_KAFKA_BROKERS
+    # below names only the broker, never the topic. Same topic name,
+    # different producer, exists per-tier as tier-fusion-<id>
+    # (tier-node.yaml). It also emits tactical-events on logistics
+    # transitions, same broker.
+    openddil.io/produces-topics: "hq/asset-logistics-status hq/tactical-events"
 spec:
   replicas: 1
   selector:

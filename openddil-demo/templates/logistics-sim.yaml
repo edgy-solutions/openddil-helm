@@ -55,6 +55,13 @@ metadata:
     # LOGISTICS_SIM_EDGE_CLUSTERS above. "logistics-sim-" is the service's
     # consumer_group_prefix CODE DEFAULT, not visible in this chart.
     openddil.io/consumer-groups: {{ join " " $logisticsSimPairs | quote }}
+    # openddil.io/produces-topics --
+    # "asset-element-telemetry" is the one whole-asset-snapshot topic this
+    # service publishes per tick, on HQ (see this file's own header
+    # comment). CODE DEFAULT, not a value this chart sets -- there is no
+    # LOGISTICS_SIM_OUTPUT_TOPIC env to derive it from, same situation as
+    # LOGISTICS_SIM_INPUT_TOPIC below.
+    openddil.io/produces-topics: "hq/asset-element-telemetry"
 spec:
   replicas: 1
   strategy:

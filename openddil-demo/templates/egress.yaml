@@ -52,6 +52,10 @@ on egress.routes/.kinds/.assembler/.forwarder/.stubSink for the shapes.
 {{- $c2Route := dict "name" "c2" "source_topic" .Values.egress.sourceTopic "destination" .Values.egress.destination "sink_topic" .Values.egress.sinkTopic }}
 {{- $allRoutes := prepend .Values.egress.routes $c2Route }}
 {{- $routesJSON := toJson $allRoutes }}
+{{- $gateProduces := list }}
+{{- range $allRoutes }}
+{{- $gateProduces = append $gateProduces (printf "hq/%s" .sink_topic) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -66,6 +70,11 @@ metadata:
     # this consumer reaches the hq broker through toxiproxy and resolved to
     # PROXY/... under IP-based ownership, so a reset never quiesced it).
     openddil.io/consumer-groups: "hq/egress-gate-c2"
+    # openddil.io/produces-topics -- every route's sink_topic, on hq: the
+    # c2 route's is the SAME .Values.egress.sinkTopic value
+    # OPENDDIL_EGRESS_SINK_TOPIC below reads, and the rest come from the
+    # same $allRoutes list the routes ConfigMap is rendered from.
+    openddil.io/produces-topics: {{ $gateProduces | uniq | join " " | quote }}
 spec:
   # ONE REPLICA. The consumer group would split partitions between two, which
   # is safe for the decision, but the per-record DECISION log is the audit
@@ -265,6 +274,12 @@ metadata:
     {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 4 }}
   annotations:
     openddil.io/consumer-groups: "hq/egress-assembler"
+    {{- with (include "openddil.egressConfigTopics" (dict "entries" .Values.egress.assembler.config "field" "output_topic")) }}
+    # openddil.io/produces-topics -- each config entry's output_topic, on
+    # hq, read from the SAME egress.assembler.config list the ConfigMap
+    # above passes to the assembler. Omitted when no entry declares one.
+    openddil.io/produces-topics: {{ . | quote }}
+    {{- end }}
 spec:
   replicas: 1
   selector:
@@ -331,6 +346,9 @@ spec:
 # from a destination's artifacts feed rather than consuming Kafka, so unlike
 # the assembler/forwarder/gate it carries no openddil.io/consumer-groups
 # annotation here.
+#
+# Its openddil.io/produces-topics is each config entry's onward_topic, on
+# hq, read the same way as the assembler's output_topic above.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -347,6 +365,10 @@ metadata:
   labels:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "egress-intake" "root" .) | nindent 4 }}
+  {{- with (include "openddil.egressConfigTopics" (dict "entries" .Values.egress.intake.config "field" "onward_topic")) }}
+  annotations:
+    openddil.io/produces-topics: {{ . | quote }}
+  {{- end }}
 spec:
   replicas: 1
   selector:

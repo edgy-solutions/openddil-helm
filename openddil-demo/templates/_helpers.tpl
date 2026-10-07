@@ -1171,6 +1171,43 @@ projector-asset-element-inventory projector-asset-element-telemetry projector-ca
 {{- end }}
 
 {{/*
+openddil.faustChangelogTopic -- Faust's own naming rule for a table's
+changelog topic, `<app id>-<table name>-changelog`. This is Faust's default
+behaviour (every Table gets a compacted changelog topic named from its
+owning app's id and the table's own name), not a value this chart sets.
+Usage: include "openddil.faustChangelogTopic" (dict "appId" ... "table" ...)
+*/}}
+{{- define "openddil.faustChangelogTopic" -}}
+{{- printf "%s-%s-changelog" .appId .table -}}
+{{- end }}
+
+{{/*
+openddil.faustEdgeTables -- the Faust table names faust-edge's app keeps:
+one holding each asset's latest decoded state, one holding the running
+prognostics accumulators. CODE DEFAULTS baked into the faust-edge app's own
+table definitions (not visible in this chart, which has no Faust source to
+read them from) -- confirmed from a live topic census of the resulting
+changelog topics, not invented here.
+*/}}
+{{- define "openddil.faustEdgeTables" -}}
+- asset_state
+- prognostics_accumulators
+{{- end }}
+
+{{/*
+openddil.faustRegionalAggregatorTable -- the one Faust table the regional
+aggregator sub-app ("region-<id>-aggregator", see regional.yaml) keeps: the
+region's latest per-asset rollup. CODE DEFAULT baked into the faust-regional
+app's own table definition, named from the SAME region id value the rest of
+regional.yaml already uses (hyphens become underscores the way the measured
+changelog topic shows), never a second literal. Usage:
+include "openddil.faustRegionalAggregatorTable" $region.id
+*/}}
+{{- define "openddil.faustRegionalAggregatorTable" -}}
+{{- printf "region_%s_assets_latest" (. | replace "-" "_") -}}
+{{- end }}
+
+{{/*
 openddil.tierProjectorGroupIds -- a tier projector's consumer-group ids, as a
 space-separated list (SPEC-consumer-declarations.md Part A).
 
@@ -1494,3 +1531,19 @@ for spec in \
 done
 echo "INFO: Topics initialized on {{ $B }}"
 {{- end -}}
+
+{{/*
+openddil.egressConfigTopics -- space-separated "hq/<topic>" pairs, one per
+distinct value of `field` across an egress config list (assembler
+output_topic, intake onward_topic), for the openddil.io/produces-topics
+annotation. Reads only that one field; the rest of each entry stays opaque
+to the chart. Empty when no entry carries the field.
+*/}}
+{{- define "openddil.egressConfigTopics" -}}
+{{- $out := list -}}
+{{- range .entries -}}
+{{- $t := get . $.field -}}
+{{- if $t -}}{{- $out = append $out (printf "hq/%s" $t) -}}{{- end -}}
+{{- end -}}
+{{- $out | uniq | join " " -}}
+{{- end }}
