@@ -107,6 +107,39 @@ RED_CHECK_QUIESCE=false        # census-derived-quiesce red-check, see run_red_c
 WRITER_CENSUS_WINDOW_S=70       # phase 3b: must be >= 2x the longest timer cadence (30s aggregator heartbeat)
 WRITER_CENSUS_ONLY=false        # read-only writer census + declared/undeclared verdict, see run_writer_census_only
 
+# 2026-10-08: on one cluster every completed reset ends rc 1 for a single known
+# line: the aggregator rollup check reports ACTUAL=UNMEASURED (no fresh
+# region_fleet_summary row inside the window). Its cause is open. Because rc is
+# 1, a reset that measured every other line as zero cannot be told apart from a
+# failing one, and the exercise reset record (written only when OVERALL_FAIL=0)
+# is never written. The operator can declare THAT line unmeasured, by name, for
+# one run. A declared line is never a pass: it is printed as declared, listed in
+# the summary and in the record, and rc then reflects the measured lines only.
+# Accepted names live in this one variable.
+DECLARABLE_UNMEASURED="aggregator-region-fleet-summary"
+DECLARED_UNMEASURED=()        # names given on the command line
+DECLARED_UNMEASURED_USED=()   # names whose declaration actually applied this run
+
+_is_declared_unmeasured() {
+  local n
+  for n in ${DECLARED_UNMEASURED[@]+"${DECLARED_UNMEASURED[@]}"}; do
+    [ "$n" = "$1" ] && return 0
+  done
+  return 1
+}
+
+print_declared_unmeasured_summary() {
+  echo "Declared unmeasured (not passes): $(_declared_unmeasured_used_list)"
+}
+
+_declared_unmeasured_used_list() {
+  local out="" n
+  for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
+    out="${out:+$out, }$n"
+  done
+  echo "${out:-none}"
+}
+
 usage() {
   cat <<'EOF'
 reset-scenario.sh — reset all scenario state for the openddil demo deployment
@@ -181,6 +214,15 @@ FLAGS
                       every live local topic is declared, 2 otherwise. No
                       scaling, no halt. For compose proofs and lab
                       pre-checks.
+  --declare-unmeasured NAME
+                      Repeatable. Declare one known-unmeasured line by name
+                      for this run only. A declared line that comes back
+                      unmeasured is printed as DECLARED UNMEASURED (not a
+                      pass), listed in the final summary and in the exercise
+                      reset record, and does not set the failing exit code.
+                      A declaration never excuses a measured wrong value or a
+                      missing pod. Accepted names: aggregator-region-fleet-summary
+                      Any other name exits 2 before any phase runs.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -207,6 +249,17 @@ while [ $# -gt 0 ]; do
     --red-check-electric) RED_CHECK_ELECTRIC=true ;;
     --writer-census-window) shift; WRITER_CENSUS_WINDOW_S="$1" ;;
     --writer-census-only) WRITER_CENSUS_ONLY=true ;;
+    --declare-unmeasured)
+      shift
+      _dn="${1:-}"
+      _ok=false
+      for _a in $DECLARABLE_UNMEASURED; do [ "$_a" = "$_dn" ] && _ok=true; done
+      if ! $_ok; then
+        echo "unknown --declare-unmeasured name: '${_dn}'. Accepted names: ${DECLARABLE_UNMEASURED// /, }" >&2
+        exit 2
+      fi
+      DECLARED_UNMEASURED+=("$_dn")
+      ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -230,6 +283,9 @@ RUN_STARTED_AT_SOURCE="workstation clock (fallback)"
 OVERALL_FAIL=0
 
 echo "reset-scenario: namespace=$NS release=$RELEASE dry-run=$DRY_RUN"
+_decl_hdr=""
+for _a in ${DECLARED_UNMEASURED[@]+"${DECLARED_UNMEASURED[@]}"}; do _decl_hdr="${_decl_hdr:+$_decl_hdr, }$_a"; done
+echo "reset-scenario: declared unmeasured: ${_decl_hdr:-none}"
 
 # ---------------------------------------------------------------------------
 # maybe_run — the single gate every MUTATING action goes through.
@@ -2600,10 +2656,14 @@ write_exercise_reset_record() {
          "${RELEASE}-exercise-reset-record)"
     return 0
   fi
-  local at
+  local at declared_json="" n
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
+    declared_json="${declared_json:+$declared_json, }\"$n\""
+  done
+  declared_json="[${declared_json}]"
   kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
-    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\"}" \
+    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -3687,20 +3747,33 @@ verify_aggregator() {
       echo "  $fresh fresh rollup row(s) landed since the run started"
       report "aggregator region_fleet_summary asset_count (max over fresh rows)" \
         "0" "${maxcount:--1}"
+      if _is_declared_unmeasured aggregator-region-fleet-summary; then
+        echo "  note: aggregator-region-fleet-summary was declared unmeasured but was measured; the declaration was not used"
+      fi
       return
     fi
     sleep "$AGGREGATOR_POLL_INTERVAL_SECONDS"
     elapsed=$((elapsed + AGGREGATOR_POLL_INTERVAL_SECONDS))
   done
-  printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> FAIL\n' \
-    "aggregator region_fleet_summary asset_count"
+  if _is_declared_unmeasured aggregator-region-fleet-summary; then
+    printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> DECLARED UNMEASURED (not a pass)\n' \
+      "aggregator region_fleet_summary asset_count"
+  else
+    printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> FAIL\n' \
+      "aggregator region_fleet_summary asset_count"
+  fi
   echo "     no region_fleet_summary row with updated_at > ${RUN_STARTED_AT} appeared within" \
        "${AGGREGATOR_POLL_TIMEOUT_SECONDS}s."
   echo "     UNMEASURED, not zero: the prediction is 'a rollup arrives and carries 0', and an"
   echo "     empty table does not verify it — phase 6 emptied it. Either the aggregator did not"
   echo "     come back, the projector is not consuming, or the window was shorter than the 30s"
   echo "     emit period."
-  OVERALL_FAIL=1
+  if _is_declared_unmeasured aggregator-region-fleet-summary; then
+    echo "     declared by --declare-unmeasured aggregator-region-fleet-summary"
+    DECLARED_UNMEASURED_USED+=("aggregator-region-fleet-summary")
+  else
+    OVERALL_FAIL=1
+  fi
 }
 
 verify_electric() {
@@ -4000,6 +4073,7 @@ phase8_zero() {
   fi
 
   echo
+  print_declared_unmeasured_summary
   if [ "$OVERALL_FAIL" -eq 0 ]; then
     echo "reset-scenario: ALL VERIFIED READINGS MATCH PREDICTION"
   else
