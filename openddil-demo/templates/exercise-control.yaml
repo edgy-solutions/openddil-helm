@@ -1,0 +1,208 @@
+{{- if and .Values.exerciseControl.enabled .Values.releasability.enabled }}
+{{- $root := . }}
+# =============================================================================
+# Exercise control: HQ-only adapter driving pause/resume/stop/restart/run
+# operations against an external endpoint, and watching the edge sensor
+# rate against a floor (see exercise/control.py). Off by default
+# (exerciseControl.enabled: false); only rendered alongside the read-path
+# releasability stack, since the root pep is its one permitted caller.
+# =============================================================================
+{{- $adapter := $root.Values.exerciseControl.adapter | default dict }}
+{{- /*
+RENDER-TIME VALIDATION, mirroring control.py's own startup refusal
+(AdapterConfigError) so a bad adapter map fails `helm template`, not a
+CrashLoop three stages later. Checked only when this component is actually
+going to render -- a disabled exerciseControl may carry a stale or empty
+adapter block with no consequence.
+*/}}
+{{- if not $adapter }}
+{{- fail "exerciseControl.enabled is true but exerciseControl.adapter is empty -- control.py refuses to start with no adapter configured" }}
+{{- end }}
+{{- if not $adapter.endpoint }}
+{{- fail "exerciseControl.enabled is true but exerciseControl.adapter.endpoint is empty -- control.py refuses to start with no endpoint configured" }}
+{{- end }}
+{{- $allowedOps := list "pause" "restart" "resume" "run" "stop" }}
+{{- range $op, $opDef := ($adapter.operations | default dict) }}
+{{- if not (has $op $allowedOps) }}
+{{- fail (printf "exerciseControl.adapter.operations entry %q is not one of %s" $op (toJson $allowedOps)) }}
+{{- end }}
+{{- end }}
+{{- /*
+Rate sources: empty -> one URL per edges[] entry, against the edge's
+sensor-ingest Service. That Service has no port named "metrics"
+(templates/edge.yaml exposes "dis-udp" and "http"); the "http" port is the
+one that serves /metrics.
+*/}}
+{{- $rateSources := $root.Values.exerciseControl.rateSources }}
+{{- if not $rateSources }}
+{{- $rateSources = list }}
+{{- range $root.Values.edges }}
+{{- $rateSources = append $rateSources (printf "http://%s-sensor-ingest-%s%s:%v/metrics" $root.Release.Name .id (include "openddil.svcDomain" $root) $root.Values.sensorIngest.httpPort) }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control-adapter
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  adapter.json: {{ toJson $adapter | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $root.Values.exerciseControl.port }}
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 4 }}
+spec:
+  # ONE REPLICA: a second would double-apply the same operation against the
+  # external endpoint on every call, which is not a capacity question.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson $adapter | sha256sum | quote }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/exercise" "dst" "app")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: exercise-control
+          # Same pattern as the pep (releasability.yaml): stdlib-only source
+          # from the bundle, run by a stock python image. No pip, so no
+          # network dependency at boot.
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
+          command: ["python", "-u", "/app/control.py"]
+          env:
+            - name: EXERCISE_ADAPTER_FILE
+              value: /etc/exercise/adapter.json
+            - name: EXERCISE_RATE_SOURCES
+              value: {{ join "," $rateSources | quote }}
+            - name: EXERCISE_RATE_WINDOW_S
+              value: {{ $root.Values.exerciseControl.rateWindowSeconds | quote }}
+            - name: EXERCISE_RATE_MIN
+              value: {{ $root.Values.exerciseControl.rateMin | quote }}
+            - name: EXERCISE_SCRAPE_INTERVAL_S
+              value: {{ $root.Values.exerciseControl.scrapeIntervalSeconds | quote }}
+            - name: EXERCISE_PORT
+              value: {{ $root.Values.exerciseControl.port | quote }}
+            - name: EXERCISE_RESET_RECORD_FILE
+              value: /etc/exercise-reset/record.json
+          ports:
+            - containerPort: {{ $root.Values.exerciseControl.port }}
+              name: http
+          readinessProbe:
+            httpGet: { path: /healthz, port: {{ $root.Values.exerciseControl.port }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: {{ $root.Values.exerciseControl.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml $root.Values.exerciseControl.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app
+              subPath: app
+            - name: adapter
+              mountPath: /etc/exercise
+              readOnly: true
+            - name: reset-record
+              mountPath: /etc/exercise-reset
+              readOnly: true
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+        - name: adapter
+          configMap:
+            name: {{ $root.Release.Name }}-exercise-control-adapter
+        - name: reset-record
+          # optional: true -- a release rolled before scripts/reset-scenario.sh
+          # ever wrote this ConfigMap (or one that has never had a passing
+          # reset) must still start; see that script's own write-gate.
+          configMap:
+            name: {{ $root.Release.Name }}-exercise-reset-record
+            optional: true
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control-only
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ONLY the root pep may call this adapter -- same ingress-only idiom as
+    # every other NetworkPolicy in this chart (hub.yaml, releasability.yaml,
+    # tier-node.yaml), restricting who may REACH this backend.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 14 }}
+      ports:
+        - port: {{ $root.Values.exerciseControl.port }}
+  egress:
+    # NO EXISTING NETWORKPOLICY IN THIS CHART HAS AN EGRESS SECTION -- every
+    # other policy here is Ingress-only, restricting who may reach a
+    # backend, never what a backend may reach outward. There is therefore no
+    # pre-existing DNS-allow idiom to copy; the block below is a new pattern
+    # for this chart, not a copy of one that already existed.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        {{- range $root.Values.edges }}
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" .id) "root" $root) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ $root.Values.sensorIngest.httpPort }}
+    {{- range $root.Values.exerciseControl.adapterEgress }}
+    - to:
+        {{- toYaml .to | nindent 8 }}
+      ports:
+        {{- toYaml .ports | nindent 8 }}
+    {{- end }}
+{{- end }}

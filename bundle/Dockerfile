@@ -80,6 +80,7 @@ COPY openddil-demo/ontology                      /bundle/demo/ontology/
 # ontology overlay above: the chart defines the seat, the deployment fills it.
 COPY openddil-demo/policy                        /bundle/demo/policy/
 COPY openddil-demo/gateway                       /bundle/demo/gateway/
+COPY openddil-demo/exercise                      /bundle/demo/exercise/
 
 # REMOVED (GD-09): redpanda-connect-edge-01/02/03.yaml and restate-config.toml.
 #

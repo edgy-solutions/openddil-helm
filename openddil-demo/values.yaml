@@ -1696,3 +1696,36 @@ releasability:
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 300m, memory: 256Mi }
+
+# Exercise control: a small HQ-only adapter that drives external
+# pause/resume/stop/restart/run operations and watches the edge sensor-ingest
+# rate against a floor. Ships as source from the bundle (demo/exercise), run
+# under the same stock python image as the root pep -- see releasability.pep
+# above for why that pattern exists (no image to build, no wheels at start).
+exerciseControl:
+  # HQ only; off by default. The root pep only gets
+  # OPENDDIL_EXERCISE_CONTROL_URL/ROLES when this is true (releasability.yaml).
+  enabled: false
+  port: 8095
+  # Gateway role list, same parsing as releasability.wanControlRoles (comma
+  # list, no further validation at render time -- control.py's own consumer
+  # owns that).
+  roles: "supervisor"
+  # {name, endpoint, operations: {op: {method, path, body}}}. Overlays carry
+  # the real map; op keys must be one of pause/resume/stop/restart/run --
+  # same ALLOWED_OPS set control.py refuses to start without (see exercise/
+  # control.py), checked again here at render time so a bad map fails
+  # `helm template`, not a CrashLoop.
+  adapter: {}
+  # Empty -> every edge's sensor-ingest http port, one URL per edges[]
+  # entry (there is no Service port literally named "metrics" today; see
+  # templates/exercise-control.yaml's comment on this).
+  rateSources: []
+  rateWindowSeconds: 30
+  rateMin: 0.1
+  scrapeIntervalSeconds: 5
+  # NetworkPolicy egress peers+ports for the adapter endpoint, verbatim --
+  # list of {to: [...], ports: [...]}, same shape kubernetes NetworkPolicy
+  # egress rules take.
+  adapterEgress: []
+  resources: {}

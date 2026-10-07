@@ -1237,6 +1237,127 @@ print(f"  ok   : {len(want)} workload(s), every declaration covers its writes")
 ' || fail=1
 rm -f "$G13_VALUES"
 
+# --- guard 14: exercise control renders only when enabled, and validates ---
+# its adapter. Mirrors control.py's own startup refusal (empty adapter, or
+# an operations key outside pause/resume/stop/restart/run) so a bad map
+# fails `helm template`, not a CrashLoop three stages later. See
+# templates/exercise-control.yaml and values.yaml exerciseControl.
+echo
+echo "guard 14: exercise control renders only when enabled, and validates its adapter"
+
+# 14a: default render -- disabled, must be invisible.
+render | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+fail = False
+pep_env = []
+for d in docs:
+    name = (d.get("metadata") or {}).get("name") or ""
+    if "exercise-control" in name:
+        print("  FAIL [14a]: default render has an exercise-control object: " + str(d.get("kind")) + "/" + name)
+        fail = True
+    if name == "t-pep" and d.get("kind") == "Deployment":
+        pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for c in pod.get("containers") or []:
+            for e in c.get("env") or []:
+                pep_env.append(e.get("name"))
+if "OPENDDIL_EXERCISE_CONTROL_URL" in pep_env:
+    print("  FAIL [14a]: default render root pep carries OPENDDIL_EXERCISE_CONTROL_URL")
+    fail = True
+if fail:
+    sys.exit(1)
+print("  ok   [14a]: default render has no exercise-control object and no env on the root pep")
+' || fail=1
+
+# 14b: enabled with a valid adapter, and tierNode also on, to prove tier
+# peps are excluded. 3 edges in the chart default (edge-01/02/03) -> 3
+# rate sources expected.
+render --set releasability.enabled=true \
+       --set exerciseControl.enabled=true \
+       --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+       --set exerciseControl.adapter.operations.pause.method=POST \
+       --set exerciseControl.adapter.operations.pause.path=/pause \
+       --set tierNode.enabled=true \
+  | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+fail = False
+kinds_seen = set()
+pep_env = []
+tier_pep_env = []
+rate_sources = None
+for d in docs:
+    kind = d.get("kind")
+    name = (d.get("metadata") or {}).get("name") or ""
+    if name == "t-exercise-control-adapter" and kind == "ConfigMap":
+        kinds_seen.add("ConfigMap")
+    if name == "t-exercise-control" and kind == "Service":
+        kinds_seen.add("Service")
+    if name == "t-exercise-control" and kind == "Deployment":
+        kinds_seen.add("Deployment")
+        pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for c in pod.get("containers") or []:
+            for e in c.get("env") or []:
+                if e.get("name") == "EXERCISE_RATE_SOURCES":
+                    rate_sources = e.get("value") or ""
+    if name == "t-exercise-control-only" and kind == "NetworkPolicy":
+        kinds_seen.add("NetworkPolicy")
+    if name == "t-pep" and kind == "Deployment":
+        pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for c in pod.get("containers") or []:
+            for e in c.get("env") or []:
+                pep_env.append(e.get("name"))
+    if "tier-pep" in name and kind == "Deployment":
+        pod = ((d.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for c in pod.get("containers") or []:
+            for e in c.get("env") or []:
+                tier_pep_env.append(e.get("name"))
+want_kinds = {"ConfigMap", "Service", "Deployment", "NetworkPolicy"}
+missing_kinds = want_kinds - kinds_seen
+if missing_kinds:
+    print("  FAIL [14b]: missing object(s): " + str(sorted(missing_kinds)))
+    fail = True
+if "OPENDDIL_EXERCISE_CONTROL_URL" not in pep_env:
+    print("  FAIL [14b]: root pep is missing OPENDDIL_EXERCISE_CONTROL_URL")
+    fail = True
+if "OPENDDIL_EXERCISE_CONTROL_URL" in tier_pep_env:
+    print("  FAIL [14b]: a tier pep carries OPENDDIL_EXERCISE_CONTROL_URL (tier peps never get it)")
+    fail = True
+edge_count = 3
+got = 0 if not rate_sources else len(rate_sources.split(","))
+if got != edge_count:
+    print("  FAIL [14b]: expected " + str(edge_count) + " rate source(s), got " + str(got) + ": " + str(rate_sources))
+    fail = True
+if fail:
+    sys.exit(1)
+print("  ok   [14b]: ConfigMap/Deployment/Service/NetworkPolicy render; root pep env set; tier pep excluded; " + str(got) + " rate source(s) for " + str(edge_count) + " edge(s)")
+' || fail=1
+
+# 14c: must-fail scenarios, each naming the reason/key, same pattern as
+# g9_fail_check above.
+g14_fail_check() {
+  local desc="$1" needle="$2"; shift 2
+  local err status
+  err=$(helm template t "$CHART" "$@" 2>&1 >/dev/null)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "  FAIL [14c]: $desc did not fail the render"
+    fail=1
+  elif ! printf '%s' "$err" | grep -q "$needle"; then
+    echo "  FAIL [14c]: $desc failed, but did not name the reason (expected to find: $needle)"
+    fail=1
+  else
+    echo "  ok   [14c]: $desc fails the render, naming the reason ($(printf '%s' "$err" | grep -m1 "exerciseControl" | sed 's/^Error: execution error at.*: //'))"
+  fi
+}
+g14_fail_check "empty adapter" "adapter is empty" \
+  --set releasability.enabled=true --set exerciseControl.enabled=true
+g14_fail_check "bad operations key" 'operations entry "launch"' \
+  --set releasability.enabled=true --set exerciseControl.enabled=true \
+  --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+  --set exerciseControl.adapter.operations.launch.method=POST \
+  --set exerciseControl.adapter.operations.launch.path=/launch
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
