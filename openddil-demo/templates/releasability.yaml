@@ -669,9 +669,9 @@ data:
     # at all: a realm that imports with an unsubstituted secret produces a
     # client nobody can authenticate against, and the symptom appears three
     # components away, as a login failure.
-    if grep -q "__[A-Z_]*__" /import/realm-openddil.json; then
+    if grep -q "__[A-Z0-9_]*__" /import/realm-openddil.json; then
       echo "FATAL: a placeholder survived substitution:" >&2
-      grep -o "__[A-Z_]*__" /import/realm-openddil.json | sort -u >&2
+      grep -o "__[A-Z0-9_]*__" /import/realm-openddil.json | sort -u >&2
       exit 1
     fi
     echo "realm prepared: $(grep -c '\"id\"' /import/realm-openddil.json) pinned ids"
