@@ -141,17 +141,18 @@ FLAGS
   --skip-electric     Do not delete the Electric pods.
   --skip-producers    Do not scale producers down or back up.
   --red-check-topic-config
-                      After the first pure-compact topic is deleted and
-                      recreated, perturb its cleanup.policy and confirm the
-                      post-recreate capture assertion notices before putting
-                      it back. Self-repairing; touches exactly one topic.
-                      See JUDGMENT CALL 10.
+                      After the first pure-compact topic is policy-trimmed
+                      (alter, trim, alter back), perturb its cleanup.policy
+                      and confirm the post-restore capture assertion
+                      notices before putting it back. Self-repairing;
+                      touches exactly one topic. See JUDGMENT CALL 10.
   --census-only       Print the broker consumer census, the derived quiesce
                       set with its provenance (census/restate/floor per
                       workload), and the live-consumer assertion result
-                      against the pure-compact bucket, then exit. Runs the
-                      real phase 4 capture pass (a read) so it exercises the
-                      same code paths a real run would. MUTATES NOTHING.
+                      against the pure-compact (policy-trim) bucket, then
+                      exit. Runs the real phase 4 capture pass (a read) so
+                      it exercises the same code paths a real run would.
+                      MUTATES NOTHING.
   --red-check-quiesce Capture, derive the quiesce set, quiesce every kind in
                       it (including a throwaway DaemonSet this red-check
                       creates itself, since fact 6 is that none exist in the
@@ -304,7 +305,7 @@ mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
 # a destination's returned artifacts over HTTP, and it reads its answers topic
 # by assignment with no committed group, so the census can never derive it.
 # Left running, it refills intake_records between phase 6 and phase 8, and it
-# holds partitions on a topic that phase 4 may recreate. It goes down in phase 2
+# holds partitions on a topic that phase 4 policy-trims. It goes down in phase 2
 # and comes back in phase 9 with the other producers. Once back, it re-polls the
 # destination and the rows return. That is a refill, the same as every producer.
 mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
@@ -331,7 +332,9 @@ mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
 # from three ACTUAL sources of truth (the broker consumer census, Restate's
 # own /subscriptions list, and a narrower documented floor for exactly the
 # case host resolution provably cannot see — proxy masking, fact 3) instead
-# of a hand-maintained regex. See phase4_topics and derive_quiesce_set.
+# of a hand-kept regex. See derive_quiesce_set — kept and exercised
+# today by --census-only and --red-check-quiesce; policy-trim (below) no
+# longer deletes anything, so phase4_topics itself no longer calls it.
 echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
      "redpanda=${#REDPANDA_PODS[@]} electric=${#ELECTRIC_PODS[@]}" \
      "faust=${#FAUST_DEPLOYS[@]} producers=${#PRODUCER_DEPLOYS[@]}"
@@ -352,7 +355,7 @@ echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
 # real owner directly, with no host in between for a proxy to sit in front
 # of. Detecting that a live consumer exists still needs no owner resolution
 # at all: MEMBERS on the group says so directly, which is why assert_no_
-# live_consumers (work item 4) and the new assert_consumers_declared
+# live_consumers and the new assert_consumers_declared
 # pre-flight (Part B item 4) both re-read the census fresh rather than
 # trusting derivation's list — an unresolvable owner is now a REFUSAL
 # (assert_consumers_declared), not a silent skip.
@@ -757,10 +760,12 @@ derive_quiesce_set() {
 
 # assert_no_live_consumers "pod|topic" ... -> 0 if zero groups anywhere
 # hold a live (members_count > 0) offset on any of the given topics, 1
-# otherwise. THIS is the actual safety gate (work item 4), not derive_
-# quiesce_set above — call it with the topics about to be DELETED (the
-# pure-compact bucket), never the trimmed ones: a trim cannot auto-create a
-# topic, only a delete can, and only the delete is irreversible.
+# otherwise. Written as the actual safety gate for the topics
+# about to be DELETED, back when the pure-compact (now policy-trim) bucket
+# was deleted and recreated — policy-trim never deletes anything, so
+# phase4_topics no longer calls this itself. Kept, and still called
+# directly against the policy-trim bucket, by --census-only and
+# --red-check-quiesce, as a standalone rehearsal of the same read.
 #
 # Re-reads the census FRESH, every call — deliberately not reusing
 # derive_quiesce_set's earlier read, which was taken BEFORE the quiesce and
@@ -1321,13 +1326,14 @@ is_internal_topic() {
 # topic's cleanup.policy is pure `compact`; it only succeeds when the policy
 # is `compact,delete`. 53 topics on the lab (13 each on hq/edge-01/edge-02/
 # edge-03, 1 on region-east — all state topics or Faust changelogs) are pure
-# `compact`, so phase 4 has to delete and recreate them instead of trimming
-# — and a recreate needs the topic's live config read back BEFORE the
-# delete, or there is nothing to recreate it from.
+# `compact`, so phase 4 has to alter their cleanup.policy to `compact,delete`
+# before it can trim them at all — and a restore back to the captured value
+# afterward needs that same live config read back BEFORE the alter, or there
+# is nothing to restore it to.
 #
 # These three are READS. They do not go through maybe_run and they run
 # under --dry-run too — a dry-run that cannot show the real captured config
-# for a delete-and-recreate topic is worthless for exactly the topics that
+# for a policy-trimmed topic is worthless for exactly the topics that
 # need the most scrutiny.
 # ---------------------------------------------------------------------------
 topic_dynamic_config() {
@@ -1384,15 +1390,14 @@ TOPIC_CAPTURE_DIR="${TMPDIR:-/tmp}/reset-scenario-capture-$$"
 #
 # Re-reads shape + dynamic config LIVE, in the same two-part form the
 # capture file was written in, and diffs the two. Deliberately compares the
-# WHOLE dynamic set and the shape, not just the keys the recreate's `-c`
-# list passed — comparing only what was just written would make this an
-# assertion that the create command's own arguments were echoed back, which
-# proves nothing. Comparing everything is what lets it also catch a broker
-# that auto-created the topic underneath this script (measured fact 3): an
-# auto-created topic has DEFAULT config and 1 partition, which will not
-# match a captured 8-partition, 4-key dynamic config.
+# WHOLE dynamic set and the shape, not just the one key the policy-trim
+# restore's `--set` passed — comparing only what was just written would
+# make this an assertion that the alter-config command's own argument was
+# echoed back, which proves nothing. Comparing everything is what lets it
+# also catch any other drift between the pre-mutation capture and what the
+# broker actually holds afterward, cleanup.policy included.
 #
-# Under --dry-run nothing was deleted, so this reads the topic's own,
+# Under --dry-run nothing was mutated, so this reads the topic's own,
 # still-live, unmutated config against a capture taken from that same
 # config moments earlier — it trivially passes. That is not special-cased
 # below; it falls out of calling this function unconditionally.
@@ -1718,71 +1723,64 @@ phase3_restate() {
 # ===========================================================================
 # PHASE 4 — TOPICS.
 #
-# JUDGMENT CALL 10. The header this replaces argued that delete-and-recreate
-# would need this script to restate every topic's partition count and
-# cleanup policy — a second copy of the chart's topic matrix that drifts —
-# and that trimming needed no such knowledge. That argument is correct for
-# the topics `rpk topic trim-prefix` can actually touch, and wrong for the
-# rest: proven 2026-09-27 on scratch topics, trim-prefix returns
-# POLICY_VIOLATION when a topic's cleanup.policy is pure `compact`, and only
-# succeeds when the policy is `compact,delete`. 53 topics on the lab (13
-# each on hq/edge-01/edge-02/edge-03, 1 on region-east — all state topics or
-# Faust changelogs) are pure `compact`. Trimming cannot empty them at any
-# setting; the split is textual and absolute:
+# JUDGMENT CALL 10. The header this replaced argued for delete-and-recreate:
+# trimming needs no knowledge of a topic's own config, and `rpk topic trim-
+# prefix` returns POLICY_VIOLATION when a topic's cleanup.policy is pure
+# `compact` (proven 2026-09-27 on scratch topics; see the note on
+# topic_dynamic_config) — so a pure-compact topic looked impossible to empty
+# any other way. 53 topics on the lab (13 each on hq/edge-01/edge-02/
+# edge-03, 1 on region-east — all state topics or Faust changelogs) are pure
+# `compact`.
+#
+# WHY THAT WAS WRONG: OFFSETS MUST NEVER GO BACKWARDS. Restate's Kafka
+# ingress deduplicates each subscription by (consumer group, topic,
+# partition), using the record's offset as the sequence number it has
+# already seen. A topic that is deleted and recreated restarts at offset 0,
+# and Restate silently drops every record below the old high-water mark as
+# already-seen, while the consumer group itself stays Stable and broker-side
+# lag reads ~0 — nothing about a delete-then-create looks wrong from the
+# broker's side. Phase 10, below, exists because that drop is otherwise
+# invisible from anywhere this script can read.
+#
+# SO EMPTYING NEVER DELETES. A pure-compact topic instead gains `delete`
+# cleanup.policy for exactly as long as its trim takes, in four steps:
+#
+#   1. `rpk topic alter-config <t> --set cleanup.policy=compact,delete
+#      --no-confirm` (alter-config prompts for confirmation exactly like
+#      trim-prefix does, JUDGMENT CALL 9 below — same `--no-confirm` fix).
+#   2. trim every partition to its own high watermark — the same per-
+#      partition hw-read-then-trim this phase already does for the
+#      trim-eligible bucket, reused rather than copied.
+#   3. `rpk topic alter-config <t> --set cleanup.policy=<the CAPTURED
+#      value> --no-confirm` — restored to whatever this topic's capture
+#      read before step 1, never hardcoded back to plain `compact`.
+#   4. assert_topic_matches_capture, the same post-mutation check the old
+#      recreate path used, now reading the topic back after the restore
+#      instead of after a create — plus log_start == high_watermark on
+#      every partition, same as the trim-eligible bucket is checked for.
+#
+# The topic is never gone, so there is no window for auto-create to race
+# against and nothing for a quiesced consumer to hang on. The per-topic
+# quiesce this bucket used to require around that window (quiesce_derived_
+# set, below) is gone from this phase's own mutation pass for exactly that
+# reason — it is still exercised, standalone, by --census-only and
+# --red-check-quiesce, which validate the same derivation/ownership
+# machinery for its own sake and no longer rehearse a phase 4 gate that this
+# phase does not run any more.
 #
 #   cleanup.policy contains "delete"  -> trim (unchanged path, below)
-#   cleanup.policy is pure "compact"  -> delete, then recreate from a capture
+#   cleanup.policy is pure "compact"  -> policy-trim (alter, trim, alter back)
 #
-# THE OLD OBJECTION, ANSWERED. The config this recreate needs is not
+# THE CAPTURE ITSELF IS UNCHANGED. The config this bucket needs is not
 # restated from this script's own knowledge of the chart — it is CAPTURED
-# from the live broker immediately before that topic's delete (see
-# topic_shape/topic_dynamic_config and the capture store above
-# is_internal_topic). There is no second copy of the chart's topic matrix to
-# drift, because nothing here claims to know the matrix; it reads whatever
-# the broker is actually running right now. And a capture that is never
-# checked against what comes back is only a hope that the recreate matched
-# it — assert_topic_matches_capture is what turns that into an actual check,
-# on every recreated topic, every run.
-#
-# WHY CONSUMERS ARE QUIESCED, AND WHY THIS IS PER-TOPIC, NOT BULK.
-#
-# SUPERSEDED PREMISE, KEPT BECAUSE THE PRACTICE STILL STANDS. This paragraph
-# read "auto_create_topics_enabled=true on every broker (measured
-# 2026-09-27)". That was true when measured and is FALSE as of chart 0.1.61,
-# which sets the property false on all five brokers. The race described below
-# can therefore no longer happen by auto-creation, and quiescing is now
-# defence in depth rather than the only thing standing between a delete and a
-# wrong topic.
-#
-# Do NOT relax the quiesce on the strength of that. The failure mode did not
-# disappear, it changed shape: with auto-create off, a consumer or producer
-# touching a topic that does not currently exist does not get a wrong topic,
-# it HANGS AND RETRIES SILENTLY with no error (measured 2026-09-27). A
-# quiesced consumer cannot hang. And the property is a cluster setting that a
-# fresh install seeds but an existing cluster does not adopt from the chart,
-# so a lab that was never updated at runtime is still a lab where the
-# original race is live. The safe reading is: assume nothing about the
-# property here, quiesce anyway.
-#
-# The historical premise, for the record: with auto-create on, the instant ANY
-# consumer or producer touches a topic that does not currently exist, the
-# broker recreates it with DEFAULT config — 1 partition,
-# cleanup.policy=delete, none of the 53 topics' real settings. Every one of
-# these 53 topics has at least one live consumer group (measured fact 4), so
-# between this phase's `rpk topic delete` and its `rpk topic create`, a
-# consumer group that is still running WILL win the race and hand this
-# script a topic to "recreate" that the broker already auto-created wrong.
-# That is exactly the state assert_topic_matches_capture exists to catch —
-# but catching it after the fact is a fallback, not a plan, so the derived
-# quiesce set is scaled to zero (or otherwise quiesced — see work item 3's
-# per-kind table) before any delete happens at all, and the live-consumer
-# assertion (assert_no_live_consumers) is checked before the first delete
-# too — see quiesce_derived_set and phase4_topics below. And because the
-# danger window is "topic
-# does not exist yet", each pure-compact topic is deleted AND recreated
-# before the next one is even looked at — deleting all 53 first and creating
-# all 53 second would hold every one of them open to the auto-create race
-# for the full duration of the batch, not just its own turn.
+# from the live broker immediately before any mutation (see topic_shape/
+# topic_dynamic_config and the capture store above is_internal_topic). There
+# is no second copy of the chart's topic matrix to drift, because nothing
+# here claims to know the matrix; it reads whatever the broker is actually
+# running right now. And a capture that is never checked against what comes
+# back is only a hope that the restore matched it — assert_topic_matches_
+# capture is what turns that into an actual check, on every policy-trimmed
+# topic, every run.
 #
 # STILL TRUE, UNCHANGED FROM THE ORIGINAL HEADER:
 #
@@ -1797,9 +1795,14 @@ phase3_restate() {
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Consumer quiesce for the DERIVED set (derive_quiesce_set, above) — the
-# topics about to be deleted-and-recreated, not the trimmed ones. Same
-# shape phase2_quiesce's producer quiesce always had — read the live value,
+# Consumer quiesce for the DERIVED set (derive_quiesce_set, above). Built
+# for the topics that used to be deleted-and-recreated, back when that
+# window was the one thing a live consumer could lose a race against (see
+# JUDGMENT CALL 10, above) — policy-trim never makes a topic disappear, so
+# phase4_topics itself no longer calls this. Kept, and still called
+# directly, by --census-only and --red-check-quiesce, which exercise the
+# same derivation/ownership machinery on its own merits. Same shape
+# phase2_quiesce's producer quiesce always had — read the live value,
 # capture it before mutating, scale/patch through maybe_run — generalised
 # across every kind in work item 3's table, because the derived set can
 # hold a StatefulSet (the Restate runtimes), a DaemonSet (only ever seen in
@@ -1957,7 +1960,7 @@ restore_derived_workload() {
 # "status.replicas" to poll the same way, and is not polled here).
 #
 # THIS WAIT IS A COURTESY, NOT THE SAFETY GATE. assert_no_live_consumers
-# (work item 4), called by the caller after this returns, is what actually
+#, called by the caller after this returns, is what actually
 # decides whether a delete may proceed — it re-reads the census fresh
 # rather than trusting that a fixed 120s poll here caught everything. That
 # split is deliberate: this loop existed in the superseded quiesce_state_
@@ -2163,19 +2166,19 @@ emergency_restore_scales() {
 # its own function so --census-only (work item 6) runs the SAME capture
 # code a real run does instead of a second, driftable copy of it.
 # Populates the now-global CAPTURED_TOPICS / TOPIC_BUCKET / CAPTURE_TRIM_N /
-# CAPTURE_RECREATE_N — promoted from phase4_topics' own locals to globals
+# CAPTURE_POLICYTRIM_N — promoted from phase4_topics' own locals to globals
 # for exactly that reuse.
 #
 # ALL brokers, ALL non-internal topics, BEFORE any mutation. This has to be
 # a separate, complete pass rather than capture-then-mutate per topic,
-# because deciding whether to quiesce consumers at all needs the FULL tally
-# (specifically: is there anything recreate-eligible) before the mutation
-# pass — or --census-only's read-only preview — can begin.
+# because the pre-flight consumer-declaration check and --census-only's
+# read-only preview both need the FULL tally before any mutation pass
+# begins, not just phase 4's own.
 # ---------------------------------------------------------------------------
 CAPTURED_TOPICS=()
 declare -A TOPIC_BUCKET=()
 CAPTURE_TRIM_N=0
-CAPTURE_RECREATE_N=0
+CAPTURE_POLICYTRIM_N=0
 
 phase4_capture_pass() {
   mkdir -p "$TOPIC_CAPTURE_DIR"
@@ -2184,7 +2187,7 @@ phase4_capture_pass() {
   CAPTURED_TOPICS=()
   TOPIC_BUCKET=()
   CAPTURE_TRIM_N=0
-  CAPTURE_RECREATE_N=0
+  CAPTURE_POLICYTRIM_N=0
 
   local pod topic policy shape dynamic capdir capfile
   for pod in "${REDPANDA_PODS[@]}"; do
@@ -2206,8 +2209,8 @@ phase4_capture_pass() {
           CAPTURE_TRIM_N=$((CAPTURE_TRIM_N + 1))
           ;;
         compact)
-          TOPIC_BUCKET["$pod|$topic"]="recreate"
-          CAPTURE_RECREATE_N=$((CAPTURE_RECREATE_N + 1))
+          TOPIC_BUCKET["$pod|$topic"]="policy-trim"
+          CAPTURE_POLICYTRIM_N=$((CAPTURE_POLICYTRIM_N + 1))
           ;;
         *)
           # Covers both an empty read (rpk/awk found no cleanup.policy row)
@@ -2218,7 +2221,7 @@ phase4_capture_pass() {
           # reproduces the bug this phase was rewritten to fix.
           echo "WARNING: $pod/$topic — cleanup.policy read back as '${policy:-EMPTY}'," >&2
           echo "         neither pure compact nor delete-containing. Skipping this" >&2
-          echo "         topic: not trimmed, not recreated." >&2
+          echo "         topic: not trimmed, not policy-trimmed." >&2
           continue
           ;;
       esac
@@ -2226,169 +2229,163 @@ phase4_capture_pass() {
     done < <(broker_topics "$pod")
   done
 
-  echo "capture: $((CAPTURE_TRIM_N + CAPTURE_RECREATE_N)) topics ($CAPTURE_TRIM_N trim-eligible, $CAPTURE_RECREATE_N recreate-eligible)"
+  echo "capture: $((CAPTURE_TRIM_N + CAPTURE_POLICYTRIM_N)) topics ($CAPTURE_TRIM_N trim-eligible, $CAPTURE_POLICYTRIM_N policy-trim-eligible)"
+}
+
+# ---------------------------------------------------------------------------
+# trim_topic_to_hw POD TOPIC — the one trim action both buckets below
+# perform identically: read every partition's own high watermark and trim
+# its log-start to exactly that offset. Pulled into its own function so the
+# policy-trim bucket (which can only run this AFTER its own alter-config
+# widens cleanup.policy) reuses the exact same form the trim-eligible
+# bucket uses — same hw read, same --no-confirm, same per-partition loop —
+# instead of a second copy that could drift from JUDGMENT CALL 9's fix.
+#
+# Called bare (trim-eligible bucket) it behaves exactly as before: a failed
+# trim-prefix kills the script via `set -e`. Called as the condition of an
+# `if !` (policy-trim bucket, below) that suspension of `set -e` extends
+# into this function too, so a failed trim-prefix there is reported, not
+# fatal — the caller still has an alter-config to undo.
+# ---------------------------------------------------------------------------
+trim_topic_to_hw() {
+  # Returns non-zero if ANY partition's trim failed, not just the last one:
+  # under `if !` set -e is off, and a loop's status is its last command's.
+  local pod="$1" topic="$2" part logstart hw rc=0
+  while read -r part logstart hw; do
+    [ -z "$part" ] && continue
+    if [ "$logstart" = "$hw" ]; then
+      printf '  %-28s %-30s p%-3s already at hw=%s — nothing to trim\n' \
+        "$pod" "$topic" "$part" "$hw"
+      continue
+    fi
+    # JUDGMENT CALL 9 — `rpk topic trim-prefix` PROMPTS ("Confirm deletion
+    # of all data before the new start offsets? (Y/n)"); `kubectl exec` has
+    # no tty, so an unguarded prompt reads EOF and `set -e` kills the script
+    # mid-mutation. `--no-confirm` ("Disable confirmation prompt"), plus a
+    # timeout so any other prompt on this path fails fast instead of
+    # hanging.
+    maybe_run "trim $topic partition $part on $pod: log_start $logstart -> $hw" \
+      kubectl exec -n "$NS" "$pod" -c redpanda -- \
+      timeout "${RPK_CMD_TIMEOUT:-60}" \
+      rpk topic trim-prefix "$topic" --offset "$hw" --partitions "$part" --no-confirm || rc=1
+  done < <(topic_partitions "$pod" "$topic")
+  return "$rc"
 }
 
 phase4_topics() {
   echo
-  echo "=== PHASE 4: topics (capture, then trim or delete-and-recreate) ==="
+  echo "=== PHASE 4: topics (capture, then trim or policy-trim) ==="
   if $SKIP_TOPICS; then
     skip_warning "TOPICS" \
-      "No partition is trimmed, and no topic is deleted or recreated. Every\n    compacted topic — trim-eligible or pure-compact alike — keeps its full\n    latest-per-key contents, including the Faust changelog topics phase 5\n    depends on being empty — if phase 5 also runs, it will republish the\n    SAME pre-reset fleet from state that was expected to be empty."
+      "No partition is trimmed. Every compacted topic — trim-eligible or\n    pure-compact alike — keeps its full latest-per-key contents, including\n    the Faust changelog topics phase 5 depends on being empty — if phase 5\n    also runs, it will republish the SAME pre-reset fleet from state that\n    was expected to be empty."
     return 0
   fi
 
   phase4_capture_pass
 
-  local quiesced=false
-  if [ "$CAPTURE_RECREATE_N" -gt 0 ]; then
-    # quiesce_derived_set arms the trap itself (via quiesce_workload_set) —
-    # see emergency_restore_scales for why a per-phase trap was the wrong
-    # shape. `set -euo pipefail` with no trap is how this script has already
-    # been shown (call 9) to die mid-mutation and leave a state nothing
-    # cleans up; workloads scaled to zero is exactly that kind of state, so
-    # the restore must not depend on this phase reaching its own last line.
-    quiesce_derived_set "${CAPTURED_TOPICS[@]}"
-    quiesced=true
-
-    # Work item 4 — the ACTUAL safety gate, called after the quiesce and
-    # before the first delete, scoped to the delete bucket only (a trim
-    # cannot auto-create a topic; only a delete can, and only the delete is
-    # irreversible). Aborting here is a clean stop: nothing has been
-    # mutated yet, so the trap (still armed) leaves the restore to run
-    # below and the lab ends up where it started.
-    local -a delete_targets=()
-    local dpt
-    for dpt in "${CAPTURED_TOPICS[@]}"; do
-      [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
-    done
-    if ! assert_no_live_consumers "${delete_targets[@]}"; then
-      echo "PHASE 4 ABORTED: a live consumer still holds an offset on a topic" >&2
-      echo "about to be deleted (see LIVE CONSUMER lines above). Nothing has been" >&2
-      echo "deleted. Restoring the quiesced workloads and stopping cleanly." >&2
-      restore_derived_set
-      halt_reset "phase 4: a live consumer holds an offset on a topic about to be deleted" \
-        "no topic deleted; the derived quiesce set was restored"
-    fi
-  else
-    echo "no recreate-eligible (pure-compact) topics found — skipping consumer quiesce"
-  fi
-
   # --- mutation pass, in the SAME order the capture pass built
   # CAPTURED_TOPICS in. Re-deriving this order by re-listing topics from the
   # broker was rejected: calling broker_topics() a second time is exactly
-  # the auto-create race this phase exists to guard against, on the one
-  # call site where getting a DIFFERENT topic list than the capture pass
-  # saw would silently desync a topic from its own capture file.
+  # the kind of second, driftable read this phase exists to avoid, on the
+  # one call site where getting a DIFFERENT topic list than the capture
+  # pass saw would silently desync a topic from its own capture file.
+  #
+  # No pre-mutation consumer quiesce or live-consumer gate runs here any
+  # more. Both existed only to guard the DELETE this phase used to do (a
+  # trim cannot make a topic disappear, so there was never anything for a
+  # consumer to race against); see the header above and the DERIVED
+  # quiesce intro comment below for where that machinery still lives.
   local pod topic pt part logstart hw failure="" failure_reason=""
-  local red_check_done=false
+  local red_check_done=false capfile cap_policy restore_cmd verify_failed
   for pt in "${CAPTURED_TOPICS[@]}"; do
     pod="${pt%%|*}"
     topic="${pt#*|}"
 
     if [ "${TOPIC_BUCKET[$pt]}" = "trim" ]; then
-      while read -r part logstart hw; do
-        [ -z "$part" ] && continue
-        if [ "$logstart" = "$hw" ]; then
-          printf '  %-28s %-30s p%-3s already at hw=%s — nothing to trim\n' \
-            "$pod" "$topic" "$part" "$hw"
-          continue
-        fi
-        # JUDGMENT CALL 9 — found by the first REAL run, which the dry-run could
-        # not have caught, because --dry-run prints this command instead of
-        # executing it.
-        #
-        # `rpk topic trim-prefix` PROMPTS: "Confirm deletion of all data before
-        # the new start offsets? (Y/n)". `kubectl exec` here has no tty, so the
-        # prompt read EOF, rpk exited 1, and `set -e` killed the script on the
-        # very first trim — after producers were already scaled down and Restate
-        # state was already cleared. That is the exact half state this script
-        # exists to prevent: stores full, topics full, producers down.
-        #
-        # This is the same family as call 5 (`restate` needs `-y`). Call 5 was
-        # taken by reading `restate --help`; nobody read `rpk trim-prefix
-        # --help`. The lesson generalises: EVERY mutating CLI in this script is
-        # assumed to prompt until its help text says otherwise.
-        #
-        # `--no-confirm` ("Disable confirmation prompt"), plus a timeout, so a
-        # future prompt on some other path fails fast instead of hanging.
-        maybe_run "trim $topic partition $part on $pod: log_start $logstart -> $hw" \
-          kubectl exec -n "$NS" "$pod" -c redpanda -- \
-          timeout "${RPK_CMD_TIMEOUT:-60}" \
-          rpk topic trim-prefix "$topic" --offset "$hw" --partitions "$part" --no-confirm
-      done < <(topic_partitions "$pod" "$topic")
+      if ! trim_topic_to_hw "$pod" "$topic"; then
+        failure="$pt"
+        failure_reason="trim failed on at least one partition — cleanup.policy was not touched"
+        break
+      fi
       continue
     fi
 
-    # pure compact -> delete, then recreate from this topic's own capture.
-    #
-    # `rpk topic delete` takes NO confirmation flag and does not prompt —
-    # CHECKED against `rpk topic delete --help` (2026-09-27): its only flags
-    # are -h/--help and -r/--regex. Unlike trim-prefix (call 9), there is no
-    # prompt to defeat here, so no --no-confirm equivalent exists or is
-    # needed — but it is still wrapped in a timeout, because a hang is still
-    # a hang whether or not a prompt caused it.
-    #
-    # That `-r` is `--regex` on THIS subcommand, not `--replicas`: a stray
-    # `-r <n>` meant for create would instead turn "$topic" into a regex on
-    # delete and could match (and delete) more than the one topic intended.
-    # Not used here for exactly that reason.
+    # pure compact -> policy-trim in place: widen cleanup.policy to
+    # compact,delete just long enough for trim-prefix to be legal, trim,
+    # then alter straight back to the captured value. See the header above
+    # for why this replaced delete-then-recreate: a recreated topic's
+    # offsets restart at 0, and Restate's Kafka-ingress dedup (keyed on
+    # consumer group/topic/partition + offset) would silently drop every
+    # record below the old high watermark while the group kept reporting
+    # Stable at ~0 lag. Trimming in place never moves an offset backward,
+    # so that failure mode cannot occur here.
     capfile="$TOPIC_CAPTURE_DIR/$pod/$topic.cap"
-    # Work item 5: a failed delete used to abort straight through `set -e`
-    # with no capture-directory pointer and no record of which topic it
-    # was. Handled the same way a failed assertion already was: record the
-    # flag, break the loop, let the code after it print where to look.
-    if ! maybe_run "delete $topic on $pod (pure-compact — will be recreated from its capture)" \
+    cap_policy="$(awk -F= '$1=="cleanup.policy"{print $2}' "$capfile")"
+    if [ -z "$cap_policy" ]; then
+      failure="$pt"
+      failure_reason="capture file has no cleanup.policy row to restore to afterward — nothing altered yet"
+      break
+    fi
+    restore_cmd="kubectl exec -n $NS $pod -c redpanda -- rpk topic alter-config $topic --set cleanup.policy=$cap_policy --no-confirm"
+
+    # Step 1 — CHECKED against `rpk topic alter-config --help` on the local
+    # compose broker (2026-10-06): like trim-prefix (JUDGMENT CALL 9),
+    # alter-config also prompts for confirmation ("Use the flag
+    # '--no-confirm' to avoid the confirmation prompt"), so it gets the
+    # same --no-confirm fix. Nothing has been altered yet if this fails.
+    if ! maybe_run "policy-trim $topic on $pod: widen cleanup.policy to compact,delete" \
       kubectl exec -n "$NS" "$pod" -c redpanda -- \
       timeout "${RPK_CMD_TIMEOUT:-60}" \
-      rpk topic delete "$topic"; then
+      rpk topic alter-config "$topic" --set cleanup.policy=compact,delete --no-confirm; then
       failure="$pt"
-      failure_reason="delete failed"
+      failure_reason="alter-config to compact,delete failed — nothing altered; cleanup.policy is still $cap_policy"
       break
     fi
 
-    # Parse this topic's own capture back into create flags. `_` discards
-    # the literal "shape" label the capture file's first line starts with.
-    local _ cap_partitions cap_replicas
-    read -r _ cap_partitions cap_replicas < "$capfile"
-    local -a create_configs=()
-    local kv
-    while IFS= read -r kv; do
-      [ -z "$kv" ] && continue
-      create_configs+=(-c "$kv")
-    done < <(tail -n +2 "$capfile")
-
-    # Long forms --partitions/--replicas on create, never -p/-r: create's -r
-    # is --replicas, delete's -r above is --regex — same short flag, two
-    # meanings, on sibling subcommands of the same CLI. -c/--topic-config is
-    # a repeatable stringArray, built here as a bash ARRAY and expanded as
-    # "${create_configs[@]}" rather than one string, so a value containing a
-    # space cannot be word-split into a second, wrong flag.
-    #
-    # --if-not-exists is available on create and deliberately NOT used: the
-    # whole point of this path is that the topic must not already exist
-    # when this runs. Masking a pre-existing topic would mask precisely the
-    # auto-create race the assertion below exists to catch.
-    # Work item 5: a failed create is worse than a failed delete — the
-    # topic is now gone AND not recreated. Same handling shape, but the
-    # reason says so explicitly, because that is exactly what an operator
-    # needs to know before touching anything else.
-    if ! maybe_run "recreate $topic on $pod from capture ($cap_partitions partitions, $cap_replicas replicas)" \
-      kubectl exec -n "$NS" "$pod" -c redpanda -- \
-      timeout "${RPK_CMD_TIMEOUT:-60}" \
-      rpk topic create "$topic" --partitions "$cap_partitions" --replicas "$cap_replicas" \
-      "${create_configs[@]}"; then
+    # Step 2 — the exact trim action the trim-eligible bucket above uses,
+    # reused rather than copied so the two buckets cannot drift apart.
+    # cleanup.policy is now compact,delete and has NOT been restored yet.
+    if ! trim_topic_to_hw "$pod" "$topic"; then
       failure="$pt"
-      failure_reason="create failed — topic is now DELETED and NOT recreated"
+      failure_reason="trim failed after widening cleanup.policy — restore it by hand: $restore_cmd"
       break
     fi
 
-    # Called unconditionally, dry-run or not — see the comment on this
-    # function for why a dry run trivially (and correctly) passes here
-    # rather than being special-cased out.
+    # Step 3 — restore cleanup.policy to the CAPTURED value, read back out
+    # of this topic's own capture file rather than hardcoded, in case a
+    # future bucketing change ever lets anything other than plain "compact"
+    # land in this branch.
+    if ! maybe_run "policy-trim $topic on $pod: restore cleanup.policy to $cap_policy" \
+      kubectl exec -n "$NS" "$pod" -c redpanda -- \
+      timeout "${RPK_CMD_TIMEOUT:-60}" \
+      rpk topic alter-config "$topic" --set cleanup.policy="$cap_policy" --no-confirm; then
+      failure="$pt"
+      failure_reason="restore of cleanup.policy to $cap_policy failed — topic is still compact,delete: $restore_cmd"
+      break
+    fi
+
+    # Step 4 — verify from a fresh read. assert_topic_matches_capture covers
+    # shape plus the whole dynamic set (cleanup.policy included); log-start
+    # == hw is this phase's own promise (data gone, offsets preserved) and
+    # is checked here directly because a config diff alone would never
+    # catch it.
     if ! assert_topic_matches_capture "$pod" "$topic"; then
       failure="$pt"
-      failure_reason="recreated topic did not match its capture"
+      failure_reason="policy-trimmed topic did not match its capture after restoring cleanup.policy"
+      break
+    fi
+
+    verify_failed=false
+    while read -r part logstart hw; do
+      [ -z "$part" ] && continue
+      if [ "$logstart" != "$hw" ]; then
+        echo "VERIFY FAILED: $topic on $pod partition $part: log-start=$logstart hw=$hw (expected equal)" >&2
+        verify_failed=true
+      fi
+    done < <(topic_partitions "$pod" "$topic")
+    if $verify_failed; then
+      failure="$pt"
+      failure_reason="log-start-offset did not equal high-watermark on at least one partition after policy-trim"
       break
     fi
 
@@ -2401,26 +2398,26 @@ phase4_topics() {
       else
         echo "  --red-check-topic-config: probing $topic on $pod"
         # cleanup.policy is the perturbation field because it is the one
-        # dynamic key present on all 53 recreate-eligible topics (the
+        # dynamic key present on all policy-trim-eligible topics (the
         # changelogs carry nothing else), and compact,delete is a value the
         # broker accepts — so this tests the ASSERTION, not rpk's input
         # validation.
         maybe_run "red-check: perturb cleanup.policy on $topic ($pod)" \
           kubectl exec -n "$NS" "$pod" -c redpanda -- \
           timeout "${RPK_CMD_TIMEOUT:-60}" \
-          rpk topic alter-config "$topic" --set cleanup.policy=compact,delete
+          rpk topic alter-config "$topic" --set cleanup.policy=compact,delete --no-confirm
 
         if assert_topic_matches_capture "$pod" "$topic"; then
           echo "RED-CHECK FAILED: the capture assertion did not notice a perturbed" >&2
-          echo "cleanup.policy — it cannot be trusted to notice an auto-created topic" >&2
-          echo "either." >&2
+          echo "cleanup.policy — it cannot be trusted to notice drift on a policy-trimmed" >&2
+          echo "topic either." >&2
           # Restore runs on this path too — a real config change was just
           # made to the lab, and a failed red-check is not a reason to
           # leave it there.
           maybe_run "red-check: restore cleanup.policy on $topic ($pod)" \
             kubectl exec -n "$NS" "$pod" -c redpanda -- \
             timeout "${RPK_CMD_TIMEOUT:-60}" \
-            rpk topic alter-config "$topic" --set cleanup.policy=compact
+            rpk topic alter-config "$topic" --set cleanup.policy="$cap_policy" --no-confirm
           failure="$pt"
           failure_reason="red-check: assertion did not notice a perturbed cleanup.policy"
           break
@@ -2429,7 +2426,7 @@ phase4_topics() {
         maybe_run "red-check: restore cleanup.policy on $topic ($pod)" \
           kubectl exec -n "$NS" "$pod" -c redpanda -- \
           timeout "${RPK_CMD_TIMEOUT:-60}" \
-          rpk topic alter-config "$topic" --set cleanup.policy=compact
+          rpk topic alter-config "$topic" --set cleanup.policy="$cap_policy" --no-confirm
 
         if ! assert_topic_matches_capture "$pod" "$topic"; then
           echo "RED-CHECK: restoring cleanup.policy did not repair the assertion —" >&2
@@ -2442,13 +2439,6 @@ phase4_topics() {
       fi
     fi
   done
-
-  # The normal restore. The trap stays ARMED: phase 2's producers are still at
-  # zero until phase 9, and disarming here would hand phases 5-9 the very gap
-  # this trap was added to close.
-  if $quiesced; then
-    restore_derived_set
-  fi
 
   if [ -n "$failure" ]; then
     echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} — ${failure_reason:-did not match its captured configuration}." >&2
@@ -2587,6 +2577,75 @@ phase9_restore_producers() {
 }
 
 # ===========================================================================
+# PHASE 10 — SUBSCRIPTION LIVENESS. Everything through phase 9 checks the
+# broker's own side: topic configs, row counts, consumer-group state. None
+# of that can see the one failure mode phase 4's header above exists to
+# prevent — a topic whose offsets went backwards and now has Restate's own
+# ingress dedup silently discarding records below the old high-water mark,
+# while the consumer group itself still reads Stable at ~0 lag. The only
+# way to see THAT is to ask Restate directly whether a subscription is
+# actually producing invocations after T, which is what
+# check-subscription-liveness.sh does; this phase just calls it and maps
+# its exit code into OVERALL_FAIL. See its own header
+# for the LIVE/STALLED/IDLE/UNMEASURED verdicts and exit codes (0 pass,
+# 1 fail, 3 usage error).
+#
+# PHASE9_DONE_AT is recorded by the driver immediately after phase 9
+# returns, RFC3339 UTC, second precision — not inside this function, so a
+# future caller of this function alone (a red-check, say) cannot mistake
+# some earlier timestamp for "when producers came back".
+# ===========================================================================
+phase10_subscription_liveness() {
+  echo
+  echo "=== PHASE 10: subscription liveness ==="
+  local script wait rc=0
+  script="$(dirname "$0")/check-subscription-liveness.sh"
+  wait="${RESET_LIVENESS_WAIT:-300}"
+
+  if [ ! -f "$script" ]; then
+    echo "PHASE 10 FAILED: $script not found. A missing check is treated the" >&2
+    echo "same as a failed one, never a silent skip — this script has no other" >&2
+    echo "way of knowing whether Restate is actually consuming after the reset." >&2
+    OVERALL_FAIL=1
+    return 0
+  fi
+
+  if $DRY_RUN; then
+    echo "-> check subscription liveness since $PHASE9_DONE_AT (wait up to ${wait}s)"
+    printf '   [dry-run] would run:'
+    printf ' %q' bash "$script" --since "$PHASE9_DONE_AT" --wait "$wait"
+    printf '\n'
+    return 0
+  fi
+
+  local out
+  out="$(bash "$script" --since "$PHASE9_DONE_AT" --wait "$wait" 2>&1)" || rc=$?
+  echo "$out"
+
+  case "$rc" in
+    0) : ;;
+    1)
+      OVERALL_FAIL=1
+      echo "PHASE 10 FAILED: liveness check found stalled or unmeasured" >&2
+      echo "subscription(s) since $PHASE9_DONE_AT:" >&2
+      printf '%s\n' "$out" | grep -E '^(STALLED|UNMAPPED|UNMEASURED) ' >&2 || true
+      ;;
+    3)
+      OVERALL_FAIL=1
+      echo "PHASE 10 FAILED: check-subscription-liveness.sh exited 3 (usage" >&2
+      echo "error) — that is a bug in how this script calls it, not a reading" >&2
+      echo "about the cluster." >&2
+      ;;
+    *)
+      OVERALL_FAIL=1
+      echo "PHASE 10 FAILED: check-subscription-liveness.sh exited $rc" \
+           "(unrecognized)." >&2
+      ;;
+  esac
+  return 0
+}
+
+# ===========================================================================
 # PHASE 8 — ZERO ASSERTION. Re-read every §4 reading and print PREDICTED vs
 # ACTUAL, PASS/FAIL per line, WHILE STILL QUIESCED — producers have been at
 # zero since phase 2 and do not come back until phase 9, strictly AFTER this
@@ -2611,7 +2670,7 @@ phase9_restore_producers() {
 #       (the projector family — projector-/tier-projector-/redpanda-connect-
 #       /etc., restored at the end of phase 4 and running throughout phases
 #       5-7), and none of those consumers has anything left to consume:
-#       input topics were trimmed/recreated empty in phase 4, Restate state
+#       input topics were trimmed empty in phase 4, Restate state
 #       was cleared in phase 3, and the producers that would put new
 #       messages on those topics are the one thing phase 2 already turned
 #       off and phase 9 has not yet turned back on.
@@ -2966,20 +3025,21 @@ run_census_only() {
   done
 
   echo
-  echo "=== --census-only: live-consumer assertion (against the pure-compact/delete bucket) ==="
-  local -a delete_targets=()
+  echo "=== --census-only: live-consumer assertion (against the pure-compact/policy-trim bucket) ==="
+  local -a policytrim_targets=()
   local dpt
   for dpt in "${CAPTURED_TOPICS[@]}"; do
-    [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
+    [ "${TOPIC_BUCKET[$dpt]}" = "policy-trim" ] && policytrim_targets+=("$dpt")
   done
-  if assert_no_live_consumers "${delete_targets[@]}"; then
-    echo "ASSERTION: PASS — zero live members on any of the ${#delete_targets[@]} pure-compact topic(s)."
+  if assert_no_live_consumers "${policytrim_targets[@]}"; then
+    echo "ASSERTION: PASS — zero live members on any of the ${#policytrim_targets[@]} pure-compact topic(s)."
   else
     echo "ASSERTION: FAIL — see LIVE CONSUMER lines above."
     echo "NOTE: this is expected on a live, unquiesced cluster — --census-only" \
          "mutates nothing, so nothing has been scaled down. A FAIL here says" \
-         "which consumers are live RIGHT NOW, not that a real run would fail:" \
-         "phase 4 re-asserts AFTER its own quiesce, against the same bucket."
+         "which consumers are live RIGHT NOW; it is informational only — phase" \
+         "4 itself no longer quiesces or gates on this, since policy-trim never" \
+         "makes a topic disappear for a live consumer to race against."
   fi
 
   # Exit status reflects the pre-flight (undeclared-consumer) read, not the
@@ -3082,13 +3142,13 @@ DSEOF"
   quiesce_workload_set "${derived[@]}"
 
   echo
-  echo "=== --red-check-quiesce: live-consumer assertion (against the pure-compact/delete bucket) ==="
-  local -a delete_targets=()
+  echo "=== --red-check-quiesce: live-consumer assertion (against the pure-compact/policy-trim bucket) ==="
+  local -a policytrim_targets=()
   local dpt assert_rc=0
   for dpt in "${CAPTURED_TOPICS[@]}"; do
-    [ "${TOPIC_BUCKET[$dpt]}" = "recreate" ] && delete_targets+=("$dpt")
+    [ "${TOPIC_BUCKET[$dpt]}" = "policy-trim" ] && policytrim_targets+=("$dpt")
   done
-  assert_no_live_consumers "${delete_targets[@]}" || assert_rc=$?
+  assert_no_live_consumers "${policytrim_targets[@]}" || assert_rc=$?
 
   echo
   echo "=== --red-check-quiesce: restoring ==="
@@ -3101,11 +3161,13 @@ DSEOF"
 
   echo
   if [ "$assert_rc" -eq 0 ]; then
-    echo "ASSERTION: PASS — zero live members on any of the ${#delete_targets[@]} pure-compact topic(s), post-quiesce."
+    echo "ASSERTION: PASS — zero live members on any of the ${#policytrim_targets[@]} pure-compact topic(s), post-quiesce."
   else
     echo "ASSERTION: FAIL — see LIVE CONSUMER lines above. This is a live-cluster" >&2
-    echo "reading, not a defect in this red-check: it means a real run's own" >&2
-    echo "phase 4 gate would ALSO have aborted right here, before any delete." >&2
+    echo "reading, not a defect in this red-check: --red-check-quiesce only proves" >&2
+    echo "the quiesce/restore machinery still works for whatever calls it; phase 4" >&2
+    echo "itself no longer gates on this reading (policy-trim never deletes a" >&2
+    echo "topic, so there is nothing left for a live consumer to race against)." >&2
   fi
   echo "--red-check-quiesce: TOUCHED NO TOPIC. Confirm the restore with your own" \
        "'kubectl get deploy,sts -n $NS' diff before/after (acceptance check 6)."
@@ -3189,7 +3251,8 @@ CURRENT_PHASE=""
 PHASES_DONE=()
 HALT_REASON=""
 HALT_DETAIL=()
-ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore")
+ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness")
+PHASE9_DONE_AT=""
 
 halt_reset() {
   HALT_REASON="$1"; shift
@@ -3357,8 +3420,18 @@ CURRENT_PHASE="8 zero assertion"
 phase8_zero || true
 PHASES_DONE+=("8 zero assertion")
 run_phase "9 restore" phase9_restore_producers
+# Recorded here, right after phase 9 returns, RFC3339 UTC second precision —
+# this is "when producers came back", the T phase 10 measures liveness since.
+PHASE9_DONE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "reset-scenario: producers restored. This script asserts zero at rest" \
      "only — confirming the reset holds under a live refill is" \
      "check-advancing.sh's job, not this script's; run it separately."
+# Runs even if phase 8 failed — phase 8 is already `|| true` before phase 9
+# for the same reason (see its header); a failed zero assertion is still not
+# a reason to skip the one check that can see Restate's own dedup silently
+# dropping records. phase10_subscription_liveness never returns non-zero
+# itself (failures map into OVERALL_FAIL instead), so this stays a bare
+# run_phase call like every other phase.
+run_phase "10 subscription liveness" phase10_subscription_liveness
 RUN_COMPLETED=true
 exit "$OVERALL_FAIL"
