@@ -1512,6 +1512,11 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 4 }}
+  annotations:
+    # openddil.io/produces-topics -- "cm-events" is the one output topic of
+    # cm-intake.yaml (runtime bundle), a CODE DEFAULT there, not a value
+    # this chart sets; on this tier's own broker.
+    openddil.io/produces-topics: {{ printf "%s/cm-events" $tier.id | quote }}
 spec:
   replicas: 1
   selector:

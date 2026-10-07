@@ -1122,11 +1122,19 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 #   egress-gate-c2         every route's sink_topic (c2's + the fixture's)
 #   egress-assembler       every entry's output_topic
 #   egress-intake          every entry's onward_topic
+#   tier-cm / tier-fusion  their state topic + tactical-events, tier broker
+#   tier-cm-intake         cm-events, tier broker
+#   cm-intake (hub)        cm-events, hub broker
 echo
 echo "guard 13: each produces-topics declaration covers what its workload writes"
 G13_VALUES="$(mktemp)"
 cat > "$G13_VALUES" <<'G13'
 releasability:
+  enabled: true
+tierNode:
+  enabled: true
+  tiers: [region-east]
+cmReports:
   enabled: true
 egress:
   routes:
@@ -1175,9 +1183,25 @@ for name in decl:
         want[name] = {"hq/g13-out"}
     elif name.endswith("-egress-intake"):
         want[name] = {"hq/g13-onward"}
+    elif "-tier-cm-intake-" in name:
+        t = name.split("-tier-cm-intake-", 1)[1]
+        want[name] = {f"{t}/cm-events"}
+    elif name.endswith("-cm-intake"):
+        want[name] = {"hq/cm-events"}
+    elif "-tier-cm-" in name:
+        t = name.split("-tier-cm-", 1)[1]
+        want[name] = {f"{t}/asset-cm-state", f"{t}/tactical-events"}
+    elif "-tier-fusion-" in name:
+        t = name.split("-tier-fusion-", 1)[1]
+        want[name] = {f"{t}/asset-logistics-status", f"{t}/tactical-events"}
 kinds = {"faust-edge", "redpanda-connect", "cm-service", "logistics-fusion-service",
-         "egress-gate-c2", "egress-assembler", "egress-intake"}
-seen = {k for k in kinds for n in want if k in n}
+         "egress-gate-c2", "egress-assembler", "egress-intake",
+         "tier-cm-intake-", "tier-cm-", "tier-fusion-", "-cm-intake$"}
+# A trailing "$" anchors at the end of the name: the hub cm-intake is a
+# substring of every tier-cm-intake-<t>, so plain "in" could not tell
+# whether the hub one rendered.
+seen = {k for k in kinds for n in want
+        if (n.endswith(k[:-1]) if k.endswith("$") else k in n)}
 fail = False
 if seen != kinds:
     print("  FAIL: fixture did not render: " + ", ".join(sorted(kinds - seen)) + " -- this guard proved nothing for them")
