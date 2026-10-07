@@ -1685,17 +1685,60 @@ restate_residue() {
   printf '%s\n' "${out# }"
 }
 
-# One cancel-then-clear pass over one pod. Every id read is cancelled, and
-# every service read is cleared, even when a cross-check count disagrees with
-# the list: the list is a snapshot of objects that re-arm themselves, and the
-# re-read in phase3_restate, not this pass, decides whether the pod is clear.
+# Keyed "pod|id" -> the pass number (within the CURRENT pod's run of
+# phase3_restate) that cancel was issued against that id. phase3_restate
+# resets this per pod (see its loop below); within one pod it survives
+# across passes, which is the whole point: it is how a second sighting of
+# the same id is told apart from a first.
+declare -A RESTATE_CANCELLED_IDS=()
+# ids killed on the CURRENT pod, for halt_reset's context line. Reset per
+# pod alongside RESTATE_CANCELLED_IDS.
+RESTATE_KILLED_IDS=()
+
+# One cancel-then-clear pass over one pod. Every id read is cancelled (or,
+# on a second sighting, killed — see the comment block above phase3_restate),
+# and every service read is cleared, even when a cross-check count disagrees
+# with the list: the list is a snapshot of objects that re-arm themselves,
+# and the re-read in phase3_restate, not this pass, decides whether the pod
+# is clear.
 restate_clear_pass() {
-  local pod="$1" raw ids id svc_raw services svc
+  local pod="$1" pass="$2" raw ids id svc_raw services svc key diag diag_sql
   # 1. Open invocations (the scheduled timers, plus any running or backing
-  #    off that would re-arm), cancelled BEFORE any clear.
+  #    off that would re-arm). An id seen open here for the first time in
+  #    this pod's run is cancelled, same as always. An id seen open again,
+  #    after THIS pod already cancelled it in an earlier pass, escalates to
+  #    kill: cancel already had its chance and the invocation is still open.
   raw="$(restate_json "$pod" "select id from sys_invocation where status <> 'completed'")"
   mapfile -t ids < <(json_field "$raw" "id")
   for id in "${ids[@]}"; do
+    key="$pod|$id"
+    if [ -n "${RESTATE_CANCELLED_IDS[$key]+x}" ]; then
+      # Diagnostic row first — never fails the pass: an unreadable or
+      # partial read (a column this Restate version lacks) still prints,
+      # falling back to the literal word "unreadable" only if the read
+      # returned nothing at all.
+      diag_sql="select id, target, status, retry_count, last_failure_error_code, last_failure, pinned_deployment_id from sys_invocation where id = '$id'"
+      diag="$(restate_json "$pod" "$diag_sql" 2>/dev/null || true)"
+      diag="$(printf '%s' "$diag" | tr '\n' ' ')"
+      [ -n "$diag" ] || diag="unreadable"
+      echo "   survived cancel: $diag"
+      echo "-> kill invocation $id on $pod (survived cancel in pass ${RESTATE_CANCELLED_IDS[$key]})"
+      if ! kubectl exec -n "$NS" "$pod" -c restate -- \
+             timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations kill "$id"; then
+        # Same fallback chain the cancel below uses, one step further: PATCH
+        # first, DELETE ?mode=kill if that also fails. Neither fallback fails
+        # the pass — the re-read decides, same reasoning as cancel's fallback.
+        echo "   CLI kill failed for $id on $pod — falling back to admin API (PATCH)" >&2
+        if ! kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
+               "curl -s -X PATCH http://localhost:9070/invocations/$id/kill"; then
+          echo "   PATCH kill fallback failed for $id on $pod — falling back to DELETE" >&2
+          kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
+            "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=kill'" || true
+        fi
+      fi
+      RESTATE_KILLED_IDS+=("$id")
+      continue
+    fi
     echo "-> cancel invocation $id on $pod"
     # Same -y / timeout reasoning as the state clear below: no tty here.
     if ! kubectl exec -n "$NS" "$pod" -c restate -- \
@@ -1708,6 +1751,7 @@ restate_clear_pass() {
       kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
         "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'" || true
     fi
+    RESTATE_CANCELLED_IDS["$key"]="$pass"
   done
 
   # 2. Services with any state, cleared only after their timers are cancelled.
@@ -1755,6 +1799,19 @@ restate_clear_pass() {
 #
 # Service names are DISCOVERED from the state table's own group-by, never
 # hardcoded, so a new Virtual Object service needs no change here.
+#
+# 2026-10-07: a run once halted here anyway. One Virtual Object invocation
+# stayed open through all five passes; `restate invocations cancel` answered
+# OK every single time and the id was still open on the next read. Cancel is
+# cooperative — the service has to run to observe it — so an invocation
+# whose attempts are stuck or paused never actually completes a cancel, and
+# the loop above only ever counted ids, never asked whether THIS pod had
+# already tried cancelling THIS one before. restate_clear_pass now keeps
+# that record per pod, across this pod's passes: an id seen open again after
+# this pod already cancelled it escalates straight to an ungraceful kill
+# (`restate invocations kill`, with the same CLI/admin-API fallback chain
+# cancel already uses). Killing here is safe because this phase is about to
+# clear every service's state anyway.
 # ===========================================================================
 RESTATE_CLEAR_MAX_PASSES="${RESTATE_CLEAR_MAX_PASSES:-5}"
 RESTATE_ZERO_GAP_S="${RESTATE_ZERO_GAP_S:-5}"
@@ -1775,20 +1832,25 @@ phase3_restate() {
     echo "-- $pod --"
     if $DRY_RUN; then
       echo "   residue now (keys rows scheduled open): $(restate_residue "$pod")"
-      maybe_run "cancel every open invocation, clear every service, re-read until two zero reads ${RESTATE_ZERO_GAP_S}s apart (max ${RESTATE_CLEAR_MAX_PASSES} passes) on $pod" true
+      maybe_run "cancel (kill on a second sighting) every open invocation, clear every service, re-read until two zero reads ${RESTATE_ZERO_GAP_S}s apart (max ${RESTATE_CLEAR_MAX_PASSES} passes) on $pod" true
       continue
     fi
     pass=0
+    # Reset per pod: a cancel recorded on one pod has no bearing on another,
+    # and this pod is only ever walked once per run.
+    RESTATE_CANCELLED_IDS=()
+    RESTATE_KILLED_IDS=()
     while :; do
       pass=$((pass + 1))
       if [ "$pass" -gt "$RESTATE_CLEAR_MAX_PASSES" ]; then
         halt_reset "Restate on $pod is not clear after ${RESTATE_CLEAR_MAX_PASSES} cancel-clear-reread passes" \
           "$pod residue (keys rows scheduled open): ${r2:-$r1}" \
+          "Invocations killed on $pod: ${RESTATE_KILLED_IDS[*]:-none}" \
           "Restate instances cleared to a double zero read: ${cleared[*]:-none}" \
           "Restate instances not reached: ${not_reached:-none}"
       fi
       echo "   pass $pass"
-      restate_clear_pass "$pod"
+      restate_clear_pass "$pod" "$pass"
       r1="$(restate_residue "$pod")"; r2=""
       echo "   read 1 (keys rows scheduled open): $r1"
       [ "$r1" = "0 0 0 0" ] || continue
