@@ -104,6 +104,8 @@ RED_CHECK_TOPIC_CONFIG=false   # JUDGMENT CALL 10 red-check, see phase4_topics
 CENSUS_ONLY=false              # census-derived-quiesce read-only preview, see run_census_only
 RED_CHECK_ELECTRIC=false       # electric shape-handle red-check, see the RED-CHECK block before phase1_baseline
 RED_CHECK_QUIESCE=false        # census-derived-quiesce red-check, see run_red_check_quiesce
+WRITER_CENSUS_WINDOW_S=70       # phase 3b: must be >= 2x the longest timer cadence (30s aggregator heartbeat)
+WRITER_CENSUS_ONLY=false        # read-only writer census + declared/undeclared verdict, see run_writer_census_only
 
 usage() {
   cat <<'EOF'
@@ -167,6 +169,18 @@ FLAGS
                       populated fleet, every rows line must FAIL (non-zero);
                       exits 0 only if they all did, i.e. only if the check
                       can fail.
+  --writer-census-window N
+                      Seconds between the two partition reads phase 3b's
+                      writer census takes (default 70; must be at least
+                      twice the longest timer cadence it needs to see
+                      advance, the 30s aggregator heartbeat).
+  --writer-census-only
+                      Run the writer census (step 1), classify local vs
+                      bridged writes, print the per-(broker,topic) table and
+                      the declared/undeclared verdict, then exit — 0 if
+                      every live local topic is declared, 2 otherwise. No
+                      scaling, no halt. For compose proofs and lab
+                      pre-checks.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -191,6 +205,8 @@ while [ $# -gt 0 ]; do
     --census-only) CENSUS_ONLY=true ;;
     --red-check-quiesce) RED_CHECK_QUIESCE=true ;;
     --red-check-electric) RED_CHECK_ELECTRIC=true ;;
+    --writer-census-window) shift; WRITER_CENSUS_WINDOW_S="$1" ;;
+    --writer-census-only) WRITER_CENSUS_ONLY=true ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -549,6 +565,55 @@ build_declared_owner_map() {
     [ -z "$rgid" ] && continue
     RESTATE_OWNER_BY_GROUP["$rgid"]="$rowner"
   done < <(restate_subscriptions)
+}
+
+# declared_producers -> "<broker-id>\t<topic>\t<Kind>/<name>" per entry in
+# every Deployment/StatefulSet's `openddil.io/produces-topics` annotation —
+# the writer-census counterpart of declared_consumers() above, same shape,
+# same ONE kubectl call for the whole namespace, same jsonpath escaping.
+# Bridges/uplinks carry no such annotation (they forward, not originate —
+# see the chart's own comment where the annotation is defined), so they
+# never appear here; the writer census reads them separately, as bridge-
+# graph edges (bridge_graph(), below).
+declared_producers() {
+  local owner value pair
+  kubectl get deploy,statefulset -n "$NS" \
+    -o jsonpath='{range .items[*]}{.kind}{"/"}{.metadata.name}{"\t"}{.metadata.annotations.openddil\.io/produces-topics}{"\n"}{end}' \
+    2>/dev/null \
+  | while IFS=$'\t' read -r owner value; do
+      [ -z "$value" ] && continue
+      for pair in $value; do
+        printf '%s\t%s\t%s\n' "${pair%%/*}" "${pair#*/}" "$owner"
+      done
+    done
+}
+
+# PRODUCER_OWNER["<broker pod>|<topic>"] -> space-separated "Kind/Name"
+# owners. Several declared writers of the same topic is normal (e.g. a
+# source Faust app and the Faust aggregator both appending to one fan-in
+# topic) and is recorded as several names in the same value, not an error
+# — unlike DECLARED_OWNER_DUPES above, which flags two DIFFERENT consumer-
+# group declarations for what must be one real owner. A topic can have
+# many writers; a consumer group cannot have two different declared
+# owners without the chart itself disagreeing with itself.
+declare -A PRODUCER_OWNER=()
+PRODUCER_MAP_BUILT=false
+
+build_declared_producer_map() {
+  $PRODUCER_MAP_BUILT && return 0
+  PRODUCER_MAP_BUILT=true
+
+  local broker topic owner pod key
+  while IFS=$'\t' read -r broker topic owner; do
+    [ -z "$broker" ] && continue
+    pod="${RELEASE}-redpanda-${broker}-0"
+    key="$pod|$topic"
+    if [ -z "${PRODUCER_OWNER[$key]:-}" ]; then
+      PRODUCER_OWNER["$key"]="$owner"
+    else
+      PRODUCER_OWNER["$key"]="${PRODUCER_OWNER[$key]} $owner"
+    fi
+  done < <(declared_producers)
 }
 
 declare -A WORKLOAD_PODS_CACHE=() # "Kind/Name" -> newline-joined pod names,
@@ -1037,7 +1102,11 @@ TABLES=(
 # effector_launch rows it's compared against (effector_launcher_counts) ARE
 # reset above. Clearing config tables on a scenario reset is not what this
 # script is for.
-EXCLUDED_TABLES=(audit_log)  # ADR-0029 decision log. PERMANENT. See header.
+EXCLUDED_TABLES=(audit_log egress_delivered_events)  # ADR-0029 decision log
+# (audit_log, PERMANENT, see header) plus the forwarder's own delivery
+# dedup ledger (egress_delivered_events) -- a reset must not erase the
+# record of what was already sent, or a re-delivery on the next run would
+# look like a first delivery. delete_table() refuses both the same way.
 
 # Declared heartbeats: deleted in phase 6 like every table above, but NOT
 # predicted 0 in phase 8. edge_buffer_status is one row the projector upserts
@@ -1445,6 +1514,19 @@ declare -A QSTATE_NODESEL_HAD  # key "DaemonSet/name" -> set (to 1) iff nodeSele
 declare -A QSTATE_SUSPEND      # key "Job/name" -> captured .spec.suspend before quiesce
 declare -a QSTATE_QUIESCED=()  # ordered list of "Kind/Name" this run actually attempted to quiesce — restore and the EXIT trap walk THIS, not the derived set, for the same reason restore_state_consumers used to: an entry the quiesce loop never reached must not be "restored" from an empty capture
 
+# CENSUS_QUIESCED — the writer-census's OWN subset of "Kind/Name" entries
+# (phase 3b, below), kept separate from QSTATE_QUIESCED rather than
+# re-deriving it later, because phase 5/9 need to ask "did the CENSUS
+# quiesce this one" specifically (a Faust entry here gets scaled back
+# fresh to reload the just-trimmed changelogs instead of a rollout
+# restart — see phase5_aggregator). Every entry added here is ALSO added
+# to QSTATE_QUIESCED by the same quiesce_workload_set/quiesce_derived_
+# workload call that adds it here, so arm_scale_trap/emergency_restore_
+# scales already cover it with NO second trap and NO second replica map:
+# the capture lives in QSTATE_REPLICAS, same as every other derived-set
+# entry.
+declare -a CENSUS_QUIESCED=()
+
 baseline_electric() {
   echo "--- electric (shape handle + rows, per instance) ---"
   local pod inst eport ehandle erows
@@ -1718,6 +1800,273 @@ phase3_restate() {
     echo "   $pod: clear after $pass pass(es), two zero reads"
     cleared+=("$pod")
   done
+}
+
+# ===========================================================================
+# PHASE 3b — WRITER CENSUS.
+#
+# WHY. A reset once halted mid-phase-4: a region's own 30s Faust
+# aggregator heartbeat and the region->hq uplink forwarding that region's
+# aggregator output were both still writing when phase 4 trimmed hq before
+# the region, and neither writer was ever quiesced because nothing had
+# ever asked "who is still writing, right now" — only "who is still
+# consuming" (the pre-flight above). This phase asks the writer question,
+# with the same discipline the consumer side already has: a declared
+# writer may be quiesced and restored by name; an UNDECLARED one that is
+# caught actually writing is a halt, not a guess.
+#
+# "local" vs "bridged": a sampled new record carries a `kafka_topic`
+# header iff it arrived over a bridge/uplink (the forwarder stamps it);
+# otherwise it was written locally, on this broker, by something this
+# chart should have declared in openddil.io/produces-topics.
+# ===========================================================================
+WRITER_CENSUS_SAMPLE="${WRITER_CENSUS_SAMPLE:-200}"
+WRITER_SETTLE_TRIES="${WRITER_SETTLE_TRIES:-3}"
+
+# writer_census_read POD -- "TOPIC PARTITION LOGSTART HW" per line, for
+# every non-internal topic on POD. ONE kubectl exec per broker (not one
+# per topic): broker_topics()/is_internal_topic() give the topic list
+# (already its own single read), then a single shell script run inside
+# the pod loops over those topics, calling `rpk topic describe <t> -p`
+# once per topic — `rpk topic describe` ignores `-p` when given more than
+# one topic name, so the per-topic call cannot be collapsed further, but
+# the kubectl round trip can: that is what makes two full before/after
+# passes of a live broker (writer_census, below) affordable within one
+# census window.
+writer_census_read() {
+  local pod="$1" topic script=""
+  while read -r topic; do
+    [ -z "$topic" ] && continue
+    is_internal_topic "$topic" && continue
+    script+="printf 'TOPIC\t%s\n' '$topic'; rpk topic describe '$topic' -p 2>/dev/null; "
+  done < <(broker_topics "$pod")
+  [ -z "$script" ] && return 0
+  kubectl exec -n "$NS" "$pod" -c redpanda -- sh -c "$script" 2>/dev/null | awk '
+    $1 == "TOPIC" { topic = $2; next }
+    $1 ~ /^[0-9]+$/ { print topic, $1, $(NF - 1), $NF }
+  '
+}
+
+# writer_census WINDOW -- two writer_census_read() passes, WINDOW seconds
+# apart, across every REDPANDA_PODS broker; for every partition whose hw
+# advanced, samples up to WRITER_CENSUS_SAMPLE of the new records (one
+# `rpk topic consume` per advanced partition, reading both the record key
+# and its header keys in the SAME call: `-f '%k\t%h{%k;}\n'` — a record
+# is bridged iff its header-key list contains `kafka_topic`, local
+# otherwise). Fills these globals, one (broker,topic) entry per line of
+# output; a value is the literal string "?" when either round's read
+# failed or disagreed (a shrinking hw is not a valid read) — "?" is never
+# treated as, or printed as, zero.
+#   WC_TOPICS             ordered "pod|topic" keys this call saw
+#   WC_ADVANCED[pt]        total new records (sum over partitions), or "?"
+#   WC_LOCAL[pt]           sampled local-write count, or "?"
+#   WC_BRIDGED[pt]         sampled bridged-write count, or "?"
+#   WC_KEYS[pt]            up to 3 sample record keys of a local write
+declare -A WC_ADVANCED=() WC_LOCAL=() WC_BRIDGED=() WC_KEYS=()
+WC_TOPICS=()
+
+writer_census() {
+  local window="$1" pod topic part ls hw key
+  local -A b_ls=() b_hw=() a_ls=() a_hw=() seen=()
+  WC_ADVANCED=(); WC_LOCAL=(); WC_BRIDGED=(); WC_KEYS=(); WC_TOPICS=()
+
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic part ls hw; do
+      [ -z "$topic" ] && continue
+      key="$pod|$topic|$part"
+      b_ls["$key"]="$ls"; b_hw["$key"]="$hw"
+      seen["$pod|$topic"]=1
+    done < <(writer_census_read "$pod")
+  done
+
+  echo "writer census: sleeping ${window}s between reads (>= 2x the 30s aggregator heartbeat expected)"
+  sleep "$window"
+
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic part ls hw; do
+      [ -z "$topic" ] && continue
+      key="$pod|$topic|$part"
+      a_ls["$key"]="$ls"; a_hw["$key"]="$hw"
+      seen["$pod|$topic"]=1
+    done < <(writer_census_read "$pod")
+  done
+
+  mapfile -t WC_TOPICS < <(printf '%s\n' "${!seen[@]}" | sort)
+
+  local pt part_hw_b part_hw_a part_ls_b delta advanced total_local total_bridged
+  local -a sample_keys
+  local -A parts_seen
+  local k n rkey hdrs line sampled
+  for pt in "${WC_TOPICS[@]}"; do
+    pod="${pt%%|*}"; topic="${pt#*|}"
+    advanced=0; total_local=0; total_bridged=0
+    local unreadable=false
+    sample_keys=()
+    parts_seen=()
+    for k in "${!b_hw[@]}"; do
+      [[ "$k" == "$pt|"* ]] && parts_seen["${k#"$pt"|}"]=1
+    done
+    for k in "${!a_hw[@]}"; do
+      [[ "$k" == "$pt|"* ]] && parts_seen["${k#"$pt"|}"]=1
+    done
+    for part in "${!parts_seen[@]}"; do
+      key="$pt|$part"
+      part_hw_b="${b_hw[$key]:-}"; part_hw_a="${a_hw[$key]:-}"; part_ls_b="${b_ls[$key]:-}"
+      if [ -z "$part_hw_b" ] || [ -z "$part_hw_a" ] || [ -z "$part_ls_b" ]; then
+        unreadable=true
+        continue
+      fi
+      delta=$(( part_hw_a - part_hw_b ))
+      if [ "$delta" -lt 0 ]; then
+        unreadable=true
+        continue
+      fi
+      [ "$delta" -eq 0 ] && continue
+      advanced=$(( advanced + delta ))
+      n="$delta"; [ "$n" -gt "$WRITER_CENSUS_SAMPLE" ] && n="$WRITER_CENSUS_SAMPLE"
+      # Every record prints one "<key>\t<headers>" line, so a line with a
+      # tab is a record even when both halves are empty (a keyless,
+      # headerless local write prints as a bare tab). Splitting by hand
+      # rather than with IFS=$'\t' keeps that line from being dropped.
+      sampled=0
+      while IFS= read -r line; do
+        [[ "$line" == *$'\t'* ]] || continue
+        sampled=$((sampled + 1))
+        rkey="${line%%$'\t'*}"; hdrs="${line#*$'\t'}"
+        if [[ "$hdrs" == *kafka_topic* ]]; then
+          total_bridged=$((total_bridged + 1))
+        else
+          total_local=$((total_local + 1))
+          [ "${#sample_keys[@]}" -lt 3 ] && sample_keys+=("${rkey:-<no-key>}")
+        fi
+      done < <(kubectl exec -n "$NS" "$pod" -c redpanda -- \
+                 timeout "${RPK_CMD_TIMEOUT:-60}" \
+                 rpk topic consume "$topic" -p "$part" -o "$part_hw_b" -n "$n" \
+                 -f '%k\t%h{%k;}\n' 2>/dev/null)
+      # The high watermark moved but no record could be read back: the
+      # writer is unknown, which is not the same as no local writer.
+      [ "$sampled" -eq 0 ] && unreadable=true
+    done
+    if $unreadable; then
+      WC_ADVANCED["$pt"]="?"; WC_LOCAL["$pt"]="?"; WC_BRIDGED["$pt"]="?"
+    else
+      WC_ADVANCED["$pt"]="$advanced"; WC_LOCAL["$pt"]="$total_local"; WC_BRIDGED["$pt"]="$total_bridged"
+    fi
+    WC_KEYS["$pt"]="${sample_keys[*]:-}"
+    echo "writer census: $pod $topic advanced=${WC_ADVANCED[$pt]} local=${WC_LOCAL[$pt]} bridged=${WC_BRIDGED[$pt]}"
+  done
+}
+
+# phase3b_writer_census -- see the PHASE 3b header above. Not gated by any
+# --skip-* flag: an undeclared live writer is exactly the defect this
+# phase exists to catch, and a cluster that would fail this check is a
+# cluster phase 4 must not be allowed to trim.
+phase3b_writer_census() {
+  echo
+  echo "=== PHASE 3b: writer census ==="
+  build_declared_producer_map
+
+  writer_census "$WRITER_CENSUS_WINDOW_S"
+
+  local pt pod topic to_quiesce owner_list owner already
+  local -a to_quiesce_entries=()
+  local -A to_quiesce_seen=()
+  for pt in "${WC_TOPICS[@]}"; do
+    pod="${pt%%|*}"; topic="${pt#*|}"
+    if [ "${WC_LOCAL[$pt]}" = "?" ]; then
+      halt_reset "writer census: could not read $pod/$topic cleanly (failing closed)" \
+        "Restate cleared, no topic trimmed" \
+        "advanced=${WC_ADVANCED[$pt]} local=${WC_LOCAL[$pt]} bridged=${WC_BRIDGED[$pt]}"
+    fi
+    [ "${WC_LOCAL[$pt]}" -eq 0 ] && continue
+
+    owner_list="${PRODUCER_OWNER[$pt]:-}"
+    if [ -z "$owner_list" ]; then
+      halt_reset "writer census: $pod/$topic has ${WC_LOCAL[$pt]} undeclared local write(s) in this window" \
+        "sample keys: ${WC_KEYS[$pt]:-<none captured>}" \
+        "Restate cleared, no topic trimmed"
+    fi
+    for owner in $owner_list; do
+      [ -n "${to_quiesce_seen[$owner]:-}" ] && continue
+      already=false
+      local qe
+      for qe in "${QSTATE_QUIESCED[@]:-}"; do [ "$qe" = "$owner" ] && already=true; done
+      $already && continue
+      to_quiesce_seen["$owner"]=1
+      to_quiesce_entries+=("$owner")
+    done
+  done
+
+  if [ "${#to_quiesce_entries[@]}" -gt 0 ]; then
+    echo "writer census: quiescing ${#to_quiesce_entries[@]} declared writer(s): ${to_quiesce_entries[*]}"
+    quiesce_workload_set "${to_quiesce_entries[@]}"
+    CENSUS_QUIESCED+=("${to_quiesce_entries[@]}")
+  else
+    echo "writer census: every live local write is declared; nothing new to quiesce"
+  fi
+
+  local try pass local_advance bridged_advance
+  for (( try = 1; try <= WRITER_SETTLE_TRIES; try++ )); do
+    echo "writer census: settle attempt $try/$WRITER_SETTLE_TRIES"
+    writer_census "$WRITER_CENSUS_WINDOW_S"
+    local_advance=""
+    bridged_advance=""
+    for pt in "${WC_TOPICS[@]}"; do
+      if [ "${WC_LOCAL[$pt]}" = "?" ] || [ "${WC_BRIDGED[$pt]}" = "?" ]; then
+        halt_reset "writer census settle: could not read $pt cleanly on try $try (failing closed)" \
+          "quiesced this run: ${CENSUS_QUIESCED[*]:-none}"
+      fi
+      [ "${WC_LOCAL[$pt]}" -gt 0 ] && local_advance="${local_advance:+$local_advance, }$pt (local=${WC_LOCAL[$pt]})"
+      [ "${WC_BRIDGED[$pt]}" -gt 0 ] && bridged_advance="${bridged_advance:+$bridged_advance, }$pt (bridged=${WC_BRIDGED[$pt]})"
+    done
+    if [ -n "$local_advance" ]; then
+      halt_reset "writer census settle: still advancing locally after quiesce: $local_advance" \
+        "declared writers did not stop, or a writer is undeclared" \
+        "quiesced this run: ${CENSUS_QUIESCED[*]:-none}"
+    fi
+    if [ -z "$bridged_advance" ]; then
+      echo "writer census: settle PASS on try $try -- zero advance, local and bridged, on every partition"
+      pass=0
+      break
+    fi
+    echo "writer census: bridged-only advance on try $try (a drain): $bridged_advance"
+    pass=1
+  done
+  if [ "${pass:-1}" -ne 0 ]; then
+    halt_reset "writer census: still advancing after $WRITER_SETTLE_TRIES settle tries: $bridged_advance" \
+      "quiesced this run: ${CENSUS_QUIESCED[*]:-none}"
+  fi
+}
+
+# run_writer_census_only -- --writer-census-only (read-only). Step 1 +
+# classification + the declared/undeclared verdict; no scaling, no halt.
+run_writer_census_only() {
+  echo "=== --writer-census-only: writer census (read-only) ==="
+  build_declared_producer_map
+  writer_census "$WRITER_CENSUS_WINDOW_S"
+
+  local pt pod topic undeclared=0
+  echo
+  echo "broker topic advanced local bridged declared-owner(s)"
+  for pt in "${WC_TOPICS[@]}"; do
+    pod="${pt%%|*}"; topic="${pt#*|}"
+    echo "$pod $topic ${WC_ADVANCED[$pt]} ${WC_LOCAL[$pt]} ${WC_BRIDGED[$pt]} ${PRODUCER_OWNER[$pt]:-<none>}"
+    if [ "${WC_LOCAL[$pt]}" = "?" ]; then
+      undeclared=$((undeclared + 1))
+      continue
+    fi
+    if [ "${WC_LOCAL[$pt]}" -gt 0 ] && [ -z "${PRODUCER_OWNER[$pt]:-}" ]; then
+      undeclared=$((undeclared + 1))
+      echo "  UNDECLARED: $pod/$topic has ${WC_LOCAL[$pt]} local write(s) with no declared owner" >&2
+    fi
+  done
+  echo
+  if [ "$undeclared" -eq 0 ]; then
+    echo "--writer-census-only: PASSED -- every live local topic is declared"
+    return 0
+  fi
+  echo "--writer-census-only: FAILED -- $undeclared live local topic(s) undeclared" >&2
+  return 2
 }
 
 # ===========================================================================
@@ -2161,6 +2510,283 @@ emergency_restore_scales() {
   done
 }
 
+# ===========================================================================
+# PHASE 4 ORDERING — bridge graph, topological sort, destination stability.
+#
+# A reset once trimmed hq before region-east while region-east's own
+# aggregator output was still arriving at hq over the uplink: a
+# destination trimmed before its
+# source is exactly how a forwarded write lands on an offset the trim
+# already walked past. This section makes "source before destination" a
+# property of the ORDER phase 4 walks brokers in, not a hope.
+# ===========================================================================
+
+# _broker_id_of_pod POD -- the broker-id half of a redpanda pod name, the
+# inverse of the "${RELEASE}-redpanda-${broker}-0" construction every
+# other broker-pod mapping in this file already uses (build_declared_
+# owner_map, declared_producers, etc).
+_broker_id_of_pod() {
+  local pod="$1" id
+  id="${pod#${RELEASE}-redpanda-}"
+  id="${id%-0}"
+  printf '%s' "$id"
+}
+
+# bridge_graph -- one kubectl get for every Deployment/StatefulSet's
+# consumer-groups annotation + env (a bridge/uplink carries DEST_HOST and
+# DEST_PORT -- see edge.yaml's own comment on the produces-topics
+# annotation it deliberately omits), plus one kubectl get for
+# ${RELEASE}-toxiproxy-config, to build the source->destination broker-id
+# edges this ordering is based on.
+#
+# Destination resolution: DEST_HOST is either a broker Service directly
+# (compared against every known broker id's own "${RELEASE}-redpanda-
+# <id>" prefix), or -- the severance-injection seam -- the toxiproxy
+# Service, in which case the proxy listening on DEST_PORT names the real
+# upstream broker (openddil.toxiproxyConfigJson's own "listen"/"upstream"
+# pair, read back with no jq: Values' own encoding/json sorts a map's
+# keys alphabetically when it marshals, so "listen" always precedes
+# "upstream" within one proxy object -- measured against the chart's own
+# render, not assumed). An edge that resolves to neither is a halt, not a
+# guess.
+declare -a BRIDGE_EDGES=()      # ordered "src-id dest-id", for printing
+declare -A BRIDGE_DESTS=()      # broker-id -> 1 iff it is a destination of some edge
+BRIDGE_GRAPH_BUILT=false
+
+bridge_graph() {
+  $BRIDGE_GRAPH_BUILT && return 0
+  BRIDGE_GRAPH_BUILT=true
+  BRIDGE_EDGES=()
+  BRIDGE_DESTS=()
+
+  local -a known_ids=()
+  local pod
+  for pod in "${REDPANDA_PODS[@]}"; do
+    known_ids+=("$(_broker_id_of_pod "$pod")")
+  done
+
+  local toxi_json port upstream
+  declare -A toxi_upstream=()
+  toxi_json="$(kubectl get cm -n "$NS" "${RELEASE}-toxiproxy-config" -o jsonpath='{.data.toxiproxy\.json}' 2>/dev/null)"
+  if [ -n "$toxi_json" ]; then
+    while read -r port upstream; do
+      [ -z "$port" ] && continue
+      toxi_upstream["$port"]="$upstream"
+    done < <(printf '%s\n' "$toxi_json" | awk -F'"' '
+      $2 == "listen"   { split($4, a, ":"); port = a[2] }
+      $2 == "upstream" { print port, $4 }
+    ')
+  fi
+
+  local owner cg envraw name value dest_host dest_port src_id dest_id host_only kid
+  while IFS=$'\t' read -r owner cg envraw; do
+    [ -z "$owner" ] && continue
+    dest_host=""; dest_port=""
+    while IFS='=' read -r name value; do
+      [ "$name" = "DEST_HOST" ] && dest_host="$value"
+      [ "$name" = "DEST_PORT" ] && dest_port="$value"
+    done < <(printf '%s\n' "$envraw" | tr '|' '\n')
+    [ -z "$dest_host" ] && [ -z "$dest_port" ] && continue
+    if [ -z "$dest_host" ] || [ -z "$dest_port" ]; then
+      halt_reset "bridge graph: $owner has one of DEST_HOST/DEST_PORT set but not the other" \
+        "DEST_HOST=${dest_host:-<missing>} DEST_PORT=${dest_port:-<missing>}"
+    fi
+
+    src_id="${cg%%/*}"
+    if [ -z "$cg" ] || [ -z "$src_id" ]; then
+      halt_reset "bridge graph: $owner has DEST_HOST/DEST_PORT but no openddil.io/consumer-groups pair to read its source broker-id from" \
+        "DEST_HOST=$dest_host DEST_PORT=$dest_port"
+    fi
+
+    dest_id=""
+    host_only="${dest_host%%.*}"
+    for kid in "${known_ids[@]}"; do
+      if [ "$host_only" = "${RELEASE}-redpanda-${kid}" ]; then
+        dest_id="$kid"
+        break
+      fi
+    done
+    if [ -z "$dest_id" ]; then
+      upstream="${toxi_upstream[$dest_port]:-}"
+      if [ -z "$upstream" ]; then
+        halt_reset "bridge graph: $owner's DEST_PORT $dest_port matches no proxy in ${RELEASE}-toxiproxy-config, and DEST_HOST ($dest_host) is not a broker service" \
+          "cannot resolve this edge's destination broker"
+      fi
+      host_only="${upstream%%:*}"
+      host_only="${host_only%%.*}"
+      for kid in "${known_ids[@]}"; do
+        if [ "$host_only" = "${RELEASE}-redpanda-${kid}" ]; then
+          dest_id="$kid"
+          break
+        fi
+      done
+      if [ -z "$dest_id" ]; then
+        halt_reset "bridge graph: $owner's DEST_PORT $dest_port resolves to upstream $upstream, which matches no known broker" \
+          "known brokers: ${known_ids[*]:-none}"
+      fi
+    fi
+
+    BRIDGE_EDGES+=("$src_id $dest_id")
+    BRIDGE_DESTS["$dest_id"]=1
+  done < <(kubectl get deploy,statefulset -n "$NS" \
+    -o jsonpath='{range .items[*]}{.kind}{"/"}{.metadata.name}{"\t"}{.metadata.annotations.openddil\.io/consumer-groups}{"\t"}{range .spec.template.spec.containers[0].env[*]}{.name}{"="}{.value}{"|"}{end}{"\n"}{end}' \
+    2>/dev/null)
+}
+
+# topo_sort_redpanda_pods -- reorders the global REDPANDA_PODS so every
+# edge's source broker is walked before its destination (Kahn's
+# algorithm; ties broken by broker id so the order is deterministic, not
+# just acyclic). Cycle -> halt naming every broker-id still blocked, since
+# that is exactly the set the cycle runs through. Call AFTER bridge_graph.
+topo_sort_redpanda_pods() {
+  local -a ids=() order=()
+  local -A indeg=() pod_by_id=()
+  local pod id edge src dst
+
+  for pod in "${REDPANDA_PODS[@]}"; do
+    id="$(_broker_id_of_pod "$pod")"
+    ids+=("$id")
+    pod_by_id["$id"]="$pod"
+    indeg["$id"]=0
+  done
+  for edge in "${BRIDGE_EDGES[@]:-}"; do
+    [ -z "$edge" ] && continue
+    dst="${edge#* }"
+    [ -n "${indeg[$dst]+x}" ] && indeg["$dst"]=$(( ${indeg[$dst]} + 1 ))
+  done
+
+  local -a remaining=("${ids[@]}")
+  while [ "${#remaining[@]}" -gt 0 ]; do
+    local -a ready=() still=()
+    for id in "${remaining[@]}"; do
+      if [ "${indeg[$id]:-0}" -eq 0 ]; then
+        ready+=("$id")
+      else
+        still+=("$id")
+      fi
+    done
+    if [ "${#ready[@]}" -eq 0 ]; then
+      halt_reset "bridge graph: cycle among broker(s) ${still[*]} -- phase 4 cannot order a source-first trim" \
+        "edges: ${BRIDGE_EDGES[*]:-none}"
+    fi
+    mapfile -t ready < <(printf '%s\n' "${ready[@]}" | sort)
+    order+=("${ready[@]}")
+    for id in "${ready[@]}"; do
+      for edge in "${BRIDGE_EDGES[@]:-}"; do
+        [ -z "$edge" ] && continue
+        src="${edge%% *}"; dst="${edge#* }"
+        [ "$src" = "$id" ] && [ -n "${indeg[$dst]+x}" ] && indeg["$dst"]=$(( ${indeg[$dst]} - 1 ))
+      done
+    done
+    remaining=("${still[@]}")
+  done
+
+  REDPANDA_PODS=()
+  for id in "${order[@]}"; do
+    REDPANDA_PODS+=("${pod_by_id[$id]}")
+  done
+
+  echo "phase 4 order (source-first): ${order[*]}"
+  if [ "${#BRIDGE_EDGES[@]}" -gt 0 ]; then
+    echo "bridge graph edges:"
+    local e
+    for e in "${BRIDGE_EDGES[@]}"; do
+      echo "  ${e%% *} -> ${e#* }"
+    done
+  else
+    echo "bridge graph: no edges (no bridge/uplink Deployment or StatefulSet carries both DEST_HOST and DEST_PORT)"
+  fi
+}
+
+# assert_destination_stable POD -- the pre-trim destination-stability
+# gate. A no-op for any broker bridge_graph never marked as a destination
+# of an edge: a source-only broker has nothing yet arriving that phase
+# 4's own capture did not already account for.
+#
+# Two batched reads of every CAPTURED_TOPICS partition belonging to POD,
+# DEST_SETTLE_S apart; retried up to DEST_READ_TRIES. Still disagreeing
+# on the last try is a halt naming exactly the partitions that moved --
+# this broker is still receiving forwarded writes, and trimming it now
+# would repeat the defect this ordering exists to prevent.
+assert_destination_stable() {
+  local pod="$1" id
+  id="$(_broker_id_of_pod "$pod")"
+  [ -z "${BRIDGE_DESTS[$id]:-}" ] && return 0
+
+  local tries="${DEST_READ_TRIES:-6}" settle="${DEST_SETTLE_S:-5}"
+  local try pt topic part logstart hw k moved
+  local -A r1 r2
+  for (( try = 1; try <= tries; try++ )); do
+    r1=(); r2=(); moved=""
+    for pt in "${CAPTURED_TOPICS[@]}"; do
+      [ "${pt%%|*}" = "$pod" ] || continue
+      topic="${pt#*|}"
+      while read -r part logstart hw; do
+        [ -z "$part" ] && continue
+        r1["$topic|$part"]="$logstart $hw"
+      done < <(topic_partitions "$pod" "$topic")
+    done
+    sleep "$settle"
+    for pt in "${CAPTURED_TOPICS[@]}"; do
+      [ "${pt%%|*}" = "$pod" ] || continue
+      topic="${pt#*|}"
+      while read -r part logstart hw; do
+        [ -z "$part" ] && continue
+        r2["$topic|$part"]="$logstart $hw"
+      done < <(topic_partitions "$pod" "$topic")
+    done
+    for k in "${!r1[@]}"; do
+      [ "${r1[$k]:-}" = "${r2[$k]:-}" ] || moved="${moved:+$moved, }$k (${r1[$k]:-?} -> ${r2[$k]:-?})"
+    done
+    if [ -z "$moved" ]; then
+      echo "  $pod: destination-stable after $try read(s)"
+      return 0
+    fi
+    echo "  $pod: destination moved on try $try: $moved"
+  done
+  halt_reset "phase 4: $pod is a bridge destination and did not settle after $tries double-read(s), ${settle}s apart" \
+    "still moving: $moved"
+}
+
+# assert_broker_fully_trimmed POD -- the post-trim double read, EVERY
+# broker (not only destinations): two batched reads, DEST_SETTLE_S apart,
+# of every CAPTURED_TOPICS partition belonging to POD; every partition
+# must read log-start == hw on BOTH reads. A mismatch (or a second read
+# that moved) means something wrote to this broker again after phase 4
+# trimmed it -- the per-topic verify inside the mutation loop already
+# checks the FIRST read as it goes; this is the second, independent one,
+# over the whole broker, after every one of its topics is done.
+assert_broker_fully_trimmed() {
+  local pod="$1" settle="${DEST_SETTLE_S:-5}"
+  local pt topic part logstart hw bad=""
+  for pt in "${CAPTURED_TOPICS[@]}"; do
+    [ "${pt%%|*}" = "$pod" ] || continue
+    topic="${pt#*|}"
+    while read -r part logstart hw; do
+      [ -z "$part" ] && continue
+      [ "$logstart" = "$hw" ] || bad="${bad:+$bad, }$topic p$part (log-start=$logstart hw=$hw, read 1)"
+    done < <(topic_partitions "$pod" "$topic")
+  done
+  if [ -n "$bad" ]; then
+    halt_reset "phase 4: $pod has partition(s) not fully trimmed on the first post-trim read" "$bad"
+  fi
+
+  sleep "$settle"
+  bad=""
+  for pt in "${CAPTURED_TOPICS[@]}"; do
+    [ "${pt%%|*}" = "$pod" ] || continue
+    topic="${pt#*|}"
+    while read -r part logstart hw; do
+      [ -z "$part" ] && continue
+      [ "$logstart" = "$hw" ] || bad="${bad:+$bad, }$topic p$part (log-start=$logstart hw=$hw, read 2)"
+    done < <(topic_partitions "$pod" "$topic")
+  done
+  if [ -n "$bad" ]; then
+    halt_reset "phase 4: $pod has partition(s) that advanced again after trimming, on the second post-trim read ${settle}s later" "$bad"
+  fi
+  echo "  $pod: post-trim double read clean (log-start == hw, twice, ${settle}s apart)"
+}
+
 # ---------------------------------------------------------------------------
 # phase4_capture_pass — the read-only capture half of phase 4, pulled into
 # its own function so --census-only (work item 6) runs the SAME capture
@@ -2281,6 +2907,13 @@ phase4_topics() {
     return 0
   fi
 
+  # Source-first by construction: resolve the live bridge/uplink graph and
+  # reorder REDPANDA_PODS so phase4_capture_pass itself (below) walks every
+  # source broker before its destination. Printed before the capture pass,
+  # so the order a run used is in its own log.
+  bridge_graph
+  topo_sort_redpanda_pods
+
   phase4_capture_pass
 
   # --- mutation pass, in the SAME order the capture pass built
@@ -2297,9 +2930,23 @@ phase4_topics() {
   # quiesce intro comment below for where that machinery still lives.
   local pod topic pt part logstart hw failure="" failure_reason=""
   local red_check_done=false capfile cap_policy restore_cmd verify_failed
+  local last_pod=""
   for pt in "${CAPTURED_TOPICS[@]}"; do
     pod="${pt%%|*}"
     topic="${pt#*|}"
+
+    # Broker boundary: CAPTURED_TOPICS is grouped contiguously by pod (the
+    # capture pass's own outer loop is `for pod in REDPANDA_PODS`, now in
+    # source-first order), so a pod change here means the PREVIOUS pod's
+    # topics are all done — its post-trim double read runs now — and the
+    # NEW pod, if it is a bridge destination, must prove stable before its
+    # first topic is touched. Both halt_reset internally; neither returns
+    # on failure.
+    if [ "$pod" != "$last_pod" ]; then
+      [ -n "$last_pod" ] && assert_broker_fully_trimmed "$last_pod"
+      assert_destination_stable "$pod"
+      last_pod="$pod"
+    fi
 
     if [ "${TOPIC_BUCKET[$pt]}" = "trim" ]; then
       if ! trim_topic_to_hw "$pod" "$topic"; then
@@ -2440,6 +3087,11 @@ phase4_topics() {
     fi
   done
 
+  # The LAST pod touched only gets its post-trim double read on the NEXT
+  # pod's boundary crossing above, which never happens for the last one —
+  # so it runs once more here, same as every earlier pod did.
+  [ -z "$failure" ] && [ -n "$last_pod" ] && assert_broker_fully_trimmed "$last_pod"
+
   if [ -n "$failure" ]; then
     echo "PHASE 4 FAILED: ${failure#*|} on ${failure%%|*} — ${failure_reason:-did not match its captured configuration}." >&2
     echo "The capture directory holds the expected form for every topic this" >&2
@@ -2469,8 +3121,24 @@ phase5_aggregator() {
       "Faust deployments are NOT restarted. THIS IS THE DOCUMENTED RED-CHECK\n    (PREDICTION doc §5): expect every store to read 0 and every topic to\n    read trimmed, while the regional rollup (region-fleet-summary) keeps\n    serving the PRE-RESET asset_count from the in-memory Faust table that\n    was never asked to reload. If phase 8 does NOT show that residue, the\n    aggregator step was never load-bearing and this red-check has failed."
     return 0
   fi
-  local d
+  local d entry census_entry in_census
   for d in "${FAUST_DEPLOYS[@]}"; do
+    entry="Deployment/$d"
+    in_census=false
+    for census_entry in "${CENSUS_QUIESCED[@]:-}"; do
+      [ "$census_entry" = "$entry" ] && in_census=true
+    done
+    if $in_census; then
+      # Writer-census-quiesced (phase 3b): scaling it back from 0 IS a
+      # fresh start that reloads from the just-trimmed changelogs, which
+      # is what the rollout restart below exists to force for every other
+      # Faust deploy. A rollout restart on top of that would be redundant,
+      # so this one is restored here, not in the loop below, and phase 9
+      # skips it too (see phase9_restore_producers).
+      echo "  $d: writer-census-quiesced, scaling back fresh instead of rollout restart"
+      restore_derived_workload "$entry"
+      continue
+    fi
     maybe_run "rollout restart $d" kubectl rollout restart deploy -n "$NS" "$d"
   done
 }
@@ -2573,6 +3241,25 @@ phase9_restore_producers() {
   # PASSED cleanly — main exits on OVERALL_FAIL, not on phase 8's captured
   # return value alone, exactly so a producer left at zero cannot be mistaken
   # for a successful reset.
+
+  # Writer census (Part 4): the Faust entries of CENSUS_QUIESCED were
+  # already restored by phase 5 (scaled back fresh, not rollout-restarted
+  # — see phase5_aggregator). Everything else the census quiesced —
+  # non-Faust declared writers — is restored here, with the producers,
+  # from the same QSTATE_REPLICAS capture phase 3b recorded before
+  # scaling each one to 0.
+  local census_entry is_faust_entry faust_name
+  for census_entry in "${CENSUS_QUIESCED[@]:-}"; do
+    [ -z "$census_entry" ] && continue
+    is_faust_entry=false
+    for faust_name in "${FAUST_DEPLOYS[@]}"; do
+      [ "$census_entry" = "Deployment/$faust_name" ] && is_faust_entry=true
+    done
+    $is_faust_entry && continue
+    echo "  $census_entry: restoring writer-census quiesce"
+    restore_derived_workload "$census_entry"
+  done
+
   SCALES_RESTORED=true
 }
 
@@ -3251,7 +3938,7 @@ CURRENT_PHASE=""
 PHASES_DONE=()
 HALT_REASON=""
 HALT_DETAIL=()
-ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness")
+ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "3b writer census" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness")
 PHASE9_DONE_AT=""
 
 halt_reset() {
@@ -3327,6 +4014,11 @@ fi
 
 if $CENSUS_ONLY; then
   run_census_only
+  exit $?
+fi
+
+if $WRITER_CENSUS_ONLY; then
+  run_writer_census_only
   exit $?
 fi
 
@@ -3407,6 +4099,7 @@ PHASES_DONE+=("pre-flight")
 
 run_phase "2 quiesce" phase2_quiesce
 run_phase "3 restate" phase3_restate
+run_phase "3b writer census" phase3b_writer_census
 run_phase "4 topics" phase4_topics
 run_phase "5 aggregator" phase5_aggregator
 run_phase "6 stores" phase6_stores

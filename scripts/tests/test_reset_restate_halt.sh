@@ -199,7 +199,7 @@ grep -q "halted in: 3 restate" <<<"$out" && pass "B: names the phase" || fail "B
 grep -q "pod-d residue (keys rows scheduled open): 1 2 1 1" <<<"$out" && pass "B: names pod-d and its residue" \
   || fail "B: pod-d residue not named"
 grep -q "not reached: pod-e" <<<"$out" && pass "B: names pod-e as not reached" || fail "B: pod-e not named as not reached"
-grep -q "not run:   4 topics 5 aggregator 6 stores 7 electric 8 zero assertion 9 restore" <<<"$out" \
+grep -q "not run:   3b writer census 4 topics 5 aggregator 6 stores 7 electric 8 zero assertion 9 restore" <<<"$out" \
   && pass "B: names the phases not run" || fail "B: phases not run not named"
 grep -q "PHASE-4-RAN" <<<"$out" && fail "B: a later phase ran after the refusal" || pass "B: no later phase ran"
 [ "$e" != "0 0 0" ] && pass "B: pod-e untouched ($e)" || fail "B: pod-e was cleared after the halt"
