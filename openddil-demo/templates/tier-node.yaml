@@ -1360,6 +1360,14 @@ spec:
               value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
+            # One writer per asset at every fusion, from record
+            # provenance: every OTHER tier id that runs its own fusion
+            # stack (openddil.otherStackIds, same helper and set hub.yaml's
+            # root env uses, minus THIS tier's own id -- a tier never
+            # defers to itself). This tier suppresses its own derivation
+            # (and timer) for any asset whose origin is one of them.
+            - name: OTHER_STACK_IDS
+              value: {{ include "openddil.otherStackIds" (dict "root" $root "self" $tier.id) | fromYamlArray | join "," | quote }}
             # Same ConfigMap this tier's projector mounts (see
             # tier-effector-declared-load above) -- declared load is a
             # property of the launcher, not of which service admits its

@@ -71,6 +71,15 @@ is the right cut rather than a workaround for the symptom.
 {{- end }}
 {{- end }}
 
+{{- /* OTHER_STACK_IDS for the root logistics-fusion: every tier id that
+   actually renders a tier stack -- see openddil.otherStackIds. Root is
+   never itself a tier, so `self` is empty: nothing is excluded. Root's
+   own derivation must defer to a tier in this set instead of deriving a
+   second, independent status for the assets it owns -- see
+   logistics-fusion-service's one-writer-per-asset rule (record
+   provenance, not a registry). Empty when tierNode is disabled. */ -}}
+{{- $otherStackIds := include "openddil.otherStackIds" (dict "root" $ "self" "") | fromYamlArray }}
+
 # ===========================================================================
 # electric-sync — ElectricSQL HTTP gateway
 # ===========================================================================
@@ -808,6 +817,15 @@ spec:
               value: "30"
             - name: STALE_INPUT_SECONDS
               value: "300"
+            # One writer per asset at every fusion, from record provenance:
+            # the ids of every tier that runs its own fusion, so root
+            # suppresses its own derivation (and timer) for any asset
+            # whose origin is one of them, instead of being a second
+            # writer for it. See $otherStackIds above (openddil.
+            # otherStackIds) -- every tier fusion sets this same env from
+            # the same helper, minus its own id.
+            - name: OTHER_STACK_IDS
+              value: {{ join "," $otherStackIds | quote }}
             - name: ONTOLOGY_DIR
               value: "/ontology"
             - name: LOG_LEVEL

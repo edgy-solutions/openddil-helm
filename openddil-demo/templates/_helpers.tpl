@@ -544,6 +544,41 @@ Usage:
 {{- end }}
 
 {{/*
+openddil.otherStackIds — every OTHER tier id that actually renders a tier
+stack (tier-node.yaml), for logistics-fusion-service's OTHER_STACK_IDS env
+(one writer per asset at every fusion, from record provenance -- see that
+service's module docstring).
+
+"Actually renders a tier stack" is the same gate+filter tier-node.yaml and
+edge.yaml's $eventReportOn use: tierNode.enabled, and (tierNode.tiers empty
+or containing the id). openddil.isTierManaged IS that gate+filter, by id,
+so this reuses it over the full openddil.tierList rather than re-deriving
+the condition a third time.
+
+"OTHER" means excluding `.self` — empty for the root fusion (root is never
+itself a tier, so there is nothing to exclude), or that tier's own id for
+a tier fusion (a tier never defers to itself). ONE definition for both
+callers (hub.yaml's root env and tier-node.yaml's per-tier env), so the
+full set and each tier's own-id-excluded set can never disagree about
+which ids have a stack.
+
+Usage:
+  {{- include "openddil.otherStackIds" (dict "root" $ "self" "") | fromYamlArray }}
+  {{- include "openddil.otherStackIds" (dict "root" $root "self" $tier.id) | fromYamlArray }}
+*/}}
+{{- define "openddil.otherStackIds" -}}
+{{- $root := .root -}}
+{{- $self := .self | default "" -}}
+{{- $out := list -}}
+{{- range (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if and (include "openddil.isTierManaged" (dict "id" .id "root" $root)) (ne .id $self) }}
+{{- $out = append $out .id }}
+{{- end }}
+{{- end }}
+{{- toYaml $out }}
+{{- end }}
+
+{{/*
 openddil.uplinkLinks — one entry per tier that bridges upward through
 toxiproxy (P5: a severable link PER TIER, not one shared hq-link).
 
