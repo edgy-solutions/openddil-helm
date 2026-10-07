@@ -103,8 +103,11 @@ kubectl() {
   local argstr="$*"
 
   case "$argstr" in
-    # ---- kubectl exec -n NS <broker pod> -c redpanda -- rpk ... --------
-    *"exec -n "*" -c redpanda -- rpk "*)
+    # ---- kubectl exec -n NS <broker pod> -c redpanda -- CMD... ----------
+    # CMD is whatever follows "--": a bare `rpk ...`, `timeout N rpk ...`
+    # (consume_from_hw, the census sample) or `sh -c "<script>"`
+    # (writer_census_read). All of it runs inside the broker container.
+    *"exec -n "*" -c redpanda -- "*)
       local pod id container
       # argv form: exec -n NS <pod> -c redpanda -- rpk ARGS...
       pod=""
@@ -122,18 +125,18 @@ kubectl() {
         _shim_warn_once "rpk:$id" "no running container for broker '$id' (pod $pod) -- returning empty"
         return 0
       fi
-      # Find "rpk" in argv and exec everything from there on, inside the
-      # resolved container.
-      local -a rpk_args=()
+      # Exec everything after the first "--", inside the resolved
+      # container, argv preserved.
+      local -a cmd_args=()
       local seen=0
       for ((i=0; i<n; i++)); do
         if [ "$seen" = 1 ]; then
-          rpk_args+=("${args[$i]}")
-        elif [ "${args[$i]}" = "rpk" ]; then
+          cmd_args+=("${args[$i]}")
+        elif [ "${args[$i]}" = "--" ]; then
           seen=1
         fi
       done
-      docker exec "$container" rpk "${rpk_args[@]}"
+      docker exec "$container" "${cmd_args[@]}"
       return $?
       ;;
 
@@ -178,6 +181,19 @@ kubectl() {
 
     # ---- kubectl get deploy,statefulset -n NS -o jsonpath=...consumer-groups... (declared_consumers)
     # ---- kubectl get deploy,statefulset -n NS -o jsonpath=...produces-topics... (declared_producers)
+    *"get deploy,statefulset -n "*"produces-topics"*)
+      # COMPOSE_SHIM_PRODUCES_FILE, when set, holds "Kind/Name<TAB>value"
+      # lines -- the same shape the real jsonpath prints -- typically
+      # extracted from a `helm template` render, so a compose run checks
+      # the chart's own declarations against compose's live writers.
+      if [ -n "${COMPOSE_SHIM_PRODUCES_FILE:-}" ]; then
+        cat "$COMPOSE_SHIM_PRODUCES_FILE"
+        _shim_warn_once "produces-file" "declared_producers: read from $COMPOSE_SHIM_PRODUCES_FILE"
+        return 0
+      fi
+      _shim_warn_once "declared-annotations" "declared_producers: no COMPOSE_SHIM_PRODUCES_FILE -- returning empty (every live local topic will read as undeclared)"
+      return 0
+      ;;
     *"get deploy,statefulset -n "*)
       _shim_warn_once "declared-annotations" "declared_consumers/declared_producers: compose services carry no openddil.io/consumer-groups or openddil.io/produces-topics annotation equivalent -- returning empty (every live topic/group will read as undeclared)"
       return 0
