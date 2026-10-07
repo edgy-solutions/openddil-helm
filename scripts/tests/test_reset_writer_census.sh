@@ -460,6 +460,22 @@ grep -q "UNDECLARED: openddil-redpanda-a-0/dirty-topic" <<<"$out" && pass "7b: u
 [ -s "$M/scale.log" ] && fail "7b: --writer-census-only scaled something even on FAILED" \
   || pass "7b: --writer-census-only scaled nothing, even on FAILED"
 
+# 7c: a topic that advanced but read back nothing is "?". It counts
+# against PASSED and must be named, not just counted.
+reset_fixtures
+REDPANDA_PODS=(openddil-redpanda-a-0)
+FIX_TOPICS[openddil-redpanda-a-0]="silent-topic"
+FIX_LS["openddil-redpanda-a-0|silent-topic"]=0
+FIX_HW["openddil-redpanda-a-0|silent-topic|0"]=20
+FIX_HW["openddil-redpanda-a-0|silent-topic|1"]=23
+DECLARED_PRODUCERS_FIXTURE=""
+WRITER_CENSUS_WINDOW_S=9
+
+out="$( (set -e; run_writer_census_only) 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && pass "7c: an unreadable topic -> exit 2" || fail "7c: rc=$rc, expected 2"
+grep -q "UNREADABLE: openddil-redpanda-a-0/silent-topic" <<<"$out" && pass "7c: unreadable topic named" \
+  || fail "7c: unreadable topic not named"
+
 # ===========================================================================
 # case 8 — sampling must not fail open.
 # 8a: the high watermark advances but the consume returns nothing. The

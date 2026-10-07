@@ -2053,6 +2053,7 @@ run_writer_census_only() {
     echo "$pod $topic ${WC_ADVANCED[$pt]} ${WC_LOCAL[$pt]} ${WC_BRIDGED[$pt]} ${PRODUCER_OWNER[$pt]:-<none>}"
     if [ "${WC_LOCAL[$pt]}" = "?" ]; then
       undeclared=$((undeclared + 1))
+      echo "  UNREADABLE: $pod/$topic advanced but no new record could be read back -- counted as undeclared" >&2
       continue
     fi
     if [ "${WC_LOCAL[$pt]}" -gt 0 ] && [ -z "${PRODUCER_OWNER[$pt]:-}" ]; then
