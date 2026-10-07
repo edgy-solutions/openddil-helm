@@ -611,6 +611,8 @@ spec:
               value: {{ $hqBroker | quote }}
             - name: OPENDDIL_FORWARD_CONFIG
               value: {{ printf "%s/config.json" $forwarderConfigMountPath | quote }}
+            - name: POSTGRES_DSN
+              value: {{ $pgDsn | quote }}
             - name: LOG_LEVEL
               value: "INFO"
             {{- if .Values.egress.trust.caConfigMap }}

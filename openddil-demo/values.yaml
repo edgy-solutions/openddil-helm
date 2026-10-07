@@ -978,6 +978,14 @@ egress:
   # read-only at /etc/openddil/egress-forwarder-token/token -- point a
   # config entry's `token_file` there. The chart never reads, creates or
   # renders the token itself, only the mount.
+  # A route entry may also set `held` (bool, default false: never POSTs,
+  # just logs/counts and -- if `dedupe_field` is set -- records a 'held'
+  # row) and `dedupe_field` (string, optional: the top-level key of the
+  # decoded record holding its event identity; when set, the route
+  # consults the durable egress_delivered_events table before every send
+  # so a re-emitted event_id is not sent twice). Both are opt-in per
+  # route; this chart's defaults set neither, so rendered behaviour is
+  # unchanged (no route held, no dedupe).
   forwarder:
     enabled: false
     config: []
