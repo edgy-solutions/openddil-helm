@@ -1165,6 +1165,12 @@ spec:
             - name: branding
               mountPath: /usr/share/nginx/html/branding
               readOnly: true
+            {{- if .Values.frontend.figures.configMap }}
+            # Hub only; tier frontends do not serve figures.
+            - name: figures
+              mountPath: /usr/share/nginx/html/figures
+              readOnly: true
+            {{- end }}
             {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
             # Only the hub view gets this: the tier frontends (tier-node.yaml)
             # have their own deployment.json carrying tier shape, not this.
@@ -1177,6 +1183,12 @@ spec:
           configMap:
             name: {{ .Values.frontend.branding.configMap | default (printf "%s-branding" .Release.Name) }}
             optional: true
+        {{- if .Values.frontend.figures.configMap }}
+        - name: figures
+          configMap:
+            name: {{ .Values.frontend.figures.configMap }}
+            optional: true
+        {{- end }}
         {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
         - name: deployment-config
           configMap:

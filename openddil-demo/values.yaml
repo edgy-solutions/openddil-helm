@@ -850,6 +850,12 @@ frontend:
     # files; served unauthenticated at /branding/ on every UI. Empty =
     # <release>-branding. Absent ConfigMap = OpenDDIL defaults.
     configMap: ""
+  figures:
+    # Optional ConfigMap of <ICN>.svg illustrated-parts figures, mounted
+    # read-only on the HUB frontend at /usr/share/nginx/html/figures and
+    # served session-gated at /figures/. Empty = no mount. A released-records
+    # pane shows one when its entry carries a `figure` pointer pair.
+    configMap: ""
   # Hub-view-only tables of records released to a destination, per ADR-0046
   # §5: each entry is {title, destination, kind, columns:[{header, pointer}]}
   # and is passed through as opaque JSON into the hub frontend's
