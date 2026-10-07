@@ -1411,6 +1411,26 @@ tierNode:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 200m, memory: 256Mi }
 
+# --- picture route for service clients ---------------------------------------
+# DEFAULT OFF. When enabled, the hub egress assembler serves a picture
+# endpoint (GET /picture?event_id=&destination=) on `port`, and the hub PEP
+# exposes it as GET /picture to callers that present a Bearer token from this
+# release's realm. The assembler endpoint does no authentication of its own:
+# a NetworkPolicy limits it to the hub PEP, which is the only authenticated
+# door. Requires releasability.enabled and releasability.oidc.enabled.
+picture:
+  enabled: false
+  port: 8097
+  # `aud` value the PEP requires in the token, and the realm client mapper adds.
+  audience: "openddil-picture"
+  # One realm client (client_credentials) per consumer. Each entry:
+  #   clientId:       realm client id, unique and distinct from the PEP clients
+  #   destination:    destination string the PEP maps this client to
+  #   existingSecret: {name, key} of a Secret holding the client secret. The
+  #                   value is read by the Keycloak pod only; it is never
+  #                   rendered into a manifest or ConfigMap.
+  serviceClients: []
+
 # --- ADR-0029 Arc 2 Slice 1: read-path releasability -------------------------
 # DEFAULT OFF. Enabling changes what users can see, and a chart that turned on
 # enforcement by default would turn it on in deployments whose §7 completeness

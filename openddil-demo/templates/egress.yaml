@@ -318,6 +318,17 @@ spec:
             {{- end }}
             - name: LOG_LEVEL
               value: "INFO"
+            {{- if .Values.picture.enabled }}
+            - name: OPENDDIL_PICTURE_ENABLED
+              value: "1"
+            - name: OPENDDIL_PICTURE_PORT
+              value: {{ .Values.picture.port | quote }}
+            {{- end }}
+          {{- if .Values.picture.enabled }}
+          ports:
+            - name: picture
+              containerPort: {{ .Values.picture.port }}
+          {{- end }}
           resources:
             {{- toYaml .Values.egress.resources | nindent 12 }}
           volumeMounts:
@@ -338,6 +349,55 @@ spec:
           configMap:
             name: {{ .Release.Name }}-egress-kinds
         {{- end }}
+{{- if .Values.picture.enabled }}
+---
+# The assembler's picture endpoint, for the hub PEP to proxy to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-egress-picture
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.picture.port }}
+      targetPort: picture
+      name: picture
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 4 }}
+---
+# BYPASS PREVENTION, SAME SHAPE AS the *-pep-only policies. The picture
+# endpoint does no authentication; the hub PEP's Bearer check is the only
+# door, so only the hub PEP pod may reach that port.
+#
+# Selecting the assembler pod makes it default-deny for ingress. The
+# assembler declares no other containerPort today (it is a Kafka consumer
+# and serves nothing else), so there is no existing inbound traffic for this
+# policy to preserve and no second rule is needed. A rule that allowed "all
+# other ports" cannot be written (NetworkPolicy has no "except port"), and
+# an allow-all rule would reopen the picture port. If the assembler ever
+# exposes another port, add an explicit rule for it here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-egress-picture-pep-only
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "egress-assembler" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # A: the hub PEP, on the picture port only.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "pep" "root" .) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.picture.port }}
+{{- end }}
 {{- end }}
 {{- if .Values.egress.intake.enabled }}
 ---

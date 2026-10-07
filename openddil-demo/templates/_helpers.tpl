@@ -1547,3 +1547,84 @@ to the chart. Empty when no entry carries the field.
 {{- end -}}
 {{- $out | uniq | join " " -}}
 {{- end }}
+
+{{/*
+openddil.pictureValidate — fail the render on a malformed picture.serviceClients.
+
+Emits nothing. Called wherever the list is consumed so a bad entry stops the
+render whichever consumer is reached first. Checks: clientId, destination and
+existingSecret.name/key present; clientIds unique; and no collision with a
+client the realm already carries (the PEP client, the tier clients derived
+from it, and the bundle realm's own PEP client).
+*/}}
+{{- define "openddil.pictureValidate" -}}
+{{- $root := . -}}
+{{- if $root.Values.picture.enabled -}}
+{{- $taken := dict $root.Values.releasability.oidc.clientId true "openddil-pep" true -}}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) -}}
+{{- $_ := set $taken (include "openddil.tierClientId" (dict "id" $tier.id "root" $root)) true -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $c := $root.Values.picture.serviceClients -}}
+{{- if not $c.clientId -}}{{- fail (printf "picture.serviceClients[%d]: clientId is required" $i) -}}{{- end -}}
+{{- if not $c.destination -}}{{- fail (printf "picture.serviceClients[%d] (%s): destination is required" $i $c.clientId) -}}{{- end -}}
+{{- if not (and $c.existingSecret $c.existingSecret.name $c.existingSecret.key) -}}{{- fail (printf "picture.serviceClients[%d] (%s): existingSecret.name and existingSecret.key are required" $i $c.clientId) -}}{{- end -}}
+{{- if hasKey $seen $c.clientId -}}{{- fail (printf "picture.serviceClients[%d]: duplicate clientId %q" $i $c.clientId) -}}{{- end -}}
+{{- if hasKey $taken $c.clientId -}}{{- fail (printf "picture.serviceClients[%d]: clientId %q collides with an existing realm client" $i $c.clientId) -}}{{- end -}}
+{{- $_ := set $seen $c.clientId true -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.pictureServiceClients — realm client fragment, one client per
+picture.serviceClients entry, each followed by a comma (it is spliced ahead of
+the bundle realm's own clients, like openddil.keycloakTierClients). The secret
+is the placeholder __SVC_CLIENT_SECRET_<i>__; prepare-realm substitutes it
+from an env var fed by the referenced Secret, so the value is never rendered.
+*/}}
+{{- define "openddil.pictureServiceClients" -}}
+{{- $root := . }}
+{{- include "openddil.pictureValidate" $root }}
+{{- if $root.Values.picture.enabled }}
+{{- range $i, $c := $root.Values.picture.serviceClients }}
+    {
+      "clientId": {{ $c.clientId | quote }},
+      "name": {{ printf "Picture service client (%s)" $c.clientId | quote }},
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__SVC_CLIENT_SECRET_{{ $i }}__",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "picture-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": {{ $root.Values.picture.audience | quote }},
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+openddil.pictureClientMap — JSON object {clientId: destination} for the PEP.
+*/}}
+{{- define "openddil.pictureClientMap" -}}
+{{- $m := dict -}}
+{{- range $c := .Values.picture.serviceClients -}}
+{{- $_ := set $m $c.clientId $c.destination -}}
+{{- end -}}
+{{- toJson $m -}}
+{{- end }}

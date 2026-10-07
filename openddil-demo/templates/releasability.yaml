@@ -363,6 +363,19 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            {{- if $root.Values.picture.enabled }}
+            {{- include "openddil.pictureValidate" $root }}
+            # --- picture route for service clients (HUB PEP only) ----------
+            # The route proxies to the egress assembler's picture endpoint;
+            # the client id -> destination map is what decides which
+            # destination a token may read.
+            - name: OPENDDIL_PICTURE_URL
+              value: {{ printf "http://%s-egress-picture%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.picture.port | quote }}
+            - name: OPENDDIL_PICTURE_AUDIENCE
+              value: {{ $root.Values.picture.audience | quote }}
+            - name: OPENDDIL_PICTURE_CLIENTS
+              value: {{ include "openddil.pictureClientMap" $root | quote }}
+            {{- end }}
             {{- if $root.Values.cmReports.enabled }}
             # --- the CM write path, the HUB's own cm-intake -----------
             - name: OPENDDIL_CM_INTAKE_URL
@@ -603,6 +616,7 @@ data:
        fourth tier gets its client by being declared rather than by someone
        remembering this file. */ -}}
 {{- include "openddil.keycloakTierClients" $root }}
+{{- include "openddil.pictureServiceClients" $root }}
 
   substitutions.sh: |
     set -eu
@@ -645,6 +659,11 @@ data:
     # substitution silently does nothing.
     sed -e "s|__PEP_CLIENT_SECRET__|${OPENDDIL_PEP_CLIENT_SECRET}|g" \
         -e "s|__PEP_REDIRECT_URI__|${OPENDDIL_PEP_REDIRECT_URI}|g" \
+{{- if $root.Values.picture.enabled }}
+{{- range $i, $c := $root.Values.picture.serviceClients }}
+        -e "s|__SVC_CLIENT_SECRET_{{ $i }}__|${OPENDDIL_SVC_CLIENT_SECRET_{{ $i }}}|g" \
+{{- end }}
+{{- end }}
         /tmp/realm.json > /import/realm-openddil.json
     # THE GUARD CAUGHT THE BUG ABOVE, which is the argument for it existing
     # at all: a realm that imports with an unsubstituted secret produces a
@@ -715,7 +734,7 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.keycloakTierClients" $root))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -737,6 +756,16 @@ spec:
                   key: client-secret
             - name: OPENDDIL_PEP_REDIRECT_URI
               value: {{ include "openddil.pepRedirectUri" $root | quote }}
+            {{- if $root.Values.picture.enabled }}
+            {{- range $i, $c := $root.Values.picture.serviceClients }}
+            # Picture service client secret, read from the named Secret.
+            - name: OPENDDIL_SVC_CLIENT_SECRET_{{ $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $c.existingSecret.name | quote }}
+                  key: {{ $c.existingSecret.key | quote }}
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - { name: subst,         mountPath: /subst }
             - { name: bundle-shared, mountPath: /bundle-realm, subPath: bundle-realm }
