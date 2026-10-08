@@ -42,7 +42,7 @@ for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")):
 print("<no forwarder container>")
 PYEOF
 }
-env_of() { env_of_raw "$1" | tr -d ''; }
+env_of() { env_of_raw "$1" | tr -d '\r'; }
 
 check() {  # $1 = case, $2 = got, $3 = want
   if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1:"; echo "  got:  $(echo "$2" | tr '\n' ' ')"; echo "  want: $(echo "$3" | tr '\n' ' ')"; FAIL=1; fi
