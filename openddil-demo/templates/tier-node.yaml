@@ -593,6 +593,12 @@ metadata:
     # openddil.tierProjectorGroupIds (_helpers.tpl), not re-typed -- so this
     # can never disagree with the mapping set actually mounted below.
     openddil.io/consumer-groups: {{ join " " $tierProjectorPairs | quote }}
+    {{- if $root.Values.linkStatus.enabled }}
+    # The buffer monitor inside this projector produces one link-heartbeat
+    # record per period to this tier's broker. Declared so the reset's writer
+    # census attributes the local write instead of halting on it.
+    openddil.io/produces-topics: {{ printf "%s/link-heartbeat" $tier.id | quote }}
+    {{- end }}
 spec:
   replicas: 1
   selector:
@@ -715,6 +721,18 @@ spec:
             # exchange, and restores after 2 consecutive exchanges.
             - name: LINK_EXCHANGE_PERIOD_S
               value: "1.5"
+            # Link heartbeat on this tier's own broker, keyed by the tier id,
+            # relayed up with the data. Runs inside the buffer loop.
+            - name: LINK_HEARTBEAT_ENABLED
+              value: {{ $root.Values.linkStatus.enabled | quote }}
+            - name: LINK_ID
+              value: {{ $tier.id | quote }}
+            - name: LINK_TRAFFIC_TOPICS
+              value: {{ join "," $root.Values.linkStatus.trafficTopics | quote }}
+            - name: LINK_HEARTBEAT_PERIOD_S
+              value: {{ $root.Values.linkStatus.heartbeatPeriodS | quote }}
+            - name: LINK_IDLE_AFTER_S
+              value: {{ $root.Values.linkStatus.idleAfterS | quote }}
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL

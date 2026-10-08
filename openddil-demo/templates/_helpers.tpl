@@ -899,6 +899,7 @@ three places must be written in one.
 {{- if not $managed }}{{- $t = append $t "raw-sensor-stream" -}}{{- end -}}
 {{- $t = append $t "tactical-events" -}}
 {{- $t = append $t "effector-events" -}}
+{{- $t = append $t "link-heartbeat" -}}
 {{- if $managed -}}
 {{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-telemetry" "asset-element-inventory" "derived-sustainment") -}}
 {{- end -}}
@@ -906,7 +907,7 @@ three places must be written in one.
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
 {{- end }}
 
 {{/*
@@ -1477,6 +1478,9 @@ ConfigMap and the pod's checksum annotation cannot disagree.
 {{- if $declaredEdges -}}
 {{- $_ := set $d "edges" $declaredEdges -}}
 {{- end -}}
+{{- if .Values.frontend.fobs -}}
+{{- $_ := set $d "fobs" .Values.frontend.fobs -}}
+{{- end -}}
 {{- toJson $d -}}
 {{- end -}}
 
@@ -1562,6 +1566,7 @@ for spec in \
   "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
   "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "link-heartbeat|-p 1 -r 1 -c retention.ms=3600000 -c cleanup.policy=delete" \
   ; do
   topic="${spec%%|*}"
   args="${spec##*|}"
@@ -1687,4 +1692,30 @@ openddil.pictureClientMap — JSON object {clientId: destination} for the PEP.
 {{- $_ := set $m $c.clientId $c.destination -}}
 {{- end -}}
 {{- toJson $m -}}
+{{- end }}
+
+{{/*
+openddil.linkExpectedIds — the link ids projector-hq expects a heartbeat from,
+comma-separated: every edge, plus every region that runs a tier node. These are
+exactly the ids that emit one (projector-<edge>, tier-projector-<tier>), so
+the HQ monitor reports a silent link as down instead of omitting it.
+*/}}
+{{- define "openddil.linkExpectedIds" -}}
+{{- $root := . -}}
+{{- $ids := list -}}
+{{- range $root.Values.edges }}{{- $ids = append $ids .id -}}{{- end -}}
+{{- range $root.Values.regions }}
+{{- if include "openddil.isTierManaged" (dict "id" .id "root" $root) }}{{- $ids = append $ids .id -}}{{- end -}}
+{{- end -}}
+{{- join "," $ids -}}
+{{- end }}
+
+{{/*
+openddil.linkDeclaredIdleIds — ids of edges carrying `declaredIdle`
+(edges[].declaredIdle: {reason, revisit}), comma-separated.
+*/}}
+{{- define "openddil.linkDeclaredIdleIds" -}}
+{{- $ids := list -}}
+{{- range .Values.edges }}{{- if .declaredIdle }}{{- $ids = append $ids .id -}}{{- end }}{{- end -}}
+{{- join "," $ids -}}
 {{- end }}

@@ -101,7 +101,7 @@ for t in $tiers; do
 import os, sys, urllib.parse, urllib.request
 E = os.environ['OPENDDIL_ELECTRIC_URL'].rstrip('/')
 TABLES = '''asset_capability_state asset_cm_state asset_logistics_status
-edge_buffer_status region_fleet_summary region_top_factors region_wear_trends
+edge_buffer_status link_status region_fleet_summary region_top_factors region_wear_trends
 tactical_events telemetry_latest_state'''.split()
 total = 0
 for tb in TABLES:

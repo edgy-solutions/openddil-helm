@@ -78,6 +78,13 @@ jobs:
 # A declaration must agree with the chart's own tierNode topology (checked by
 # openddil.validateEdgeAttachment at render time) -- omitting it is fine, but
 # a wrong one fails the render rather than mislabeling the screens.
+#
+# An edge may also declare `declaredIdle: {reason: "...", revisit: "YYYY-MM-DD"}`
+# (optional; no default edge carries one). It tells the HQ link monitor that
+# this link is EXPECTED to carry no traffic: a fresh link with no traffic then
+# reads idle, a link with traffic still reads up, and a link whose heartbeat
+# has stopped still reads down -- a declaration never hides unreachability.
+# The ids are passed to projector-hq as LINK_DECLARED_IDLE.
 edges:
   # udpPort: container listen port. Same value (62040-62042) used as NodePort
   # if sensorIngest.externalAccess.enabled=true. Hold for in-cluster-only
@@ -860,6 +867,30 @@ frontend:
   # and is passed through as opaque JSON into the hub frontend's
   # deployment.json. Empty by default -- no panes, no ConfigMap, no mount.
   releasedRecordsPanes: []
+  # Forward operating bases drawn on the HQ theater, one link each. Rendered
+  # into deployment.json as `fobs` when non-empty; the key is omitted when
+  # empty. Each entry is {edge_id, region_id, lat, lon, label?}, where
+  # edge_id is the processing edge (or tier) id whose link_status row paints
+  # the link. Placeholder shape, synthetic coordinates:
+  #   fobs:
+  #     - {edge_id: edge-01, region_id: region-east, lat: 0.0, lon: 0.0, label: "FOB One"}
+  fobs: []
+
+# --- Per-link heartbeat and HQ link_status ----------------------------------
+# Every buffer monitor (projector-<edge>, tier-projector-<tier>) produces one
+# heartbeat per period to `link-heartbeat` on its own broker; the topic rides
+# the same bridge/uplink as the data to HQ, where projector-hq measures
+# arrival and writes the link_status table (one row per link). Reachability
+# is what arrived; idle is traffic measured at the source, reported apart
+# from down.
+linkStatus:
+  enabled: true
+  heartbeatPeriodS: 2     # seconds between heartbeats
+  idleAfterS: 30          # traffic sum unchanged this long => idle
+  downAfterS: 15          # no heartbeat arrival this long at HQ => down
+  # Log-end offsets of these topics, on the edge's own broker, are summed to
+  # decide active vs idle.
+  trafficTopics: [raw-sensor-stream, tactical-events, effector-events]
 
 # --- Egress gate + its pane (ADR-0043 Arc 2 Slice 2, ledger row LR-0043-C) --
 # ONE image, TWO Deployments: the gate (image default command, main.py) and
@@ -1657,8 +1688,13 @@ releasability:
   # table here that carries label columns, because a table that CAN be
   # partitioned and is served unfiltered is the failure this whole read path
   # exists to prevent.
+  #
+  # `link_status` is declared on the same reasoning: one row per link holding
+  # a state word, a traffic word, a heartbeat age and a bridge lag. No asset
+  # data and no label columns, so there is nothing to partition by.
   roleServedTables:
     - edge_buffer_status
+    - link_status
 
   # --- CLASS 3: subject-scoped. Partitioned by WHO, not by nation. ---
   # `table:column` — the column naming the subject a row belongs to. A

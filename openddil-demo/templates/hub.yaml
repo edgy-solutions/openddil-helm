@@ -1050,6 +1050,17 @@ spec:
               value: "region-unspecified"
             - name: BUFFER_MONITOR_ENABLED
               value: "false"
+            # Per-link reachability from the heartbeats that arrive on the
+            # HQ broker (KAFKA_BROKERS above). Expected ids: every edge plus
+            # every tier-managed region, the same set that emits one.
+            - name: LINK_MONITOR_ENABLED
+              value: {{ .Values.linkStatus.enabled | quote }}
+            - name: LINK_EXPECTED_IDS
+              value: {{ include "openddil.linkExpectedIds" . | quote }}
+            - name: LINK_DECLARED_IDLE
+              value: {{ include "openddil.linkDeclaredIdleIds" . | quote }}
+            - name: LINK_DOWN_AFTER_S
+              value: {{ .Values.linkStatus.downAfterS | quote }}
             # declared-load reload path + the
             # Detonation timeout sweep's window, same two env vars on
             # every projector that carries the effector_launch mapping.
@@ -1098,7 +1109,7 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
-      {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
+      {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
       annotations:
         checksum/deployment-config: {{ include "openddil.frontendDeploymentJson" . | sha256sum | quote }}
       {{- end }}
@@ -1177,7 +1188,7 @@ spec:
               mountPath: /usr/share/nginx/html/figures
               readOnly: true
             {{- end }}
-            {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
+            {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
             # Only the hub view gets this: the tier frontends (tier-node.yaml)
             # have their own deployment.json carrying tier shape, not this.
             - name: deployment-config
@@ -1195,7 +1206,7 @@ spec:
             name: {{ .Values.frontend.figures.configMap }}
             optional: true
         {{- end }}
-        {{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
+        {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
         - name: deployment-config
           configMap:
             name: {{ .Release.Name }}-frontend-deployment-config
@@ -1214,7 +1225,7 @@ spec:
     - name: http
       port: {{ .Values.frontend.port }}
       targetPort: http
-{{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled }}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
 ---
 # The hub view's released-records panes (ADR-0046 §5): per-destination
 # tables the hub shell renders from .Values.frontend.releasedRecordsPanes.

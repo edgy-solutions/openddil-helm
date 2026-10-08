@@ -667,6 +667,12 @@ metadata:
     # untier-managed edge's own broker (see NOT DEPLOYED FOR A TIER-MANAGED
     # EDGE below), so it carries the full root set, same as projector-hq.
     openddil.io/consumer-groups: {{ join " " $projectorPairs | quote }}
+    {{- if $root.Values.linkStatus.enabled }}
+    # The buffer monitor inside this projector produces one link-heartbeat
+    # record per period to this edge's broker. Declared so the reset's writer
+    # census attributes the local write instead of halting on it.
+    openddil.io/produces-topics: {{ printf "%s/link-heartbeat" $edge.id | quote }}
+    {{- end }}
 spec:
   replicas: 1
   selector:
@@ -748,6 +754,25 @@ spec:
             # 2*(E+H) = 2*(5+2) = 14s with no exchange before SEVERED.
             - name: LINK_EXCHANGE_PERIOD_S
               value: "5"
+            # SAME HELPER THE RELAY RENDERS ITS TOPIC LIST FROM. This
+            # monitor used to take the code default, so the hub-attached
+            # edge's measurement and its relay disagreed about what the
+            # bridge carries; see openddil.edgeBridgeTopics.
+            - name: BRIDGE_TOPICS
+              value: {{ include "openddil.edgeBridgeTopics" (dict "edge" $edge "root" $root) | quote }}
+            # Link heartbeat: one record per period on this edge's own
+            # broker, keyed by the link id, relayed to HQ with the data.
+            # Runs inside the buffer loop, hence BUFFER_MONITOR_ENABLED above.
+            - name: LINK_HEARTBEAT_ENABLED
+              value: {{ $root.Values.linkStatus.enabled | quote }}
+            - name: LINK_ID
+              value: {{ $edge.id | quote }}
+            - name: LINK_TRAFFIC_TOPICS
+              value: {{ join "," $root.Values.linkStatus.trafficTopics | quote }}
+            - name: LINK_HEARTBEAT_PERIOD_S
+              value: {{ $root.Values.linkStatus.heartbeatPeriodS | quote }}
+            - name: LINK_IDLE_AFTER_S
+              value: {{ $root.Values.linkStatus.idleAfterS | quote }}
             # see the identical pair on projector-hq
             # (hub.yaml) for what these do.
             - name: EFFECTOR_DECLARED_LOAD_PATH

@@ -1075,6 +1075,7 @@ print("  ok   : existingSecret empty -- no egress-credentials mount or volume an
 #   LOGISTICS_SIM_HQ_BROKERS     logistics-sim
 #   OPENDDIL_EGRESS_SINK_TOPIC   egress-gate-c2
 #   REGIONAL_FAN_IN_TOPIC        faust-regional
+#   LINK_HEARTBEAT_ENABLED       projector-<edge>, tier-projector-<tier>
 # This is NOT every writer in the chart (egress-assembler/egress-intake
 # carry none of these env vars; guard 13 checks their declarations) and
 # bridges are excluded on purpose (their own comment explains why; they
@@ -1091,7 +1092,7 @@ docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 PRODUCER_ENV_NAMES = {
     "KAFKA_TOPIC", "FAUST_APP_ID", "CM_KAFKA_BROKERS", "FUSION_KAFKA_BROKERS",
     "ASSET_REGISTRY_OUTPUT_TOPIC", "LOGISTICS_SIM_HQ_BROKERS",
-    "OPENDDIL_EGRESS_SINK_TOPIC", "REGIONAL_FAN_IN_TOPIC",
+    "OPENDDIL_EGRESS_SINK_TOPIC", "REGIONAL_FAN_IN_TOPIC", "LINK_HEARTBEAT_ENABLED",
 }
 PAIR_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 missing, malformed, checked = [], [], 0
@@ -1490,6 +1491,107 @@ g14_reset_check off
 g14_reset_check on --set exerciseControl.resetJob.enabled=true
 g14_reset_check halt --set exerciseControl.resetJob.enabled=true --set-string exerciseControl.resetJob.haltBeforePhase=2
 g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}'
+
+# --- guard 15: per-link heartbeat wiring ------------------------------------
+# THE DEFECTS MODELLED:
+#  (a) a buffer monitor's BRIDGE_TOPICS differing from the topic list its own
+#      relay consumes -- the hub-attached edge's monitor once took the code
+#      default while its bridge carried the helper list, and the retired-topic
+#      offset read as phantom buffer. Checked for EVERY projector that runs a
+#      buffer monitor, against the generated connect config of its relay.
+#  (b) link-heartbeat missing from a relay's list or from any topic-init Job:
+#      the heartbeat would be produced, never reach HQ, and every link would
+#      read down with nothing else wrong.
+#  (c) projector-hq's LINK_EXPECTED_IDS drifting from the ids that emit a
+#      heartbeat (every edge + every tier-managed region): an unlisted link
+#      is silently absent from link_status instead of reading down.
+echo
+echo "guard 15: per-link heartbeat wiring (bridge lists, topic-init, expected ids)"
+G15_VALUES="$(mktemp)"
+cat > "$G15_VALUES" <<'G15'
+tierNode:
+  enabled: true
+  tiers: [region-east, edge-01]
+edges:
+  - {id: edge-01, region: region-east, udpPort: 62040}
+  - {id: edge-02, region: region-east, udpPort: 62041, declaredIdle: {reason: g15, revisit: "2099-01-01"}}
+  - {id: edge-03, region: region-west, udpPort: 62042}
+G15
+render -f "$G15_VALUES" | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+cms, deps, jobs = {}, {}, []
+for d in docs:
+    n = (d.get("metadata") or {}).get("name", "")
+    if d.get("kind") == "ConfigMap":
+        cms[n] = d
+    elif d.get("kind") == "Deployment":
+        deps[n] = d
+    elif d.get("kind") == "Job" and "-topic-init" in n:
+        jobs.append(d)
+def env(d, cname="projector"):
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        if c["name"] == cname:
+            return {e["name"]: e.get("value") for e in c.get("env") or []}
+    return {}
+def relay_topics(cmname):
+    cm = cms.get(cmname)
+    if cm is None:
+        return None
+    return yaml.safe_load(cm["data"]["connect.yaml"])["input"]["kafka"]["topics"]
+fail = False
+def bad(m):
+    global fail
+    print("  FAIL: " + m)
+    fail = True
+checked = 0
+for n, d in sorted(deps.items()):
+    e = env(d)
+    if e.get("BUFFER_MONITOR_ENABLED") != "true" or "projector" not in n:
+        continue
+    if "-tier-projector-" in n:
+        tid = n.split("-tier-projector-", 1)[1]
+        relay = None
+        for cn in ("t-edge-hq-bridge-config-" + tid, "t-tier-uplink-config-" + tid):
+            relay = relay_topics(cn) if relay is None else relay
+    else:
+        tid = n.split("-projector-", 1)[1]
+        relay = relay_topics("t-edge-hq-bridge-config-" + tid)
+    if relay is None:
+        bad(n + ": no relay config found to compare against")
+        continue
+    checked += 1
+    mon = (e.get("BRIDGE_TOPICS") or "").split(",") if e.get("BRIDGE_TOPICS") else None
+    if mon is None:
+        bad(n + ": no BRIDGE_TOPICS (monitor would use its code default)")
+    elif mon != relay:
+        bad(n + ": BRIDGE_TOPICS " + ",".join(mon) + " != relay " + ",".join(relay))
+    if "link-heartbeat" not in relay:
+        bad(n + ": relay list lacks link-heartbeat")
+    if e.get("LINK_HEARTBEAT_ENABLED") != "true" or e.get("LINK_ID") != tid:
+        bad(n + ": LINK_HEARTBEAT_ENABLED/LINK_ID wrong: " + str((e.get("LINK_HEARTBEAT_ENABLED"), e.get("LINK_ID"))))
+if checked < 4:
+    bad("only %d buffer-monitor projectors compared (fixture has 4) -- guard proved too little" % checked)
+if not jobs:
+    bad("no topic-init Jobs rendered")
+for j in jobs:
+    txt = yaml.safe_dump(j)
+    if "link-heartbeat|" not in txt:
+        bad((j["metadata"]["name"]) + ": topic-init does not create link-heartbeat")
+hq = env(deps["t-projector-hq"])
+want = ["edge-01", "edge-02", "edge-03", "region-east"]
+got = (hq.get("LINK_EXPECTED_IDS") or "").split(",")
+if sorted(got) != sorted(want):
+    bad("projector-hq LINK_EXPECTED_IDS " + str(got) + " != edges + tier-managed regions " + str(want))
+if hq.get("LINK_DECLARED_IDLE") != "edge-02":
+    bad("projector-hq LINK_DECLARED_IDLE is " + repr(hq.get("LINK_DECLARED_IDLE")) + ", want edge-02")
+if hq.get("LINK_MONITOR_ENABLED") != "true":
+    bad("projector-hq LINK_MONITOR_ENABLED is not true")
+if not fail:
+    print("  ok   : %d monitors match their relay lists (all carry link-heartbeat); %d topic-init Jobs create it; expected ids = edges + tier regions" % (checked, len(jobs)))
+sys.exit(1 if fail else 0)
+' || fail=1
+rm -f "$G15_VALUES"
 
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"

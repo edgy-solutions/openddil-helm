@@ -1150,6 +1150,7 @@ TABLES=(
   region_wear_trends
   tactical_events
   edge_buffer_status
+  link_status
   inventory_items
   intake_records
   effector_launch
@@ -1177,7 +1178,8 @@ EXCLUDED_TABLES=(audit_log egress_delivered_events)  # ADR-0029 decision log
 # instead: no row older than the run boundary. That fails on a row nothing
 # writes any more; it cannot tell a deleted-and-rewritten row from one that
 # was never deleted, because the heartbeat refreshes both.
-HEARTBEAT_TABLES=(edge_buffer_status)
+# link_status: the HQ link monitor rewrites it every 2 s, same as edge_buffer_status.
+HEARTBEAT_TABLES=(edge_buffer_status link_status)
 
 is_heartbeat_table() {
   local t
