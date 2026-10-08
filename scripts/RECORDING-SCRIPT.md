@@ -13,6 +13,9 @@ Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 
 ## Demo-day checklist — in this order; stop at the first miss
 
+Run it from a shell where `python` and `kubectl` resolve against the demo cluster. Check first with
+`python --version`: a Windows shell that has only `py` fails step 1 at the tier-feed check with `command not found`.
+
 **1. Pre-flight** (BEAT 0 says what each failure means):
 ```
 bash scripts/check-advancing.sh openddil 30 && bash scripts/check-derive-stage.sh 60 \
@@ -31,14 +34,30 @@ done
 ```
 Pass: four `ok` lines.
 
-**3. Reset** and **4. Exercise restart**: one command, because the restart is refused unless this reset reached a measured zero:
+**3. Reset** and **4. Exercise restart**: one action, because the restart is refused unless this reset reached a
+measured zero. Primary path: sign in as the supervisor and press **Restart exercise** in the exercise panel (the button
+shows only with `exerciseControl.resetJob.enabled`). It runs the reset as an in-cluster Job, so no laptop is needed;
+about 12 minutes on the lab. A second press while it runs is refused (`reset_running`). Then read the result:
 ```
-bash scripts/restart-exercise.sh --release openddil --namespace openddil   # <dry run: any --declare-unmeasured flags the reset needs>
+J=$(kubectl -n openddil get jobs -l app.kubernetes.io/component=exercise-reset \
+  --sort-by=.metadata.creationTimestamp -o name | tail -1)
+kubectl -n openddil wait --for=condition=complete "$J" --timeout=25m
+kubectl -n openddil logs "$J" | tail -1
 kubectl -n openddil get cm openddil-exercise-reset-record -o jsonpath='{.data.record\.json}'
 ```
-Pass (3): no `RESET HALTED` in the output; the record reads `"verdict": "PASS"` with `measured_zero_at` after the
-command started. Pass (4): the last line is `RESTART SENT (adapter 200)` and the exit code is 0. `RESTART NOT SENT`,
-`RESTART REFUSED` or `RESTART NOT ACCEPTED` means the exercise did not restart: do not record.
+Fallback, from a laptop with the lab kubeconfig (same guards, same output):
+```
+bash scripts/restart-exercise.sh --release openddil --namespace openddil \
+  --declare-unmeasured aggregator-region-fleet-summary
+```
+The one declared exception (on the Job too) is the region fleet summary aggregator; the output prints it as
+`DECLARED UNMEASURED`, never as a pass. Any other declaration needs a reason before the recording.
+Pass (3): the Job completes (or the fallback exits 0); no `RESET HALTED` in the log; the record reads
+`"verdict": "PASS"` with `measured_zero_at` after the press. Pass (4): the last log line is
+`RESTART SENT (adapter 200)`. `RESTART NOT SENT`, `RESTART REFUSED` or `RESTART NOT ACCEPTED` means the exercise did
+not restart: do not record. A failed Job leaves `kubectl wait` to time out (`kubectl -n openddil get "$J"` shows it
+at once), and its log ends with the `RESET HALTED` block naming the state; read it, and do not press again until it
+is understood.
 
 **5. TAK device connected:**
 ```
