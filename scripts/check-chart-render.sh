@@ -312,38 +312,61 @@ sys.exit(1 if bad else 0)
   [ "$status" -ne 0 ] && fail=1
 done
 
-# Guard 6: the egress gate resolves each route's destination from topaz-hq
-# once, at startup. A registry change that rolls topaz-hq but not the gate
-# leaves the gate on the old registry (an unknown destination, nations=[]),
-# with nothing failing loudly. The gate must carry the same registry checksum
-# as topaz-hq, and that checksum must move when the destinations registry moves.
-# Defect model: drop checksum/registries from the gate, or key it to something
-# other than releasability.destinations.
+# Guard 6: the egress gate must never sit on an old destinations registry.
+# Two ways to meet that, one per releasability.liveReload mode:
+#   off -- the gate resolves each route's destination from topaz-hq once, at
+#          startup, so it must carry the same registry checksum as topaz-hq
+#          and that checksum must move when the destinations registry moves;
+#   on  -- the gate re-asks topaz-hq every OPENDDIL_REGISTRY_REFRESH_S, so the
+#          refresh must be non-zero, and a destinations change must NOT roll
+#          the gate (that roll is exactly what live reload exists to avoid).
+# Defect model: drop checksum/registries from the gate or key it to something
+# other than releasability.destinations (off); render the refresh as "0", or
+# let the destinations leak back into the checksum (on).
 echo
-echo "guard 6: egress gate rolls with the destinations registry"
+echo "guard 6: egress gate follows the destinations registry"
 g6() { render --set releasability.enabled=true "$@" | "$PY" -c '
 import sys, yaml
 want = {"openddil-egress-gate-c2": "checksum/registries", "openddil-topaz-hq": "checksum/policy"}
 got = {}
+refresh = "MISSING"
 for d in yaml.safe_load_all(sys.stdin):
     if d and d.get("kind") == "Deployment":
         n = d["metadata"]["name"].replace("t-", "openddil-", 1)
         if n in want:
             got[n] = ((d["spec"]["template"]["metadata"].get("annotations") or {}).get(want[n]) or "")
-print(" ".join(got.get(n, "") or "MISSING" for n in want))
+        if n == "openddil-egress-gate-c2":
+            for c in d["spec"]["template"]["spec"]["containers"]:
+                for e in c.get("env") or []:
+                    if e.get("name") == "OPENDDIL_REGISTRY_REFRESH_S":
+                        refresh = str(e.get("value"))
+print(" ".join(got.get(n, "") or "MISSING" for n in want), refresh)
 '; }
-read -r g6_gate g6_topaz <<<"$(g6)"
-read -r g6_gate2 g6_topaz2 <<<"$(g6 --set releasability.destinations.version=guard6-changed)"
+off=(--set releasability.liveReload.enabled=false)
+read -r g6_gate g6_topaz g6_ref <<<"$(g6 "${off[@]}")"
+read -r g6_gate2 g6_topaz2 _ <<<"$(g6 "${off[@]}" --set releasability.destinations.version=guard6-changed)"
 if [ "$g6_gate" = MISSING ] || [ "$g6_topaz" = MISSING ] || [ -z "$g6_gate" ]; then
-  echo "  FAIL: gate=$g6_gate topaz-hq=$g6_topaz -- an annotation is missing (or neither rendered: vacuous)"; fail=1
+  echo "  FAIL [off]: gate=$g6_gate topaz-hq=$g6_topaz -- an annotation is missing (or neither rendered: vacuous)"; fail=1
 elif [ "$g6_gate" != "$g6_topaz" ]; then
-  echo "  FAIL: gate checksum/registries ($g6_gate) != topaz-hq checksum/policy ($g6_topaz)"; fail=1
+  echo "  FAIL [off]: gate checksum/registries ($g6_gate) != topaz-hq checksum/policy ($g6_topaz)"; fail=1
 elif [ "$g6_gate2" = "$g6_gate" ]; then
-  echo "  FAIL: changing releasability.destinations did not change the gate's checksum/registries"; fail=1
+  echo "  FAIL [off]: changing releasability.destinations did not change the gate's checksum/registries"; fail=1
 elif [ "$g6_gate2" != "$g6_topaz2" ]; then
-  echo "  FAIL: after a destinations change, gate ($g6_gate2) != topaz-hq ($g6_topaz2)"; fail=1
+  echo "  FAIL [off]: after a destinations change, gate ($g6_gate2) != topaz-hq ($g6_topaz2)"; fail=1
 else
-  echo "  ok   : gate == topaz-hq, and both move with releasability.destinations"
+  echo "  ok   [off]: gate == topaz-hq, and both move with releasability.destinations"
+fi
+on=(--set releasability.liveReload.enabled=true)
+read -r g6_gate g6_topaz g6_ref <<<"$(g6 "${on[@]}")"
+read -r g6_gate2 _ _ <<<"$(g6 "${on[@]}" --set releasability.destinations.version=guard6-changed)"
+if [ "$g6_gate" = MISSING ] || [ -z "$g6_gate" ]; then
+  echo "  FAIL [on]: gate checksum/registries missing (or the gate did not render: vacuous)"; fail=1
+elif ! [ "$g6_ref" -gt 0 ] 2>/dev/null; then
+  echo "  FAIL [on]: gate OPENDDIL_REGISTRY_REFRESH_S is '$g6_ref' -- with no refresh, an unrolled gate keeps the old registry"; fail=1
+elif [ "$g6_gate2" != "$g6_gate" ]; then
+  echo "  FAIL [on]: a destinations change rolled the gate (checksum/registries moved) -- live reload should carry it"; fail=1
+else
+  echo "  ok   [on]: gate refreshes every ${g6_ref}s, and a destinations change does not roll it"
 fi
 
 
