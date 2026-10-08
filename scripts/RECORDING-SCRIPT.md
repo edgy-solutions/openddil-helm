@@ -344,9 +344,9 @@ kubectl -n openddil rollout status deploy/dis-sim-launcher
 kubectl -n openddil logs deploy/dis-sim-launcher --timestamps | grep -m1 'posture schedule fired'
 ```
 
-t0 is 11-13 s after the rollout completes: the container installs its DIS
-library before the sim starts (measured 2026-10-08). The old pod is gone 1 s
-after the restart. Posture is decided once, at edge-01, and every other tier
+t0 is about 1 s after the new container starts: the DIS library is in the
+image, so nothing installs at start (measured 0.5 s and 1.1 s, 2026-10-08).
+The old pod is gone 1 s after the restart. Posture is decided once, at edge-01, and every other tier
 carries that decision and its time.
 
 | t0 + | sim action | posture at edge-01 — lab stand-in (dis-sim) | logistics picture — **drafted, not built** |
@@ -361,10 +361,11 @@ carries that decision and its time.
 The logistics-picture column is the intended picture, not a screen that
 exists. Do not narrate it on camera until a dry run shows it.
 
-From the rollout completing, add the 11-13 s: `march_ordered` at about +311 s
-and `moving` at about +351 s (measured 2026-10-08). If the launcher is
-restarted again during the move, `emplaced` follows at t0+20 of the new clock,
-which is about +33 s from that rollout.
+From the new container starting: `march_ordered` at about +301 s and
+`moving` at about +341 s (measured after a reset, 2026-10-08). If the
+launcher is restarted again during the move, `emplaced` follows at t0+20 of
+the new clock, about +21 s from that container's start (the 20 s hold plus
+the 1 s start; not re-measured on the baked image).
 
 **The cut, tied to the move:**
 
