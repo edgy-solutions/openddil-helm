@@ -458,7 +458,7 @@ sensorIngest:
   # Non-empty, every sensor-ingest Deployment gets DIS_ADMITTED_ENTITY_IDS
   # set to the sorted, comma-joined ids assigned to its own edge (the
   # sidecar image already reads this env var). Validated at render time
-  # (templates/edge.yaml): every id must match ^dis:[0-9]+:[0-9]+:[0-9]+$,
+  # (templates/edge.yaml): every id must have the DIS id shape checked there,
   # no id may appear twice, every `edge` must name a real edges[].id, and
   # once this list is non-empty every edge needs at least one entry here --
   # a sidecar given no list admits every entity it hears, so a silently

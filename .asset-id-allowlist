@@ -1,0 +1,8 @@
+# ADR-0047 exceptions, one per line, tab-separated: <path>	<substring on the line>	<reason>
+# The allowlist only shrinks: an entry that matches nothing fails the check.
+openddil-demo/templates/edge.yaml	regexMatch "^dis:	validation: render-time shape check on the sensor-ingest entity assignment (the sidecar site filter's input); no part of the id is read
+scripts/check-entity-assignment.sh	ENTITY_RE = re.compile	validation: the same shape check on the rendered sidecars
+scripts/tests/test_entity_assignment.sh	malformed id "dis:1:1"	validation: test asserts the check names the offending id
+scripts/tests/test_entity_assignment.sh	is assigned to more than one edge (edge-01 and edge-02)	validation: test asserts the check names the offending id
+scripts/tests/test_entity_assignment.sh	grep -q "dis:2:1:7"	validation: test asserts the check names the offending id
+scripts/tests/test_entity_assignment.sh	dis:3:1:9' is rendered	validation: test asserts the check names the offending id
