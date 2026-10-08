@@ -115,8 +115,44 @@ def load_idle_declarations() -> dict:
             out[cur] = {"status": "?"}
         elif cur and line.strip().startswith("status:"):
             out[cur]["status"] = line.split(":", 1)[1].strip()
+        elif cur and line.strip().startswith("tiers:"):
+            ids = parse_tier_scope(line.split(":", 1)[1])
+            if ids is None:
+                print("REFUSING TO RUN: declared-idle-topics.yaml entry "
+                      + cur + ": unparseable tiers: scope", file=sys.stderr)
+                raise SystemExit(78)
+            out[cur]["tiers"] = ids
     return {k: v for k, v in out.items() if v.get("status") in
             ("declared", "held", "investigate")}
+
+
+def parse_tier_scope(raw: str) -> list[str] | None:
+    """Flow list only: [a, b]. Anything else is None, never 'every tier'."""
+    raw = raw.strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        return None
+    inner = raw[1:-1]
+    if "[" in inner or "]" in inner:
+        return None
+    ids = [i.strip().strip("\"'").strip() for i in inner.split(",")]
+    ids = [i for i in ids if i]
+    return ids or None
+
+
+def declaration_for(idle_decl: dict, topic: str, tier: str) -> dict | None:
+    """The entry for topic if it is unscoped or lists this tier, else None."""
+    d = idle_decl.get(topic)
+    if d and ("tiers" not in d or tier in d["tiers"]):
+        return d
+    return None
+
+
+def scope_note(idle_decl: dict, topic: str, tier: str) -> str:
+    """Why an existing entry did not excuse this tier, or empty."""
+    d = idle_decl.get(topic)
+    if d and "tiers" in d and tier not in d["tiers"]:
+        return " -- declared only for: " + ", ".join(d["tiers"])
+    return ""
 
 
 def watermark(ns: str, tier: str, topic: str) -> int | None:
@@ -451,13 +487,15 @@ def main() -> int:
             # consumer, which is why this prints rather than passing
             # silently, but "nobody upstream produces this, here is why" is
             # the accurate statement at BOTH tiers.
-            d = idle_decl.get(t)
+            d = declaration_for(idle_decl, t, tier)
             if d:
+                upto = " for " + tier if "tiers" in d else ""
                 print("  idle/" + d["status"][:11].ljust(12) + g + "   <- "
-                      + t + " (absent here, declared upstream)")
+                      + t + " (absent here, declared upstream" + upto + ")")
                 known_idle.append((tier, g, t, d["status"]))
                 continue
-            print("  UNFED      " + g + "   <- " + t)
+            print("  UNFED      " + g + "   <- " + t
+                  + scope_note(idle_decl, t, tier))
             unfed.append((tier, g, t))
 
         # THE FOURTH RUNG. `fed` says the topic exists; this says whether it
@@ -472,14 +510,15 @@ def main() -> int:
                 return 1
             if hw > 0:
                 continue
-            d = idle_decl.get(t)
+            d = declaration_for(idle_decl, t, tier)
             if d:
+                dword = "declared for " + tier if "tiers" in d else "declared"
                 print("  idle/" + d["status"][:11].ljust(12) + g + "   <- "
-                      + t + " (hw 0, declared)")
+                      + t + " (hw 0, " + dword + ")")
                 known_idle.append((tier, g, t, d["status"]))
             else:
                 print("  NOT FLOWING " + g + "   <- " + t
-                      + " (hw 0, UNDECLARED)")
+                      + " (hw 0, UNDECLARED)" + scope_note(idle_decl, t, tier))
                 undeclared.append((tier, g, t))
         for gid in stale_keyed_rows(ns, tier, ts):
             print("  STALE KEY   " + gid + "   (row keyed by a tier that is "
@@ -499,6 +538,18 @@ def main() -> int:
             for g, t in residue:
                 print("  residue    " + g + "   <- " + t
                       + " (no members -- retired)")
+        print()
+
+    # A scope naming a tier that is not deployed excuses nothing and has
+    # outlived the deployment it described; fail so it gets removed.
+    stale_scope: list[tuple[str, str]] = []
+    for topic, d in sorted(idle_decl.items()):
+        for tid in d.get("tiers", []):
+            if tid not in ts:
+                print("  STALE SCOPE  " + topic + ": tier " + tid
+                      + " is not deployed")
+                stale_scope.append((topic, tid))
+    if stale_scope:
         print()
 
     if known_idle:
@@ -530,11 +581,18 @@ def main() -> int:
         print("  A key change is a migration, not an edit.")
         print()
 
-    if not unfed and not unentitled and not undeclared and not null_keyed             and not stale_keys:
+    if not unfed and not unentitled and not undeclared and not null_keyed             and not stale_keys \
+            and not stale_scope:
         print("tier feed: clean -- all " + str(checked) + " rendered consumers"
               " have a topic they are entitled to derive from, and every")
         print("  empty one is declared")
         return 0
+
+    if stale_scope:
+        print("tier feed: " + str(len(stale_scope)) + " STALE SCOPE(S)")
+        print("  A declaration is scoped to a tier that is not deployed. Fix")
+        print("  or remove the tiers: line in declared-idle-topics.yaml.")
+        print()
 
     if undeclared:
         print("tier feed: " + str(len(undeclared))
@@ -558,7 +616,8 @@ def main() -> int:
         print()
 
     if not unfed:
-        return 1 if (unentitled or undeclared or null_keyed or stale_keys) else 0
+        return 1 if (unentitled or undeclared or null_keyed or stale_keys
+                      or stale_scope) else 0
 
     print("tier feed: " + str(len(unfed)) + " UNFED CONSUMER(S) of "
           + str(checked) + " rendered")

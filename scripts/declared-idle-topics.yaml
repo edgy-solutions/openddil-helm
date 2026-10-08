@@ -25,6 +25,13 @@
 #   investigate Nobody knows yet. This is the honest status and it is meant to
 #               be uncomfortable — it should not survive many runs.
 #
+# SCOPE
+#   tiers: [<tier id>, ...]   Optional, flow list only. With no `tiers:` key an
+#               entry applies at every tier. With it, the entry applies only
+#               at the listed tiers; at any other tier the topic is judged as
+#               if undeclared. A `tiers:` line in any other form refuses the
+#               run, and a listed id that is not a deployed tier fails it.
+#
 # `held` and `investigate` are NOT passes. They keep the check green-with-a-
 # reason rather than green, and the summary counts them separately so a
 # growing pile is visible.
@@ -89,3 +96,16 @@ topics:
       the entry should be removed rather than amended. Note the asymmetry:
       cm-service-cm-events is gated OFF at a tier without direct ingest, so
       this topic is only ever consumed where it is ingested.
+
+  effector-events:
+    status: declared
+    tiers: [edge-02]
+    reason: >-
+      Only a tier with a launcher entity produces effector events. In this
+      deployment edge-02 has none, so its effector-events stays at watermark
+      0. Edge-01 does have a launcher, so its topic must flow: it is
+      deliberately out of scope here, and an empty edge-01 topic stays a
+      finding. Declared 2026-10-08.
+    revisit: >-
+      When a launcher is assigned to edge-02, remove edge-02 from the scope
+      (and the entry, if no tier is left).
