@@ -11,6 +11,55 @@ record over one that is still open.
 Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 `cd ~/git/openddil/openddil-helm`.
 
+## Demo-day checklist — in this order; stop at the first miss
+
+**1. Pre-flight** (BEAT 0 says what each failure means):
+```
+bash scripts/check-advancing.sh openddil 30 && bash scripts/check-derive-stage.sh 60 \
+  && python scripts/check_tier_feed.py openddil && bash scripts/check-shape-sizes.sh openddil \
+  && bash scripts/check-releasability-completeness.sh -n openddil && echo "PRE-FLIGHT 5/5"
+```
+Pass: `PRE-FLIGHT 5/5`. Each check exits non-zero on a miss, so the chain stops at the first one.
+
+**2. Four logins** (the scripted round trip; then sign in the four browser profiles, BEAT 1):
+```
+H=<hub-host>
+for p in "$H liaison.coalition" "region-east.$H operator.regioneast" "edge-01.$H operator.atlantia" "edge-02.$H operator.borduria"; do
+  set -- $p; python scripts/oidc_login.py "https://$1" "$2" >/dev/null && echo "login $2 ok" || echo "login $2 FAILED"
+done
+```
+Pass: four `ok` lines.
+
+**3. Reset** and **4. Exercise restart**: one command, because the restart is refused unless this reset reached a measured zero:
+```
+bash scripts/restart-exercise.sh --release openddil --namespace openddil   # <dry run: any --declare-unmeasured flags the reset needs>
+kubectl -n openddil get cm openddil-exercise-reset-record -o jsonpath='{.data.record\.json}'
+```
+Pass (3): no `RESET HALTED` in the output; the record reads `"verdict": "PASS"` with `measured_zero_at` after the
+command started. Pass (4): the last line is `RESTART SENT (adapter 200)` and the exit code is 0. `RESTART NOT SENT`,
+`RESTART REFUSED` or `RESTART NOT ACCEPTED` means the exercise did not restart: do not record.
+
+**5. TAK device connected:**
+```
+kubectl -n openddil exec deploy/openddil-tak-server -c tak-server -- python -c \
+  "print(sum(1 for l in open('/proc/net/tcp').readlines()[1:] if l.split()[1].endswith(':1F99') and l.split()[3]=='01'))"
+```
+Pass: 1 or more (established connections on the TLS port 8089, `1F99` in hex), and the device's server entry shows
+connected with the stream enabled. 0 means no device is on.
+`<dry run: the count with the device connected>`
+
+**6. Consumer endpoint reachable** (the egress forwarder's destination; the request carries no credential):
+```
+kubectl -n openddil exec deploy/openddil-egress-forwarder -c forwarder -- python -c '
+import json,os,urllib.request as u,urllib.error as e
+r=json.load(open(os.environ["OPENDDIL_FORWARD_CONFIG"]))[0]
+try: print("consumer reachable, HTTP", u.urlopen(u.Request(r["url"],method="HEAD"),timeout=10).status)
+except e.HTTPError as x: print("consumer reachable, HTTP", x.code)
+except Exception as x: print("consumer NOT reachable:", type(x).__name__)'
+```
+Pass: `consumer reachable, HTTP <any code>`. A 401 or 405 still counts: the endpoint answered. `NOT reachable` means
+stop. It prints no URL.
+
 ## Caveats from the full run-through (2026-10-05) — read before recording
 
 Every beat was run in order with four profiles. BEAT 3 was cut from the WAN
@@ -219,8 +268,9 @@ Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
    released to a destination whose nations include BDR, and **refused** by an
    ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
    camera; it is the same ledger as BEAT 2a.
-4. **HQ — the action arrives** on `<actions pane>` (the released-records pane
-   the deployment configures for the action destination):
+4. **HQ — the action arrives** on `<dry run: the actions pane — the
+   released-records pane the deployment configures for the action
+   destination>`:
    `<dry run: the action shown — task, part, source of the part — and the
    time from report to action>`.
    `<dry run: whether the figure the action cites is shown with the faulted
@@ -273,23 +323,41 @@ Connected at the start; BEAT 3's cut and BEAT 4's heal sit inside this beat.
 Screens: **Edge-01**, **Region**, **HQ** (as `liaison.coalition`). Asset: the
 interceptor launcher `dis:1:1:1009` at edge-01.
 
-The lab stand-in drives the launcher from a posture schedule. Its clock, `t0`,
-is the sim process start; the reset restarts the sim. Posture is decided once,
-at edge-01, and every other tier carries that decision and its time.
+**Lab stand-in (dis-sim).** Every time below is the lab stand-in's, measured on
+the lab. None of it is the co-located simulator's (see the placeholders).
 
-| t0 + | sim action | posture at edge-01 (measured 2026-10-07) | logistics picture |
+The stand-in drives the launcher from a posture schedule. Its clock, `t0`, is
+the schedule start: the launcher's `posture schedule fired ... t+0` log line.
+The reset does **not** restart this clock: it quiesces the edge sims, not the
+launcher. To start the beat on a known clock, restart the launcher and read t0:
+
+```
+kubectl -n openddil rollout restart deploy/dis-sim-launcher
+kubectl -n openddil rollout status deploy/dis-sim-launcher
+kubectl -n openddil logs deploy/dis-sim-launcher --timestamps | grep -m1 'posture schedule fired'
+```
+
+t0 is 11-13 s after the rollout completes: the container installs its DIS
+library before the sim starts (measured 2026-10-08). The old pod is gone 1 s
+after the restart. Posture is decided once, at edge-01, and every other tier
+carries that decision and its time.
+
+| t0 + | sim action | posture at edge-01 — lab stand-in (dis-sim) | logistics picture — **drafted, not built** |
 |---|---|---|---|
-| 0 | raise | `emplaced` at **~t0+40** after a restart (see note) | launcher ready, 5/5 on hand |
-| 120 / 180 / 240 | fires 2, 1, 1 | `emplaced` | **remaining 1/5 (expended 4)**, DEGRADED |
-| 300 | stow | `march_ordered`, immediate | unchanged; the launcher is packing up |
-| 330 | move | `moving` at **t0+340** (10 s hold) | unchanged; the asset is in transit |
-| 390 | stop | `emplacing` at **t0+410** (20 s hold) | unchanged |
-| 420 | raise | `emplaced`, immediate | ready again, still 1/5 |
+| 0 | raise | `emplaced` at **t0+20** after a restart (20 s hold; measured 2026-10-08) | *drafted, not built:* launcher ready, 5/5 on hand |
+| 120 / 180 / 240 | fires 2, 1, 1 | `emplaced` | *drafted, not built:* remaining 1/5 (expended 4), DEGRADED |
+| 300 | stow | `march_ordered` at **t0+300**, immediate (measured 2026-10-08) | *drafted, not built:* unchanged; the launcher is packing up |
+| 330 | move | `moving` at **t0+340** (10 s hold; measured 2026-10-08) | *drafted, not built:* unchanged; the asset is in transit |
+| 390 | stop | `emplacing` at **t0+410** (20 s hold; measured 2026-10-07) | *drafted, not built:* unchanged |
+| 420 | raise | `emplaced` at **t0+420**, immediate (measured 2026-10-07) | *drafted, not built:* ready again, still 1/5 |
 
-Note on the first row: a sim restart briefly runs two sim pods for the same
-entity (the old one keeps sending "moving" for its 30 s shutdown grace), so the
-first `emplaced` comes ~20 s later than the 20 s hold alone. Only the first
-transition after a restart is affected; the later holds were exact.
+The logistics-picture column is the intended picture, not a screen that
+exists. Do not narrate it on camera until a dry run shows it.
+
+From the rollout completing, add the 11-13 s: `march_ordered` at about +311 s
+and `moving` at about +351 s (measured 2026-10-08). If the launcher is
+restarted again during the move, `emplaced` follows at t0+20 of the new clock,
+which is about +33 s from that rollout.
 
 **The cut, tied to the move:**
 
