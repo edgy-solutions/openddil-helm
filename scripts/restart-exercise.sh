@@ -19,10 +19,13 @@
 #      POLL_TIMEOUT_S, default 180) until exercise-control reports that same
 #      measured_zero_at -- the mounted ConfigMap lags by the kubelet sync.
 #      Timeout -> exit 3. The port-forward is killed on every exit path.
-#   4. POST /exercise/op/restart. 200 -> exit 0; 409 -> exit 4; else exit 5.
+#   4. POST /exercise/op/restart. 409 -> exit 4; other non-200 -> exit 5. On
+#      200 control only says it forwarded the op: the adapter's own answer is
+#      the body's "status". 2xx -> exit 0; anything else -> exit 6.
 #
 # EXIT CODES  0 sent | 3 control never saw the zero | 4 refused (409) |
-#             5 unexpected answer | reset's own code when the reset failed |
+#             5 unexpected answer | 6 control forwarded it, adapter did not
+#             accept (non-2xx or no status) | reset's own code when the reset failed |
 #             1 usage or environment error
 #
 # WHO THIS TALKS TO. exercise-control directly, through a port-forward. That
@@ -132,7 +135,11 @@ code="$(curl -s -m 30 -o "$TMPD/resp.json" -w '%{http_code}' -X POST \
 echo "POST /exercise/op/restart -> HTTP $code"
 cat "$TMPD/resp.json" 2>/dev/null; echo
 case "$code" in
-  200) echo "RESTART SENT"; exit 0 ;;
+  200) astatus="$(json_get status <"$TMPD/resp.json")"
+       case "$astatus" in
+         2[0-9][0-9]) echo "RESTART SENT (adapter $astatus)"; exit 0 ;;
+         *) echo "RESTART NOT ACCEPTED: adapter status ${astatus:-none} error $(json_get error <"$TMPD/resp.json")"; exit 6 ;;
+       esac ;;
   409) echo "RESTART REFUSED: $(json_get reason <"$TMPD/resp.json")"; exit 4 ;;
   *)   echo "RESTART FAILED: unexpected HTTP $code"; exit 5 ;;
 esac

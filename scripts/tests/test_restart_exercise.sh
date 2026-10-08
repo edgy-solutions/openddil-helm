@@ -12,6 +12,7 @@
 #   T1  reset exits 2          -> "RESTART NOT SENT", exit 2, no request at all
 #   T2  reset 0, status shows the zero -> exactly one POST /exercise/op/restart
 #   T3  control answers 409    -> exit 4, "RESTART REFUSED: <reason>"
+#   T6  control 200 but body status 503 -> exit 6, "RESTART NOT ACCEPTED"
 #   T4  the zero never appears -> exit 3, no POST
 #   T5  the port-forward process is gone after every case above
 #   K   RESET_HALT_BEFORE_PHASE=2 (SOURCE_ONLY seam) -> exit 2, the phase-2
@@ -42,6 +43,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 LOG = os.environ["STUB_REQ_LOG"]
 SEES = os.environ.get("STUB_SEES_ZERO", "")
 CODE = int(os.environ.get("STUB_RESTART_CODE", "200"))
+ASTATUS = int(os.environ.get("STUB_ADAPTER_STATUS", "200"))
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _out(self, code, obj):
@@ -58,7 +60,8 @@ class H(BaseHTTPRequestHandler):
         if CODE == 409:
             self._out(409, {"error": "reset required", "reason": "stale"})
         else:
-            self._out(CODE, {"op": "restart", "status": 200})
+            self._out(CODE, {"op": "restart", "status": ASTATUS,
+                             "error": None if 200 <= ASTATUS < 300 else "adapter refused"})
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
 
@@ -115,6 +118,12 @@ STUB_RESET_RC=0 STUB_SEES_ZERO="$ZERO" STUB_RESTART_CODE=409 run_case t3
 if [ "$RC" = 4 ] && [ "$(posts)" = 1 ] && grep -q "RESTART REFUSED: stale" "$TMP/t3.out"; then
   pass "T3 409 -> exit 4"; else fail "T3 (rc=$RC)"; cat "$TMP/t3.out"; fi
 pf_gone && pass "T5 port-forward gone after T3" || fail "T5 after T3"
+
+# T6
+STUB_RESET_RC=0 STUB_SEES_ZERO="$ZERO" STUB_RESTART_CODE=200 STUB_ADAPTER_STATUS=503 run_case t6
+if [ "$RC" = 6 ] && [ "$(posts)" = 1 ] && ! grep -q "RESTART SENT" "$TMP/t6.out"    && grep -q "RESTART NOT ACCEPTED: adapter status 503 error adapter refused" "$TMP/t6.out"; then
+  pass "T6 control 200, adapter 503 -> exit 6, not sent"; else fail "T6 (rc=$RC)"; cat "$TMP/t6.out"; fi
+pf_gone && pass "T5 port-forward gone after T6" || fail "T5 after T6"
 
 # T4
 STUB_RESET_RC=0 STUB_SEES_ZERO="2026-01-01T00:00:00Z" POLL_TIMEOUT_S=3 run_case t4
