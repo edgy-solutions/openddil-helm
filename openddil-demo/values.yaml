@@ -1017,6 +1017,11 @@ egress:
     enabled: false
     config: []
     tokenSecret: ""
+    # extraEnv: a list of {name, value} entries appended, in order, to the
+    # forwarder container's env -- for example OPENDDIL_FORWARD_RETRY_MAX_S,
+    # OPENDDIL_FORWARD_MAX_POLL_INTERVAL_MS, OPENDDIL_FORWARD_SESSION_TIMEOUT_MS.
+    # Empty = the forwarder's own defaults.
+    extraEnv: []
   # A destination's OAuth2 client_credentials secret (client_credentials.py,
   # forwarder.py's/intake.py's `auth`): `existingSecret` names a Kubernetes
   # Secret created OUT OF BAND -- the chart never creates, renders or reads
