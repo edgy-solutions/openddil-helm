@@ -5,6 +5,9 @@
 #
 # USAGE
 #   restart-exercise.sh --release R --namespace N [reset-scenario.sh args...]
+#   in-cluster (the chart's reset Job):
+#     EXERCISE_CONTROL_URL=http://<svc>:<port> [RESTART_SUBJECT=<subject>] \
+#       restart-exercise.sh --release R --namespace N [reset-scenario.sh args...]
 #
 # A restart is only ever sent after a reset that measured zero. This script
 # runs the reset first and sends the restart only if that reset exited 0:
@@ -14,7 +17,9 @@
 #      "RESTART NOT SENT" and that exit code; nothing else is called.
 #   2. The measured_zero_at it recorded is read from the ConfigMap
 #      <R>-exercise-reset-record (key record.json).
-#   3. A kubectl port-forward to svc/<R>-exercise-control is opened, and
+#   3. A kubectl port-forward to svc/<R>-exercise-control is opened (unless
+#      EXERCISE_CONTROL_URL is set: then there is no service lookup and no
+#      port-forward, and that URL is used as is), and
 #      GET /exercise/status is polled (every POLL_INTERVAL_S, default 5, up to
 #      POLL_TIMEOUT_S, default 180) until exercise-control reports that same
 #      measured_zero_at -- the mounted ConfigMap lags by the kubelet sync.
@@ -33,6 +38,12 @@
 # subject is recorded as "operator-script". The gate in exercise-control (a
 # restart needs a fresh measured zero that no earlier restart has used)
 # applies all the same -- it lives in the service, not in this script.
+#
+# In-cluster it is run by the chart's reset Job, launched by exercise-control's
+# reset op. It POSTs to the control Service directly (the chart's NetworkPolicy
+# admits the Job's pods), with RESTART_SUBJECT as the subject (allowed
+# characters A-Za-z0-9._@:- , up to 96). Control's restart gate applies as
+# always. The Job has backoffLimit 0, so a halted reset is never retried.
 # ===========================================================================
 set -u
 
@@ -40,7 +51,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESET_SCRIPT="${RESET_SCRIPT:-$HERE/reset-scenario.sh}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-5}"
 POLL_TIMEOUT_S="${POLL_TIMEOUT_S:-180}"
-SUBJECT="operator-script"
+SUBJECT="${RESTART_SUBJECT:-operator-script}"
 
 REL=""; NSP=""; PASS=()
 while [ $# -gt 0 ]; do
@@ -52,6 +63,11 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$REL" ] || [ -z "$NSP" ]; then
   echo "usage: restart-exercise.sh --release R --namespace N [reset-scenario.sh args...]" >&2
+  exit 1
+fi
+
+if ! printf '%s' "$SUBJECT" | grep -Eq '^[A-Za-z0-9._@:-]{1,96}$'; then
+  echo "usage: RESTART_SUBJECT must match [A-Za-z0-9._@:-]{1,96}" >&2
   exit 1
 fi
 
@@ -102,18 +118,24 @@ if [ -z "$ZERO" ]; then
   echo "RESTART NOT SENT: no measured_zero_at in ConfigMap ${REL}-exercise-reset-record"
   exit 3
 fi
-SVC_PORT="$(kubectl get svc "${REL}-exercise-control" -n "$NSP" \
-              -o jsonpath='{.spec.ports[0].port}' 2>/dev/null | tr -d '\r')"
-[ -n "$SVC_PORT" ] || { echo "restart-exercise: cannot read the ${REL}-exercise-control service port" >&2; exit 1; }
+if [ -z "${EXERCISE_CONTROL_URL:-}" ]; then
+  SVC_PORT="$(kubectl get svc "${REL}-exercise-control" -n "$NSP" \
+                -o jsonpath='{.spec.ports[0].port}' 2>/dev/null | tr -d '\r')"
+  [ -n "$SVC_PORT" ] || { echo "restart-exercise: cannot read the ${REL}-exercise-control service port" >&2; exit 1; }
+fi
 
 # --- 3. port-forward, then wait until control sees that zero ----------------
-LOCAL_PORT="$("$PY" -c '
+if [ -n "${EXERCISE_CONTROL_URL:-}" ]; then
+  BASE="${EXERCISE_CONTROL_URL%/}"
+else
+  LOCAL_PORT="$("$PY" -c '
 import socket
 s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()' | tr -d '\r')"
-kubectl port-forward -n "$NSP" "svc/${REL}-exercise-control" "${LOCAL_PORT}:${SVC_PORT}" \
-  >"$TMPD/pf.log" 2>&1 &
-PF_PID=$!
-BASE="http://127.0.0.1:${LOCAL_PORT}"
+  kubectl port-forward -n "$NSP" "svc/${REL}-exercise-control" "${LOCAL_PORT}:${SVC_PORT}" \
+    >"$TMPD/pf.log" 2>&1 &
+  PF_PID=$!
+  BASE="http://127.0.0.1:${LOCAL_PORT}"
+fi
 
 waited=0
 seen=""

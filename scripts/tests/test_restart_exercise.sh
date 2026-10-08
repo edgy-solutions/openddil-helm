@@ -15,6 +15,9 @@
 #   T6  control 200 but body status 503 -> exit 6, "RESTART NOT ACCEPTED"
 #   T4  the zero never appears -> exit 3, no POST
 #   T5  the port-forward process is gone after every case above
+#   T7  EXERCISE_CONTROL_URL set -> no port-forward, no svc lookup, exactly one
+#       POST, subject taken from RESTART_SUBJECT
+#   T8  a bad RESTART_SUBJECT -> exit 1 and the reset is not run
 #   K   RESET_HALT_BEFORE_PHASE=2 (SOURCE_ONLY seam) -> exit 2, the phase-2
 #       marker is never printed; unset -> the marker is printed (no-op)
 # ===========================================================================
@@ -67,6 +70,7 @@ PYEOF
 
 cat > "$TMP/bin/kubectl" <<KEOF
 #!/usr/bin/env bash
+echo "\$*" >> "$TMP/kubectl.log"
 case "\$1" in
   get)
     case "\$*" in
@@ -130,6 +134,27 @@ STUB_RESET_RC=0 STUB_SEES_ZERO="2026-01-01T00:00:00Z" POLL_TIMEOUT_S=3 run_case 
 if [ "$RC" = 3 ] && [ "$(posts)" = 0 ] && grep -q "RESTART NOT SENT: exercise-control does not yet see the zero at $ZERO" "$TMP/t4.out"; then
   pass "T4 zero never appears -> exit 3, no POST"; else fail "T4 (rc=$RC)"; cat "$TMP/t4.out"; fi
 pf_gone && pass "T5 port-forward gone after T4" || fail "T5 after T4"
+
+# T7: in-cluster mode. The stub server is started by hand; kubectl must not be
+# asked for the service port or for a port-forward.
+IPORT="$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])' | tr -d '')"
+rm -f "$TMP/req.log" "$TMP/kubectl.log"; : > "$TMP/req.log"; : > "$TMP/kubectl.log"
+STUB_REQ_LOG="$TMP/req.log" STUB_SEES_ZERO="$ZERO" "$PY" "$TMP/srv.py" "$IPORT" &
+SRV_PID=$!
+sleep 1
+PATH="$TMP/bin:$PATH" RESET_SCRIPT="$TMP/reset-stub.sh" POLL_INTERVAL_S=1 POLL_TIMEOUT_S=6   EXERCISE_CONTROL_URL="http://127.0.0.1:$IPORT/" RESTART_SUBJECT="reset-job:alice@example"   bash "$WRAPPER" --release rel --namespace ns --dry-run > "$TMP/t7.out" 2>&1
+RC=$?
+kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
+if [ "$RC" = 0 ] && [ "$(posts)" = 1 ]    && grep -q "POST /exercise/op/restart subject=reset-job:alice@example" "$TMP/req.log"    && ! grep -q "port-forward" "$TMP/kubectl.log" && ! grep -q "svc" "$TMP/kubectl.log"; then
+  pass "T7 control URL: no port-forward, no svc lookup, one POST, subject from env"
+else fail "T7 (rc=$RC)"; cat "$TMP/t7.out" "$TMP/kubectl.log"; fi
+
+# T8: a bad subject stops before the reset
+rm -f "$TMP/req.log"; : > "$TMP/req.log"
+PATH="$TMP/bin:$PATH" RESET_SCRIPT="$TMP/reset-stub.sh" RESTART_SUBJECT='bad subject;x'   bash "$WRAPPER" --release rel --namespace ns --dry-run > "$TMP/t8.out" 2>&1
+RC=$?
+if [ "$RC" = 1 ] && ! grep -q "stub reset ran" "$TMP/t8.out" && grep -q "RESTART_SUBJECT" "$TMP/t8.out"; then
+  pass "T8 bad RESTART_SUBJECT -> exit 1, reset not run"; else fail "T8 (rc=$RC)"; cat "$TMP/t8.out"; fi
 
 # K: the fault-injection knob, via the SOURCE_ONLY seam
 knob() {  # $1 = RESET_HALT_BEFORE_PHASE value ("" = unset)

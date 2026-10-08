@@ -1381,6 +1381,116 @@ g14_fail_check "bad operations key" 'operations entry "launch"' \
   --set exerciseControl.adapter.operations.launch.method=POST \
   --set exerciseControl.adapter.operations.launch.path=/launch
 
+# 14d-14g: the reset Job (exerciseControl.resetJob). One checker, four modes.
+# 14d is the absence side only: with resetJob off nothing reset-related may
+# render. That the control Deployment and NetworkPolicy are byte-identical to
+# the previous chart is proven by diffing two renders in the acceptance run,
+# not here.
+g14_reset_check() {  # $1 = mode (off|on|halt|declare); the rest are helm args
+  local mode="$1"; shift
+  render --namespace ns9 --set releasability.enabled=true \
+         --set exerciseControl.enabled=true \
+         --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+         --set exerciseControl.adapter.operations.pause.method=POST \
+         --set exerciseControl.adapter.operations.pause.path=/pause "$@" \
+    | G14_MODE="$mode" "$PY" -c '
+import json, os, sys, yaml
+mode = os.environ["G14_MODE"]
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+by = {(d.get("kind"), (d.get("metadata") or {}).get("name")): d for d in docs}
+fail = False
+def bad(msg):
+    global fail
+    print("  FAIL [14" + {"off": "d", "on": "e", "halt": "f", "declare": "g"}[mode] + "]: " + msg)
+    fail = True
+ctl = by.get(("Deployment", "t-exercise-control")) or {}
+pod = ((ctl.get("spec") or {}).get("template") or {}).get("spec") or {}
+cenv = {e["name"]: e.get("value") for c in pod.get("containers") or [] for e in c.get("env") or []}
+if mode == "off":
+    for k, n in by:
+        if "exercise-reset" in n and n != "t-exercise-reset-record":
+            bad("resetJob off but an object renders: " + str(k) + "/" + n)
+    if "serviceAccountName" in pod:
+        bad("resetJob off but the control Deployment has a serviceAccountName")
+    if "EXERCISE_RESET_JOB_FILE" in cenv:
+        bad("resetJob off but the control Deployment carries EXERCISE_RESET_JOB_FILE")
+    if not fail:
+        print("  ok   [14d]: resetJob off: no reset object, no serviceAccountName on control")
+    sys.exit(1 if fail else 0)
+
+job = None
+cm = by.get(("ConfigMap", "t-exercise-reset-job"))
+if cm:
+    job = json.loads(cm["data"]["job.json"])
+if mode == "on":
+    for k, n in [("ServiceAccount", "t-exercise-reset"), ("Role", "t-exercise-reset"),
+                 ("RoleBinding", "t-exercise-reset"), ("ServiceAccount", "t-exercise-control"),
+                 ("Role", "t-exercise-control"), ("RoleBinding", "t-exercise-control"),
+                 ("ConfigMap", "t-exercise-reset-job")]:
+        if (k, n) not in by:
+            bad("missing " + k + "/" + n)
+    if job is None:
+        bad("no job.json")
+        sys.exit(1)
+    if job.get("kind") != "Job":
+        bad("job.json kind is " + str(job.get("kind")))
+    spec = job["spec"]
+    if spec.get("backoffLimit") != 0:
+        bad("backoffLimit is " + str(spec.get("backoffLimit")))
+    if spec["template"]["spec"].get("restartPolicy") != "Never":
+        bad("restartPolicy is not Never")
+    labels = job["metadata"]["labels"]
+    if labels.get("app.kubernetes.io/component") != "exercise-reset" or labels.get("app.kubernetes.io/instance") != "t":
+        bad("job labels lack component exercise-reset / instance t")
+    c0 = spec["template"]["spec"]["containers"][0]
+    if c0["command"][:2] != ["bash", "/opt/openddil/scripts/restart-exercise.sh"]:
+        bad("command does not start with bash restart-exercise.sh: " + str(c0["command"][:2]))
+    jenv = {e["name"]: e.get("value") for e in c0["env"]}
+    if jenv.get("OPENDDIL_EXPECT_CONTEXT") != "in-cluster:ns9":
+        bad("OPENDDIL_EXPECT_CONTEXT is " + str(jenv.get("OPENDDIL_EXPECT_CONTEXT")))
+    if "RESTART_SUBJECT" not in jenv:
+        bad("no RESTART_SUBJECT env")
+    if "RESET_HALT_BEFORE_PHASE" in jenv:
+        bad("RESET_HALT_BEFORE_PHASE is set by default")
+    if cenv.get("EXERCISE_RESET_JOB_FILE") != "/etc/exercise-reset-job/job.json":
+        bad("control lacks EXERCISE_RESET_JOB_FILE")
+    mounts = [m.get("mountPath") for c in pod.get("containers") or [] for m in c.get("volumeMounts") or []]
+    if "/etc/exercise-reset-job" not in mounts:
+        bad("control lacks the reset-job mount")
+    if pod.get("serviceAccountName") != "t-exercise-control":
+        bad("control serviceAccountName is " + str(pod.get("serviceAccountName")))
+    np = by.get(("NetworkPolicy", "t-exercise-control-only")) or {}
+    froms = [p.get("podSelector", {}).get("matchLabels", {}).get("app.kubernetes.io/component")
+             for r in (np.get("spec") or {}).get("ingress") or [] for p in r.get("from") or []]
+    if "exercise-reset" not in froms:
+        bad("NetworkPolicy has no exercise-reset ingress")
+    if not fail:
+        print("  ok   [14e]: resetJob on: 6 RBAC objects + ConfigMap; job.json is a Job (backoffLimit 0, Never, in-cluster:ns9); control env/mount/SA; NetworkPolicy admits the Job")
+    sys.exit(1 if fail else 0)
+if job is None:
+    bad("no job.json")
+    sys.exit(1)
+c0 = job["spec"]["template"]["spec"]["containers"][0]
+jenv = {e["name"]: e.get("value") for e in c0["env"]}
+if mode == "halt":
+    if jenv.get("RESET_HALT_BEFORE_PHASE") != "2":
+        bad("RESET_HALT_BEFORE_PHASE is " + str(jenv.get("RESET_HALT_BEFORE_PHASE")))
+    else:
+        print("  ok   [14f]: haltBeforePhase=2 -> RESET_HALT_BEFORE_PHASE=\"2\"")
+else:
+    cmd = c0["command"]
+    if "--declare-unmeasured" not in cmd or cmd[cmd.index("--declare-unmeasured") + 1] != "a":
+        bad("command lacks --declare-unmeasured a: " + str(cmd))
+    else:
+        print("  ok   [14g]: declareUnmeasured=[a] -> --declare-unmeasured a")
+sys.exit(1 if fail else 0)
+' || fail=1
+}
+g14_reset_check off
+g14_reset_check on --set exerciseControl.resetJob.enabled=true
+g14_reset_check halt --set exerciseControl.resetJob.enabled=true --set-string exerciseControl.resetJob.haltBeforePhase=2
+g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}'
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

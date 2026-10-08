@@ -28,6 +28,54 @@ adapter block with no consequence.
 {{- end }}
 {{- end }}
 {{- /*
+RESET JOB (exerciseControl.resetJob.enabled). The Job template the control
+service's reset op instantiates, built once here so the ConfigMap and the
+Deployment's checksum annotation are over the same bytes. Nothing in this
+block renders while resetJob is off.
+*/}}
+{{- $rj := $root.Values.exerciseControl.resetJob | default dict }}
+{{- $rjOn := $rj.enabled | default false }}
+{{- $job := dict }}
+{{- if $rjOn }}
+{{- $cmd := list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
+{{- range $rj.declareUnmeasured | default list }}
+{{- $cmd = concat $cmd (list "--declare-unmeasured" (toString .)) }}
+{{- end }}
+{{- $cmd = concat $cmd ($rj.extraArgs | default list) }}
+{{- $env := list
+      (dict "name" "OPENDDIL_EXPECT_CONTEXT" "value" (printf "in-cluster:%s" $root.Release.Namespace))
+      (dict "name" "EXERCISE_CONTROL_URL" "value" (printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port))
+      (dict "name" "RESTART_SUBJECT" "value" "")
+      (dict "name" "POLL_TIMEOUT_S" "value" (toString $rj.pollTimeoutSeconds)) }}
+{{- if $rj.haltBeforePhase }}
+{{- $env = append $env (dict "name" "RESET_HALT_BEFORE_PHASE" "value" (toString $rj.haltBeforePhase)) }}
+{{- end }}
+{{- $jobLabels := merge (include "openddil.labels" $root | fromYaml) (include "openddil.selectorLabels" (dict "component" "exercise-reset" "root" $root) | fromYaml) }}
+{{- $podSpec := dict
+      "restartPolicy" "Never"
+      "serviceAccountName" (printf "%s-exercise-reset" $root.Release.Name)
+      "containers" (list (dict
+        "name" "reset"
+        "image" (include "openddil.thirdPartyImage" (dict "repository" $rj.image.repository "tag" $rj.image.tag "digest" $rj.image.digest))
+        "imagePullPolicy" ($rj.image.pullPolicy | default "IfNotPresent")
+        "command" $cmd
+        "env" $env
+        "resources" ($rj.resources | default dict)
+        "securityContext" (dict "allowPrivilegeEscalation" false))) }}
+{{- with $root.Values.global.imagePullSecrets }}
+{{- $_ := set $podSpec "imagePullSecrets" . }}
+{{- end }}
+{{- $job = dict
+      "apiVersion" "batch/v1"
+      "kind" "Job"
+      "metadata" (dict "generateName" (printf "%s-exercise-reset-" $root.Release.Name) "labels" $jobLabels)
+      "spec" (dict
+        "backoffLimit" 0
+        "activeDeadlineSeconds" (int64 $rj.activeDeadlineSeconds)
+        "ttlSecondsAfterFinished" (int64 $rj.ttlSecondsAfterFinished)
+        "template" (dict "metadata" (dict "labels" $jobLabels) "spec" $podSpec)) }}
+{{- end }}
+{{- /*
 Rate sources: empty -> one URL per edges[] entry, against the edge's
 sensor-ingest Service. That Service has no port named "metrics"
 (templates/edge.yaml exposes "dis-udp" and "http"); the "http" port is the
@@ -85,7 +133,13 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 8 }}
       annotations:
         checksum/config: {{ toJson $adapter | sha256sum | quote }}
+        {{- if $rjOn }}
+        checksum/reset-job: {{ toJson $job | sha256sum | quote }}
+        {{- end }}
     spec:
+      {{- if $rjOn }}
+      serviceAccountName: {{ $root.Release.Name }}-exercise-control
+      {{- end }}
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -118,6 +172,10 @@ spec:
               value: {{ $root.Values.exerciseControl.restartMaxZeroAgeSeconds | quote }}
             - name: EXERCISE_RESET_RECORD_FILE
               value: /etc/exercise-reset/record.json
+            {{- if $rjOn }}
+            - name: EXERCISE_RESET_JOB_FILE
+              value: /etc/exercise-reset-job/job.json
+            {{- end }}
           ports:
             - containerPort: {{ $root.Values.exerciseControl.port }}
               name: http
@@ -141,6 +199,11 @@ spec:
             - name: reset-record
               mountPath: /etc/exercise-reset
               readOnly: true
+            {{- if $rjOn }}
+            - name: reset-job
+              mountPath: /etc/exercise-reset-job
+              readOnly: true
+            {{- end }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
@@ -154,6 +217,11 @@ spec:
           configMap:
             name: {{ $root.Release.Name }}-exercise-reset-record
             optional: true
+        {{- if $rjOn }}
+        - name: reset-job
+          configMap:
+            name: {{ $root.Release.Name }}-exercise-reset-job
+        {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -178,6 +246,15 @@ spec:
               {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 14 }}
       ports:
         - port: {{ $root.Values.exerciseControl.port }}
+    {{- if $rjOn }}
+    # The reset Job's restart POST.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "exercise-reset" "root" $root) | nindent 14 }}
+      ports:
+        - port: {{ $root.Values.exerciseControl.port }}
+    {{- end }}
   egress:
     # NO EXISTING NETWORKPOLICY IN THIS CHART HAS AN EGRESS SECTION -- every
     # other policy here is Ingress-only, restricting who may reach a
@@ -207,4 +284,121 @@ spec:
       ports:
         {{- toYaml .ports | nindent 8 }}
     {{- end }}
+    {{- if $rjOn }}
+    # The API server, for the control service creating reset Jobs.
+    {{- range $rj.apiServerEgress }}
+    - to:
+        {{- toYaml .to | nindent 8 }}
+      ports:
+        {{- toYaml .ports | nindent 8 }}
+    {{- end }}
+    {{- end }}
+{{- if $rjOn }}
+---
+# The reset runs as a Job the control service's reset op creates from the
+# template below. It is the same restart script an operator runs by hand, in
+# its in-cluster mode: the same guards, and a halted reset is never retried
+# (backoffLimit 0, restartPolicy Never). activeDeadlineSeconds bounds a hang;
+# ttlSecondsAfterFinished keeps the log readable afterwards.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-exercise-reset-job
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  job.json: {{ toJson $job | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $root.Release.Name }}-exercise-reset
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+---
+# The set the reset uses, all namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $root.Release.Name }}-exercise-reset
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Release.Name }}-exercise-reset
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $root.Release.Name }}-exercise-reset
+subjects:
+  - kind: ServiceAccount
+    name: {{ $root.Release.Name }}-exercise-reset
+    namespace: {{ $root.Release.Namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+---
+# Control only creates and reads the reset Jobs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Release.Name }}-exercise-control
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $root.Release.Name }}-exercise-control
+subjects:
+  - kind: ServiceAccount
+    name: {{ $root.Release.Name }}-exercise-control
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
 {{- end }}

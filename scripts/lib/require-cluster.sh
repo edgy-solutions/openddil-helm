@@ -60,6 +60,15 @@ openddil_require_cluster() {
     fi
 
     actual="$(kubectl config current-context 2>/dev/null)"
+    # Inside a pod there is no kubeconfig context, and the service account's
+    # namespace is the only cluster identity the pod has. The chart declares
+    # the expectation as in-cluster:<namespace>. No kubeconfig is synthesised,
+    # because that would fake a context; this branch fires only when the
+    # context is empty and the pod really is in a cluster.
+    local sa_ns="${OPENDDIL_SA_DIR:-/var/run/secrets/kubernetes.io/serviceaccount}/namespace"
+    if [ -z "$actual" ] && [ -f "$sa_ns" ] && [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+        actual="in-cluster:$(tr -d '[:space:]' < "$sa_ns")"
+    fi
     if [ -z "$actual" ]; then
         echo "REFUSING TO RUN: kubectl reports no current-context." >&2
         echo "  Expected '$expect'. An empty context is not a match for" >&2

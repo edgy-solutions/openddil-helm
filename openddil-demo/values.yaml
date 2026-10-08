@@ -1802,4 +1802,25 @@ exerciseControl:
   # list of {to: [...], ports: [...]}, same shape kubernetes NetworkPolicy
   # egress rules take.
   adapterEgress: []
+  # The reset as an in-cluster Job. Off by default. When on, the control
+  # service gains a "reset" op (not an adapter op: it never reaches the
+  # adapter) that creates a Job from a template this chart renders into a
+  # ConfigMap. The Job runs scripts/restart-exercise.sh from the reset-runner
+  # image in its in-cluster mode: the same cluster guard (the expected context
+  # is in-cluster:<release namespace>), the same halt semantics, and the
+  # restart still goes through control's own gate. The Job never retries
+  # (backoffLimit 0), so a halted reset stays halted and its log shows why;
+  # one reset runs at a time. The scripts are versioned with the image, so pin
+  # it by digest together with the chart.
+  resetJob:
+    enabled: false
+    image: {repository: ghcr.io/edgy-solutions/openddil/reset-runner, tag: latest, digest: "", pullPolicy: IfNotPresent}
+    declareUnmeasured: []      # each -> "--declare-unmeasured <name>"
+    extraArgs: []              # appended verbatim to the reset args
+    haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
+    activeDeadlineSeconds: 1800
+    ttlSecondsAfterFinished: 86400
+    pollTimeoutSeconds: 180    # -> POLL_TIMEOUT_S
+    resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+    apiServerEgress: []        # [{to: [...], ports: [...]}], same shape as adapterEgress; the API server endpoints
   resources: {}
