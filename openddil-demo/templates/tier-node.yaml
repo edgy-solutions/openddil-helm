@@ -1810,6 +1810,10 @@ data:
         paths:
           - /policy
         skip_verification: true
+        {{- if $root.Values.releasability.liveReload.enabled }}
+        # Re-reads /policy when policy-sync renames a data file into place.
+        watch: true
+        {{- end }}
 
   # EMPTY BUNDLE — a valid bundle root with no policy in it.
   #
@@ -1867,9 +1871,10 @@ spec:
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml "")))) | sha256sum | quote }}
-        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
-        checksum/ontology-deployment: {{ include "openddil.ontologyDeploymentChecksum" $root | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (ternary (list) (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml ""))) $root.Values.releasability.liveReload.enabled)) | sha256sum | quote }}
+        {{- if and $root.Values.releasability.deploymentLayer.usersYaml (not $root.Values.releasability.liveReload.enabled) }}
+        {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
+        checksum/ontology-deployment: {{ list $root.Values.releasability.deploymentLayer.releasabilityYaml $root.Values.releasability.deploymentLayer.usersYaml | toJson | sha256sum | quote }}
         {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -2015,6 +2020,76 @@ spec:
             {{- end }}
             - name: db
               mountPath: /db
+        {{- if and $root.Values.releasability.enabled $root.Values.releasability.liveReload.enabled }}
+        # POLICY-SYNC: keeps the deployment-layer users corpus and the
+        # destinations overlay live without a restart.
+        #
+        # WHY A SIDECAR: policy-loader's copy is a snapshot taken at pod start.
+        # The ConfigMaps are directory mounts, so kubelet updates their files in
+        # place, but the emptyDir copy Topaz serves never changes by itself.
+        #
+        # WHY RENAME-FROM-STAGING: the new file is written to /shared/staging,
+        # outside policy/, so Topaz never sees a temp file, then mv'd (a
+        # same-filesystem rename) over the data file, so Topaz never sees a
+        # half-written one. Topaz (opa.local_bundles.watch) reloads on the rename.
+        #
+        # LIMIT: Topaz watches only directories that existed when it started. A
+        # directory created later is not watched, which is why the overlay's FIRST
+        # entries (the mount appearing) still roll the pod.
+        #
+        # TO SEE A RELOAD: this container logs "policy-sync: <name> updated ...",
+        # then topaz logs WARN "Processed file watch event." with err.
+        - name: policy-sync
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
+          env:
+            - name: OPENDDIL_POLICY_VARIANT
+              value: {{ $root.Values.releasability.policyVariant | quote }}
+            - name: OPENDDIL_POLICY_SYNC_INTERVAL_S
+              value: {{ $root.Values.releasability.liveReload.intervalSeconds | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -u
+              mkdir -p /shared/staging
+              sync_one() {  # src dst name
+                src=$1; dst=$2; name=$3
+                [ -f "$src" ] || return 0
+                cmp -s "$src" "$dst" && return 0
+                mkdir -p "$(dirname "$dst")"
+                if cp "$src" "/shared/staging/$name.tmp" && mv -f "/shared/staging/$name.tmp" "$dst"; then
+                  echo "policy-sync: $name updated sha256=$(sha256sum "$dst" | cut -c1-12) version=$(grep -m1 -E '^version:' "$dst" | sed 's/^version:[[:space:]]*//')"
+                else
+                  echo "policy-sync: $name FAILED" >&2
+                fi
+              }
+              echo "policy-sync: every ${OPENDDIL_POLICY_SYNC_INTERVAL_S}s, variant ${OPENDDIL_POLICY_VARIANT}"
+              while true; do
+                sync_one /destinations-deployment/data.yaml /shared/policy/openddil/destinations_deployment/data.yaml destinations_deployment
+                {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+                if [ "$OPENDDIL_POLICY_VARIANT" = "users" ]; then
+                  sync_one /ontology-deployment/users.yaml /shared/policy/openddil/data.yaml users
+                fi
+                {{- end }}
+                sleep "$OPENDDIL_POLICY_SYNC_INTERVAL_S"
+              done
+          resources:
+            {{- toYaml $root.Values.releasability.liveReload.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
+            {{- if $root.Values.releasability.destinations.entries }}
+            - name: destinations-deployment
+              mountPath: /destinations-deployment
+              readOnly: true
+            {{- end }}
+            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            - name: ontology-deployment
+              mountPath: /ontology-deployment
+              readOnly: true
+            {{- end }}
+        {{- end }}
       volumes:
         - name: config
           configMap:

@@ -89,12 +89,15 @@ spec:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "egress-gate-c2" "root" .) | nindent 8 }}
       annotations:
-        # The gate resolves each route's destination from topaz-hq once, at
-        # startup, so a registry change must restart it too. Same inputs as
-        # topaz-hq's checksum/policy: both roll on exactly the same upgrades.
+        # With releasability.liveReload the gate re-asks topaz-hq every
+        # OPENDDIL_REGISTRY_REFRESH_S, so a registry change no longer restarts
+        # it and `extra` is empty (only the bundle digest rolls it). With
+        # liveReload off the gate resolves each route's destination once, at
+        # startup, so a registry change must restart it too: same inputs as
+        # topaz-hq's checksum/policy, so both roll on exactly the same upgrades.
         # Rolling together does not order them: a gate that starts before the
         # new topaz-hq serves still resolves against the old registry.
-        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list (toJson .Values.releasability.destinations))) | sha256sum | quote }}
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
         {{- if .Values.egress.routes }}
         checksum/routes: {{ $routesJSON | sha256sum | quote }}
         {{- end }}
@@ -122,6 +125,8 @@ spec:
               value: {{ .Values.egress.destination | quote }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ $topazUrl | quote }}
+            - name: OPENDDIL_REGISTRY_REFRESH_S
+              value: {{ ternary (.Values.releasability.liveReload.intervalSeconds | toString) "0" .Values.releasability.liveReload.enabled | quote }}
             {{- if .Values.egress.routes }}
             - name: OPENDDIL_EGRESS_ROUTES_PATH
               value: {{ printf "%s/routes.json" $routesMountPath | quote }}
@@ -448,10 +453,12 @@ spec:
         {{- if .Values.egress.kinds }}
         checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
         {{- end }}
-        # The intake resolves subjects through topaz too, so it must roll
-        # with the registries -- identical computation to the gate's
-        # checksum/registries above (egress-gate-c2), on purpose.
-        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list (toJson .Values.releasability.destinations))) | sha256sum | quote }}
+        # The intake resolves subjects through topaz too -- identical
+        # computation to the gate's checksum/registries above
+        # (egress-gate-c2), on purpose. With releasability.liveReload it
+        # re-asks on the interval, so a registry change no longer restarts it;
+        # with liveReload off it must roll with the registries.
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
         {{- if .Values.egress.trust.caConfigMap }}
         checksum/egress-trust: {{ .Values.egress.trust.caConfigMap | sha256sum | quote }}
         {{- end }}
@@ -517,6 +524,8 @@ spec:
               value: {{ $pgDsn | quote }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ $topazUrl | quote }}
+            - name: OPENDDIL_REGISTRY_REFRESH_S
+              value: {{ ternary (.Values.releasability.liveReload.intervalSeconds | toString) "0" .Values.releasability.liveReload.enabled | quote }}
             - name: LOG_LEVEL
               value: "INFO"
             {{- if .Values.egress.trust.caConfigMap }}

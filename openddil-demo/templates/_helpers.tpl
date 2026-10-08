@@ -252,9 +252,15 @@ Include in that pod's `volumes:` (nindent 8). Takes the chart root.
 {{- end -}}
 {{- end }}
 
-{{/* sha256 of both layer strings. Takes the chart root. */}}
+{{/*
+sha256 of the releasability layer string only. Takes the chart root. Its
+consumers (openddil.ontologyDeploymentAnnotation, on hub, edge, logistics-sim
+and tier pods) copy only releasability.yaml (bundleInit). users.yaml is
+consumed by topaz, which tracks it through checksum/policy (liveReload off) or
+the policy-sync sidecar (liveReload on).
+*/}}
 {{- define "openddil.ontologyDeploymentChecksum" -}}
-{{- list .Values.releasability.deploymentLayer.releasabilityYaml .Values.releasability.deploymentLayer.usersYaml | toJson | sha256sum -}}
+{{- list .Values.releasability.deploymentLayer.releasabilityYaml | toJson | sha256sum -}}
 {{- end }}
 
 {{/*

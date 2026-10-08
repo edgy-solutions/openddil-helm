@@ -1442,6 +1442,20 @@ picture:
 releasability:
   enabled: false
 
+  # Live reload of the deployment's data, without a pod restart. Reloads: the
+  # deployment-layer users corpus (deploymentLayer.usersYaml) and the
+  # destinations overlay (destinations.entries). Does NOT reload: the shipped
+  # bundle and the policy, which arrive with an image and roll the pod.
+  # A policy-sync sidecar copies changed ConfigMap files into Topaz's policy
+  # dir and Topaz watches it; the gate and intake re-ask Topaz on the interval.
+  # End-to-end bound: kubelet ConfigMap propagation (up to about a minute) +
+  # intervalSeconds (sync) + intervalSeconds (gate/intake re-ask).
+  # With enabled=false, behaviour is the previous one: those values roll the pods.
+  liveReload:
+    enabled: true
+    intervalSeconds: 10
+    resources: {requests: {cpu: 5m, memory: 8Mi}, limits: {cpu: 50m, memory: 32Mi}}
+
   # Close the direct route to Electric. Off by default because it breaks any
   # existing direct consumer, and breaking reads is not something a chart
   # should do unasked — but WITHOUT IT THE PEP IS A SUGGESTION: any pod in the
