@@ -206,11 +206,65 @@ subPath-mounts /shared/<dst> at the target absolute path.
       fi
       {{- end }}
       {{- end }}
+      {{- if and (include "openddil.ontologyDeploymentActive" .) (include "openddil.hasOntologyDst" .) }}
+      # DEPLOYMENT LAYER, LAST: the deployment's whole releasability.yaml
+      # replaces the bundle's copy (no merge). See
+      # releasability.deploymentLayer in values.yaml.
+      cp /ontology-deployment/releasability.yaml /shared/ontology/releasability.yaml
+      echo "ontology deployment layer: releasability.yaml ($(wc -c < /ontology-deployment/releasability.yaml | tr -d ' ') bytes)"
+      {{- end }}
   resources:
     {{- toYaml .root.Values.bundle.initResources | nindent 4 }}
   volumeMounts:
     - name: bundle-shared
       mountPath: /shared
+    {{- if and (include "openddil.ontologyDeploymentActive" .) (include "openddil.hasOntologyDst" .) }}
+    - name: ontology-deployment
+      mountPath: /ontology-deployment
+      readOnly: true
+    {{- end }}
+{{- end }}
+
+{{/*
+Deployment-side ontology layer (releasability.deploymentLayer). Accepts the
+bundleInit dict or the chart root. Renders "true" when releasabilityYaml is set.
+*/}}
+{{- define "openddil.ontologyDeploymentActive" -}}
+{{- $r := . -}}
+{{- if hasKey . "root" -}}{{- $r = .root -}}{{- end -}}
+{{- if $r.Values.releasability.deploymentLayer.releasabilityYaml -}}true{{- end -}}
+{{- end }}
+
+{{/* Takes the bundleInit dict; non-empty when some path entry has dst "ontology". */}}
+{{- define "openddil.hasOntologyDst" -}}
+{{- range .paths -}}{{- if eq .dst "ontology" -}}true{{- end -}}{{- end -}}
+{{- end }}
+
+{{/*
+The pod-level volume for a pod whose bundleInit produces `ontology`.
+Include in that pod's `volumes:` (nindent 8). Takes the chart root.
+*/}}
+{{- define "openddil.ontologyDeploymentVolume" -}}
+{{- if include "openddil.ontologyDeploymentActive" . -}}
+- name: ontology-deployment
+  configMap:
+    name: {{ .Release.Name }}-ontology-deployment
+{{- end -}}
+{{- end }}
+
+{{/* sha256 of both layer strings. Takes the chart root. */}}
+{{- define "openddil.ontologyDeploymentChecksum" -}}
+{{- list .Values.releasability.deploymentLayer.releasabilityYaml .Values.releasability.deploymentLayer.usersYaml | toJson | sha256sum -}}
+{{- end }}
+
+{{/*
+Pod-template annotation line for a pod that mounts the layer. Takes the
+chart root; renders nothing when the layer is unset.
+*/}}
+{{- define "openddil.ontologyDeploymentAnnotation" -}}
+{{- if include "openddil.ontologyDeploymentActive" . -}}
+checksum/ontology-deployment: {{ include "openddil.ontologyDeploymentChecksum" . | quote }}
+{{- end -}}
 {{- end }}
 
 {{/*

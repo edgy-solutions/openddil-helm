@@ -145,7 +145,10 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list (toJson $root.Values.releasability.destinations))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml "")))) | sha256sum | quote }}
+        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        checksum/ontology-deployment: {{ include "openddil.ontologyDeploymentChecksum" $root | quote }}
+        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -207,6 +210,19 @@ spec:
                 ls /bundle/demo/policy/*.yaml >&2
                 exit 1
               fi
+              {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml): a
+              # whole replacement for the shipped users.yaml, honored only for
+              # the "users" variant; any other variant keeps its shipped file.
+              # The missing-variant refusal above still ran against the shipped
+              # tree.
+              if [ "$OPENDDIL_POLICY_VARIANT" = "users" ] && [ -f /ontology-deployment/users.yaml ]; then
+                src=/ontology-deployment/users.yaml
+                echo "entitlements: users (deployment layer)"
+              else
+                echo "entitlements: ${OPENDDIL_POLICY_VARIANT} (shipped)"
+              fi
+              {{- end }}
               mkdir -p /shared/policy/openddil
               cp "$src" /shared/policy/openddil/data.yaml
               echo "entitlements corpus: ${OPENDDIL_POLICY_VARIANT}.yaml -> /policy/openddil/data.yaml"
@@ -241,6 +257,11 @@ spec:
             {{- if $root.Values.releasability.destinations.entries }}
             - name: destinations-deployment
               mountPath: /destinations-deployment
+              readOnly: true
+            {{- end }}
+            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            - name: ontology-deployment
+              mountPath: /ontology-deployment
               readOnly: true
             {{- end }}
       containers:
@@ -286,6 +307,11 @@ spec:
           configMap:
             name: {{ $root.Release.Name }}-destinations-deployment
             optional: true
+        {{- end }}
+        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        - name: ontology-deployment
+          configMap:
+            name: {{ $root.Release.Name }}-ontology-deployment
         {{- end }}
         - name: db
           emptyDir:

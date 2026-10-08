@@ -817,6 +817,9 @@ spec:
         # See checksum/effector-declared-load on projector-hq below for why
         # this hashes the rendered body in the pod template.
         checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" . | sha256sum }}
+        {{- with (include "openddil.ontologyDeploymentAnnotation" .) }}
+        {{ . }}
+        {{- end }}
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "logistics-fusion-service" "root" .) | nindent 8 }}
@@ -884,6 +887,9 @@ spec:
         - name: effector-declared-load
           configMap:
             name: {{ .Release.Name }}-effector-declared-load
+        {{- with (include "openddil.ontologyDeploymentVolume" .) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

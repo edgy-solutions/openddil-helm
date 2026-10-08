@@ -1320,6 +1320,9 @@ spec:
         # See checksum/effector-declared-load on projector-hq (hub.yaml)
         # for why this hashes the rendered body in the pod template.
         checksum/effector-declared-load: {{ include "openddil.effectorDeclaredLoadYaml" $root | sha256sum }}
+        {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+        {{ . }}
+        {{- end }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-fusion-%s" $tier.id) "root" $root) | nindent 8 }}
@@ -1400,6 +1403,9 @@ spec:
         - name: effector-declared-load
           configMap:
             name: {{ $root.Release.Name }}-tier-effector-declared-load-{{ $tier.id }}
+        {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -1861,7 +1867,10 @@ spec:
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list (toJson $root.Values.releasability.destinations))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml "")))) | sha256sum | quote }}
+        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        checksum/ontology-deployment: {{ include "openddil.ontologyDeploymentChecksum" $root | quote }}
+        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -1906,6 +1915,17 @@ spec:
                 ls /bundle/demo/policy/*.yaml >&2
                 exit 1
               fi
+              {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml): a
+              # whole replacement for the shipped users.yaml, honored only for
+              # the "users" variant; any other variant keeps its shipped file.
+              if [ "$OPENDDIL_POLICY_VARIANT" = "users" ] && [ -f /ontology-deployment/users.yaml ]; then
+                src=/ontology-deployment/users.yaml
+                echo "tier {{ $tier.id }} entitlements: users (deployment layer)"
+              else
+                echo "tier {{ $tier.id }} entitlements: ${OPENDDIL_POLICY_VARIANT} (shipped)"
+              fi
+              {{- end }}
               mkdir -p /shared/policy/openddil
               cp "$src" /shared/policy/openddil/data.yaml
               echo "tier {{ $tier.id }} corpus: ${OPENDDIL_POLICY_VARIANT}.yaml"
@@ -1940,6 +1960,11 @@ spec:
             {{- if $root.Values.releasability.destinations.entries }}
             - name: destinations-deployment
               mountPath: /destinations-deployment
+              readOnly: true
+            {{- end }}
+            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            - name: ontology-deployment
+              mountPath: /ontology-deployment
               readOnly: true
             {{- end }}
       {{- end }}
@@ -2003,6 +2028,11 @@ spec:
           configMap:
             name: {{ $root.Release.Name }}-destinations-deployment
             optional: true
+        {{- end }}
+        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        - name: ontology-deployment
+          configMap:
+            name: {{ $root.Release.Name }}-ontology-deployment
         {{- end }}
         {{- else }}
         - name: policy

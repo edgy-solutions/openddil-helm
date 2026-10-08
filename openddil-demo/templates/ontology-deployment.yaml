@@ -1,0 +1,24 @@
+{{- /*
+Deployment-side ontology layer (releasability.deploymentLayer). One ConfigMap
+carrying whole-file replacements, rendered only when at least one is set. It
+renders whether or not releasability.enabled is true: the ontology readers
+(Connect, fusion, the logistics sim) use the ontology either way.
+*/ -}}
+{{- $layer := .Values.releasability.deploymentLayer }}
+{{- if or $layer.releasabilityYaml $layer.usersYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-ontology-deployment
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+data:
+  {{- if $layer.releasabilityYaml }}
+  releasability.yaml: |
+    {{- $layer.releasabilityYaml | nindent 4 }}
+  {{- end }}
+  {{- if $layer.usersYaml }}
+  users.yaml: |
+    {{- $layer.usersYaml | nindent 4 }}
+  {{- end }}
+{{- end }}

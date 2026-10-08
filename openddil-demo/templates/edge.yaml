@@ -82,6 +82,10 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 6 }}
   template:
     metadata:
+      {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+      annotations:
+        {{ . }}
+      {{- end }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 8 }}
@@ -185,6 +189,9 @@ spec:
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 # Service exposing the UDP port. ClusterIP by default (in-namespace
 # producers + kubectl port-forward). Set sensorIngest.externalAccess.
@@ -253,6 +260,10 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 6 }}
   template:
     metadata:
+      {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+      annotations:
+        {{ . }}
+      {{- end }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" $edge.id) "root" $root) | nindent 8 }}
@@ -330,6 +341,9 @@ spec:
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 {{- /* faust-edge's own app id -- ONE expression, read by the consumer-
    groups annotation below, FAUST_APP_ID in env, and the changelog topics

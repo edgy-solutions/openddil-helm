@@ -1504,6 +1504,32 @@ releasability:
     version: ""
     entries: {}
 
+  # --- deployment ontology layer ----------------------------------------------
+  # A deployment that needs its own releasability declarations or its own
+  # entitlements corpus supplies WHOLE FILES here; the chart layers them LAST,
+  # over the bundle's copies, in every pod that reads them. Empty (the default)
+  # means the bundle's file, unchanged.
+  #
+  #   releasabilityYaml  the full ontology/releasability.yaml. It REPLACES the
+  #                      bundle's file in every pod that reads it; it is not a
+  #                      merge, so carry everything you still want from the
+  #                      shipped file. `default_originator_nation` lives
+  #                      INSIDE this file, so setting it means supplying the
+  #                      file. Applies whether or not releasability.enabled
+  #                      is true (Connect labels by it either way).
+  #   usersYaml          the full entitlements corpus topaz loads. It applies
+  #                      ONLY when policyVariant is "users"; a different
+  #                      variant (for example users-promoted) keeps its own
+  #                      shipped file and is NOT replaced. With
+  #                      releasability.enabled false there is no topaz, so
+  #                      it has no reader.
+  #
+  # A change to either string rolls every pod that reads it (checksum
+  # annotation; for topaz it is folded into checksum/policy as well).
+  deploymentLayer:
+    releasabilityYaml: ""
+    usersYaml: ""
+
   # --- authentication ---------------------------------------------------------
   # OFF by default, which leaves the PEP in `header` mode: the subject arrives
   # in a trusted header and the PEP is only safe where it is unreachable from

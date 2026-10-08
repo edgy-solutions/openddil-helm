@@ -81,6 +81,9 @@ spec:
         # Roll the pod when the config block changes -- the sim only reads
         # config at startup. Hash-on-checksum is the standard helm idiom.
         checksum/config: {{ toYaml $cfg.config | sha256sum }}
+        {{- with (include "openddil.ontologyDeploymentAnnotation" .) }}
+        {{ . }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -148,4 +151,7 @@ spec:
             name: {{ .Release.Name }}-logistics-sim-config
         - name: bundle-shared
           emptyDir: {}
+        {{- with (include "openddil.ontologyDeploymentVolume" .) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 {{- end }}
