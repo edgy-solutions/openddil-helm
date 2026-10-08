@@ -370,6 +370,13 @@ if [ -f "$EXPECTED_EMPTY" ]; then
   echo "                  (from $EXPECTED_EMPTY, in scope for: $THIS_STORE${TIER:+ $TIER}${TIER_KIND:+ [$TIER_KIND]})"
   [ -n "$DECLARED_SPARSE_NAMES" ] && \
     echo "  declared-sparse: $(printf '%s' "$DECLARED_SPARSE_NAMES" | tr '\n' ' ') (empty OK only while each one's own producer is alive)"
+  if printf '%s\n' "$DECLARED_SPARSE" | cut -f2 | grep -qx 'effector-launch'; then
+    if [ -n "${OPENDDIL_EFFECTOR_CONSUMER_RESULT+x}" ]; then
+      echo "  effector probe: caller-supplied file ${OPENDDIL_EFFECTOR_CONSUMER_RESULT} (not re-measured)"
+    else
+      echo "  effector probe: per store (this run measures its own group; OPENDDIL_EFFECTOR_CONSUMER_RESULT not set)"
+    fi
+  fi
 else
   echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
   echo "                  every empty labelled table will be reported as"
@@ -518,6 +525,19 @@ excused_region_rollup_rows() {
 # file; it used to come from one script for every entry, and now comes per
 # entry (ontology/expected-empty.yaml's `producer:` key).
 #
+# The effector-launch probe is run BY THE GATE, once per store, unless the
+# caller names a result file (OPENDDIL_EFFECTOR_CONSUMER_RESULT). One file
+# cannot name every store's consumer group, and the every-store run gates the
+# root and each tier in turn; right after a reset every store's
+# effector_launch is empty, so a single hand-run result would answer for one
+# store and leave the rest unmeasured. Each store therefore gets its own
+# file (openddil-effector-consumer-<store>.result), deleted before the probe
+# so a stale file can never answer for this run. The probe's exit code is not
+# the verdict: the file it writes, read back through the checks below, is.
+# A caller-supplied file is read as before, for every store, and is not
+# re-measured. OPENDDIL_EFFECTOR_PROBE and OPENDDIL_EFFECTOR_PROBE_WINDOW_S
+# override the probe script and its window (seconds, default 60).
+#
 #   empty AND producer completing      -> sparse   (green, with the reason)
 #   empty AND producer not completing  -> stopped  (a finding)
 #   empty AND no fresh measurement     -> unexplained (a finding)
@@ -536,7 +556,14 @@ DERIVE_RESULT="${OPENDDIL_DERIVE_RESULT:-${TMPDIR:-/tmp}/openddil-derive-stage.r
 # stayed green, so a verdict from that long ago says nothing about this run.
 DERIVE_MAX_AGE_S="${OPENDDIL_DERIVE_MAX_AGE_S:-1800}"
 
+if [ -n "${OPENDDIL_EFFECTOR_CONSUMER_RESULT+x}" ]; then
+  EFFECTOR_RESULT_CALLER_SET=1
+else
+  EFFECTOR_RESULT_CALLER_SET=0
+fi
 EFFECTOR_CONSUMER_RESULT="${OPENDDIL_EFFECTOR_CONSUMER_RESULT:-${TMPDIR:-/tmp}/openddil-effector-consumer.result}"
+EFFECTOR_PROBE="${OPENDDIL_EFFECTOR_PROBE:-$(cd "$(dirname "$0")" && pwd)/check-effector-consumer.sh}"
+EFFECTOR_PROBE_WINDOW_S="${OPENDDIL_EFFECTOR_PROBE_WINDOW_S:-60}"
 EFFECTOR_CONSUMER_MAX_AGE_S="${OPENDDIL_EFFECTOR_CONSUMER_MAX_AGE_S:-1800}"
 
 # The rpk consumer group check-effector-consumer.sh is expected to have
@@ -562,6 +589,27 @@ producer_state() {
       ;;
     effector-launch)
       result="$EFFECTOR_CONSUMER_RESULT"; max_age="$EFFECTOR_CONSUMER_MAX_AGE_S"
+      if [ "$EFFECTOR_RESULT_CALLER_SET" -eq 0 ]; then
+        # Measure THIS store now. stdout here is captured by the caller's
+        # $(...), so the probe's output goes to a log, never to stdout. The
+        # marker (this gate's pid) keeps the probe to once per gate process
+        # even though producer_state runs in a subshell.
+        local store file rc
+        store="${TIER:-root}"
+        file="${TMPDIR:-/tmp}/openddil-effector-consumer-${store}.result"
+        if [ "$(cat "$file.probed" 2>/dev/null)" != "$$" ]; then
+          rm -f "$file" "$file.probed"
+          rc=0
+          if [ -n "$TIER" ]; then
+            OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" --tier "$TIER" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
+          else
+            OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
+          fi
+          printf '%s' "$$" > "$file.probed"
+          echo "  effector probe ($store): exit $rc, log $file.log" >&2
+        fi
+        result="$file"
+      fi
       ok_verdict="ALIVE"; bad_verdict="NOT_ALIVE"
       ;;
     *)

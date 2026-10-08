@@ -20,6 +20,7 @@ bash scripts/check-advancing.sh openddil 30 && bash scripts/check-derive-stage.s
   && bash scripts/check-releasability-completeness.sh -n openddil && echo "PRE-FLIGHT 5/5"
 ```
 Pass: `PRE-FLIGHT 5/5`. Each check exits non-zero on a miss, so the chain stops at the first one.
+The gate measures each store's effector-launch consumer itself (about a minute per store whose effector_launch is empty, so the chain can take ~5 minutes right after a reset); do not set OPENDDIL_EFFECTOR_CONSUMER_RESULT here, a caller-set file is read for every store and cannot name each store's group.
 
 **2. Four logins** (the scripted round trip; then sign in the four browser profiles, BEAT 1):
 ```
@@ -122,7 +123,7 @@ bash scripts/check-advancing.sh openddil 30      # must exit 0, nine stages
 bash scripts/check-derive-stage.sh 60            # must say COMPLETING
 python scripts/check_tier_feed.py openddil       # must exit 0
 bash scripts/check-shape-sizes.sh openddil       # read path: shapes under ceiling
-bash scripts/check-releasability-completeness.sh -n openddil   # every store by default
+bash scripts/check-releasability-completeness.sh -n openddil   # every store; probes each store's effector consumer itself
 ```
 
 **If `check-advancing` reports any stage FROZEN, do not record.** That is the
@@ -145,6 +146,12 @@ publishes the verdict the gate reads to decide whether an empty
 `tactical_events` is *sparse* (the fleet is quiet) or *stopped* (the producer
 died). A verdict older than 30 minutes is refused, so the order in that block
 is load-bearing rather than tidy.
+
+**The effector-launch producer is different.** The gate runs
+`check-effector-consumer.sh` itself for each store, against that store's own
+consumer group, so nothing needs to run before it for that table. Right after
+a reset every `effector_launch` is empty, and measuring each store's own
+consumer is what lets the gate pass then.
 
 **And if `check-shape-sizes` fails, do not record.** Every check above this
 line measures the WRITE path. On 2026-09-18 all of them were green while

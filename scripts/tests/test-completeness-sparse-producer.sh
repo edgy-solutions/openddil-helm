@@ -254,6 +254,97 @@ out_i="$(run_gate)"; rc_i=$?
 expect_line "(i) effector_launch UNMEASURED (no group line)" "$out_i"   "effector_launch" "PRODUCER UNMEASURED (effector-launch)"
 [ "$rc_i" -eq 1 ] && pass "(i) gate exit 1" || fail "(i) expected gate exit 1, got $rc_i"
 
+# ===========================================================================
+# Cases (j)-(p): OPENDDIL_EFFECTOR_CONSUMER_RESULT UNSET -- the gate probes
+# each store itself, through a fake probe script that records its argv.
+# ===========================================================================
+PROBE_DIR="$(mktemp -d)"
+PROBE_ARGS="$PROBE_DIR/args"
+cat > "$PROBE_DIR/fake-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+echo "$*" >> "$PROBE_ARGS_FILE"
+echo "FAKE-PROBE-STDOUT"
+group="projector-effector-launch"
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--tier" ] && group="tier-projector-effector-launch-$a"
+  prev="$a"
+done
+ns="openddil"; prev=""
+for a in "$@"; do [ "$prev" = "-n" ] && ns="$a"; prev="$a"; done
+case "${FAKE_PROBE_MODE:-}" in
+  alive|wronggroup)
+    [ "$FAKE_PROBE_MODE" = wronggroup ] && group="tier-projector-effector-launch-elsewhere"
+    {
+      printf 'epoch=%s\nverdict=ALIVE\nwindow_s=1\n' "$(date -u +%s)"
+      printf 'group=%s\nmembers=1\nlag=0\nhwm=0\nnamespace=%s\n' "$group" "$ns"
+    } > "$OPENDDIL_EFFECTOR_CONSUMER_RESULT"
+    exit 0 ;;
+  exit3) exit 3 ;;
+esac
+exit 3
+PROBE
+chmod +x "$PROBE_DIR/fake-probe.sh"
+trap 'rm -rf "$STUBDIR" "$RESULTS_DIR" "$PROBE_DIR"' EXIT
+
+write_derive COMPLETING openddil "$now"
+# run_probing MODE [gate args...] -- consumer-result env UNSET, TMPDIR = probe dir.
+run_probing() {
+  local mode="$1"; shift
+  [ "$#" -gt 0 ] || set -- --root-only
+  : > "$PROBE_ARGS"
+  env -u OPENDDIL_EFFECTOR_CONSUMER_RESULT TMPDIR="$PROBE_DIR" \
+    OPENDDIL_EFFECTOR_PROBE="$PROBE_DIR/fake-probe.sh" \
+    OPENDDIL_EFFECTOR_PROBE_WINDOW_S=1 PROBE_ARGS_FILE="$PROBE_ARGS" \
+    FAKE_PROBE_MODE="$mode" bash "$GATE" -n openddil "$@" 2>"$PROBE_DIR/stderr"
+}
+
+# (j) + (p)
+out_j="$(run_probing alive)"; rc_j=$?
+expect_line "(j) probe alive: SPARSE" "$out_j" "effector_launch" "SPARSE, producer effector-launch alive"
+[ "$rc_j" -eq 0 ] && pass "(j) gate exit 0" || fail "(j) expected gate exit 0, got $rc_j"
+if grep -qF -- "-n openddil" "$PROBE_ARGS" && ! grep -qF -- "--tier" "$PROBE_ARGS"; then
+  pass "(j) probe args: -n openddil, no --tier"
+else fail "(j) probe args wrong: $(cat "$PROBE_ARGS")"; fi
+expect_line "(j) header says per store" "$out_j" "effector probe: per store"
+grep -qF "effector probe (root): exit 0" "$PROBE_DIR/stderr" \
+  && pass "(j) stderr names the probe run" || fail "(j) stderr line missing"
+[ "$(grep -c . "$PROBE_ARGS")" -eq 1 ] && pass "(j) probe ran once" || fail "(j) probe ran $(grep -c . "$PROBE_ARGS") times"
+# (p)
+printf '%s\n' "$out_j" | grep -qF "FAKE-PROBE-STDOUT" \
+  && fail "(p) probe stdout leaked into the gate's stdout" || pass "(p) probe stdout absent from gate stdout"
+grep -qF "FAKE-PROBE-STDOUT" "$PROBE_DIR/openddil-effector-consumer-root.result.log" \
+  && pass "(p) probe stdout is in the per-store log" || fail "(p) probe stdout missing from log"
+
+# (k)
+out_k="$(run_probing exit3)"; rc_k=$?
+expect_line "(k) probe exit 3: UNMEASURED" "$out_k" "effector_launch" "PRODUCER UNMEASURED (effector-launch)"
+[ "$rc_k" -ne 0 ] && pass "(k) gate non-zero" || fail "(k) expected non-zero gate exit"
+
+# (l) a fresh, valid per-store file already on disk must not answer
+{
+  printf 'epoch=%s\nverdict=ALIVE\nwindow_s=60\n' "$(date -u +%s)"
+  printf 'group=projector-effector-launch\nmembers=1\nlag=0\nhwm=0\nnamespace=openddil\n'
+} > "$PROBE_DIR/openddil-effector-consumer-root.result"
+out_l="$(run_probing exit3)"; rc_l=$?
+expect_line "(l) stale per-store file ignored: UNMEASURED" "$out_l" "effector_launch" "PRODUCER UNMEASURED (effector-launch)"
+[ "$rc_l" -ne 0 ] && pass "(l) gate non-zero" || fail "(l) expected non-zero gate exit"
+
+# (m)
+out_m="$(run_probing wronggroup)"; rc_m=$?
+expect_line "(m) wrong group: UNMEASURED" "$out_m" "effector_launch" "PRODUCER UNMEASURED (effector-launch)" "expected projector-effector-launch"
+[ "$rc_m" -ne 0 ] && pass "(m) gate non-zero" || fail "(m) expected non-zero gate exit"
+
+# (n) tier form
+out_n="$(run_probing alive --tier edge-01)"; rc_n=$?
+if grep -qF -- "--tier edge-01" "$PROBE_ARGS" && grep -qF -- "-n openddil" "$PROBE_ARGS"; then
+  pass "(n) probe args: --tier edge-01 and -n openddil"
+else fail "(n) probe args wrong: $(cat "$PROBE_ARGS")"; fi
+expect_line "(n) tier store: SPARSE" "$out_n" "effector_launch" "SPARSE, producer effector-launch alive"
+
+# (o) caller-set header, from an existing caller-set run
+expect_line "(o) caller-set header" "$out_a" "effector probe: caller-supplied file" "(not re-measured)"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "test-completeness-sparse-producer.sh: ALL PASS"
