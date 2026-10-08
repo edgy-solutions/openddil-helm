@@ -59,7 +59,9 @@ openddil_require_cluster() {
         exit 78   # EX_CONFIG
     fi
 
-    actual="$(kubectl config current-context 2>/dev/null)"
+    # kubectl exits 1 when no context is set; a caller under `set -e` would
+    # die here silently, before either refusal below could print.
+    actual="$(kubectl config current-context 2>/dev/null)" || actual=""
     # Inside a pod there is no kubeconfig context, and the service account's
     # namespace is the only cluster identity the pod has. The chart declares
     # the expectation as in-cluster:<namespace>. No kubeconfig is synthesised,

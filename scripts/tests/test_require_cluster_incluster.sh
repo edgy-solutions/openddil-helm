@@ -14,6 +14,12 @@
 #   d  no SA namespace file                   -> 78, empty-context refusal
 #   e  SA file but KUBERNETES_SERVICE_HOST empty -> 78, empty-context refusal
 #   f  a non-empty kubeconfig context still wins and is compared as before
+#
+# The stub behaves as kubectl does with no context set: it prints an error and
+# exits 1. Every case runs twice: the library run directly, and the library
+# sourced by a caller under `set -euo pipefail`, which is how reset-scenario.sh
+# loads it. A stub that exited 0, or a caller without errexit, hid an in-pod
+# exit 1 with no output.
 # ===========================================================================
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,27 +31,39 @@ mkdir -p "$TMP/repo/scripts/lib"
 cp "$HERE/../lib/require-cluster.sh" "$TMP/repo/scripts/lib/"
 LIB="$TMP/repo/scripts/lib/require-cluster.sh"
 FAIL=0
-pass() { echo "PASS: $1"; }
-fail() { echo "FAIL: $1"; FAIL=1; }
+pass() { echo "PASS [$MODE]: $1"; }
+fail() { echo "FAIL [$MODE]: $1"; FAIL=1; }
 
 mkdir -p "$TMP/bin" "$TMP/sa" "$TMP/empty"
 cat > "$TMP/bin/kubectl" <<'KEOF'
 #!/usr/bin/env bash
-[ "$1 $2" = "config current-context" ] && printf '%s' "${STUB_CONTEXT:-}"
+if [ "$1 $2" = "config current-context" ]; then
+  [ -n "${STUB_CONTEXT:-}" ] || { echo "error: current-context is not set" >&2; exit 1; }
+  printf '%s\n' "$STUB_CONTEXT"
+fi
 exit 0
 KEOF
 chmod +x "$TMP/bin/kubectl"
 printf 'ns1\n' > "$TMP/sa/namespace"
 
-# run_case NAME SA_DIR HOSTVAL EXPECT [CONTEXT]
+# A caller that sources the library under errexit, as reset-scenario.sh does.
+cat > "$TMP/errexit-caller.sh" <<CEOF
+set -euo pipefail
+. "$LIB"
+CEOF
+
+# run_case NAME SA_DIR HOSTVAL EXPECT [CONTEXT]   (MODE: direct | errexit)
 run_case() {
+  local target="$LIB"
+  [ "$MODE" = errexit ] && target="$TMP/errexit-caller.sh"
   env -u OPENDDIL_EXPECT_CONTEXT PATH="$TMP/bin:$PATH" OPENDDIL_SA_DIR="$2" \
     KUBERNETES_SERVICE_HOST="$3" STUB_CONTEXT="${5:-}" \
     ${4:+OPENDDIL_EXPECT_CONTEXT="$4"} \
-    bash "$LIB" > "$TMP/$1.out" 2>&1
+    bash "$target" > "$TMP/$1.out" 2>&1
   RC=$?
 }
 
+cases() {
 run_case a "$TMP/sa" api-host in-cluster:ns1
 if [ "$RC" = 0 ] && grep -qx "cluster: in-cluster:ns1 (asserted)" "$TMP/a.out"; then pass "a match"; else fail "a (rc=$RC)"; cat "$TMP/a.out"; fi
 
@@ -66,5 +84,11 @@ if [ "$RC" = 0 ] && grep -qx "cluster: lab-ctx (asserted)" "$TMP/f1.out"; then p
 run_case f2 "$TMP/sa" api-host in-cluster:ns1 lab-ctx
 if [ "$RC" = 78 ] && grep -q "wrong cluster" "$TMP/f2.out" && grep -q "current context  : lab-ctx" "$TMP/f2.out"; then
   pass "f context wins over the service account"; else fail "f2 (rc=$RC)"; cat "$TMP/f2.out"; fi
+}
+
+for MODE in direct errexit; do
+  echo "== $MODE"
+  cases
+done
 
 exit "$FAIL"
