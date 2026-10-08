@@ -1591,6 +1591,7 @@ releasability:
     # (oidc.py's hard_expires) — renewal never extends past it, only up to
     # it. A deployment that wants sessions to outlast a longer severance
     # window sets this in its own overlay, not here.
+    # Also sets the Keycloak SSO idle and max lifetimes in the realm import.
     sessionTtlSeconds: 900
     # How long before the session's renewal point (the ID token's expiry,
     # or the ceiling if sooner) renewal is attempted — see get_session in

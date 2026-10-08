@@ -1593,6 +1593,100 @@ sys.exit(1 if fail else 0)
 ' || fail=1
 rm -f "$G15_VALUES"
 
+# --- guard 16: SSO lifetimes follow the PEP session lifetime ----------------
+# THE DEFECT MODELLED: the realm import's SSO idle/max lifetimes drifting from
+# releasability.oidc.sessionTtlSeconds -- the realm falling back to Keycloak's
+# own defaults (30 min idle, 10 h max), or a PEP (root or a tier's) reading a
+# different session lifetime than the realm. The provider's session then
+# outlives the PEP's, and the next sign-in returns without a password.
+# A second half: a TTL-only change must roll Keycloak (its pod-template
+# checksum/policy), or the realm is never re-imported with the new value.
+# The check runs on the real render (must pass) and on a doctored copy (one
+# PEP env value changed; must report the mismatch), so a check that cannot
+# fail is caught here and not in production.
+echo
+echo "guard 16: Keycloak SSO lifetimes follow the PEP session lifetime"
+G16_VALUES="$(mktemp)"
+G16_A="$(mktemp)"
+G16_B="$(mktemp)"
+cat > "$G16_VALUES" <<'G16'
+tierNode:
+  enabled: true
+  tiers: [region-east, edge-01]
+edges:
+  - {id: edge-01, region: region-east, udpPort: 62040, publicOrigin: "http://edge-01.invalid"}
+G16
+g16_render() {
+  render -f "$G16_VALUES" --set releasability.enabled=true --set releasability.lockDownElectric=true \
+    --set releasability.oidc.enabled=true --set releasability.keycloak.enabled=true \
+    --set releasability.publicOrigin=http://lab.invalid \
+    --set releasability.oidc.sessionTtlSeconds="$1"
+}
+g16_render 1234 > "$G16_A"
+g16_render 1235 > "$G16_B"
+"$PY" - "$G16_A" "$G16_B" <<'G16PY' || fail=1
+import sys, yaml
+def load(p):
+    return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+def envs(docs):
+    out = []
+    for d in docs:
+        if d.get("kind") == "Deployment":
+            for c in d["spec"]["template"]["spec"].get("containers") or []:
+                for e in c.get("env") or []:
+                    if e.get("name") == "OPENDDIL_SESSION_TTL_SECONDS":
+                        out.append((d["metadata"]["name"], e))
+    return out
+def check(docs, want):
+    errs = []
+    realm = 0
+    for d in docs:
+        if d.get("kind") == "ConfigMap" and (d.get("metadata") or {}).get("name", "").endswith("-keycloak-realm"):
+            sh = (d.get("data") or {}).get("substitutions.sh", "")
+            realm += 1
+            for k in ("ssoSessionIdleTimeout", "ssoSessionMaxLifespan"):
+                if ('"%s": %s,' % (k, want)) not in sh:
+                    errs.append("realm substitutions.sh lacks %s = %s" % (k, want))
+    if realm != 1:
+        errs.append("%d keycloak-realm ConfigMaps found, want 1" % realm)
+    es = envs(docs)
+    for n, e in es:
+        if e.get("value") != want:
+            errs.append("%s: OPENDDIL_SESSION_TTL_SECONDS=%s, want %s" % (n, e.get("value"), want))
+    if len(es) < 2:
+        errs.append("only %d PEP session TTL env values found (root + tier needed) -- guard proved too little" % len(es))
+    return errs, len(es)
+def kc_sum(docs):
+    for d in docs:
+        if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-keycloak"):
+            return d["spec"]["template"]["metadata"]["annotations"]["checksum/policy"]
+    return None
+a, b = load(sys.argv[1]), load(sys.argv[2])
+errs, n = check(a, "1234")
+berrs, _ = check(b, "1235")
+errs += berrs
+ka, kb = kc_sum(a), kc_sum(b)
+if ka is None or kb is None:
+    errs.append("keycloak Deployment checksum/policy not found")
+elif ka == kb:
+    errs.append("keycloak checksum/policy identical for TTL 1234 vs 1235 -- a TTL-only change would not roll Keycloak")
+if sorted(map(str, envs(a))) == sorted(map(str, envs(b))):
+    errs.append("PEP env identical for TTL 1234 vs 1235")
+for e in errs:
+    print("  FAIL: " + e)
+# Doctor one PEP env value and require the check to notice.
+for _, e in envs(a)[:1]:
+    e["value"] = "999"
+derrs, _ = check(a, "1234")
+if not any("999" in e for e in derrs):
+    print("  FAIL: guard 16 did not detect a doctored PEP session lifetime -- it cannot fail")
+    errs.append("vacuous")
+if not errs:
+    print("  ok   : realm idle+max follow the TTL; %d PEP env values match; Keycloak checksum and PEP env differ across TTLs; doctored copy detected" % n)
+sys.exit(1 if errs else 0)
+G16PY
+rm -f "$G16_VALUES" "$G16_A" "$G16_B"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
