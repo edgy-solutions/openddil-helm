@@ -114,6 +114,8 @@ spec:
               value: {{ $root.Values.exerciseControl.scrapeIntervalSeconds | quote }}
             - name: EXERCISE_PORT
               value: {{ $root.Values.exerciseControl.port | quote }}
+            - name: EXERCISE_RESTART_MAX_ZERO_AGE_S
+              value: {{ $root.Values.exerciseControl.restartMaxZeroAgeSeconds | quote }}
             - name: EXERCISE_RESET_RECORD_FILE
               value: /etc/exercise-reset/record.json
           ports:

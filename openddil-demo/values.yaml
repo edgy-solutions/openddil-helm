@@ -1753,6 +1753,10 @@ exerciseControl:
   # templates/exercise-control.yaml's comment on this).
   rateSources: []
   rateWindowSeconds: 30
+  # How old a measured zero (the reset record) may be before exercise-control
+  # stops accepting it for a restart. The restart op is refused without a
+  # fresh, unused zero; must be > 0 or the service refuses to start.
+  restartMaxZeroAgeSeconds: 1800
   rateMin: 0.1
   scrapeIntervalSeconds: 5
   # NetworkPolicy egress peers+ports for the adapter endpoint, verbatim --

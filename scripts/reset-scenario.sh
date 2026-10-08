@@ -150,6 +150,10 @@ USAGE
   Env overrides:
     NS       target namespace (default: openddil)
     RELEASE  helm release name, used for name-pattern discovery (default: openddil)
+    RESET_HALT_BEFORE_PHASE  fault injection for rehearsing a refused reset:
+             when set to a phase number (2, 3, 3b, 4 ... 10), the run halts
+             at the start of that phase with exit 2, exactly like any
+             refusal. No effect when unset.
 
 FLAGS
   --dry-run          Print every mutating command; execute none. Reads
@@ -4119,10 +4123,22 @@ halt_reset() {
   exit 2
 }
 
+# Fault-injection knob for rehearsing a refused reset: with
+# RESET_HALT_BEFORE_PHASE=<n> set, the start of phase <n> (the token before
+# the first space in the phase label, e.g. 2, 3b, 8) takes the same exit
+# path as any refusal. A no-op when unset or empty.
+halt_if_injected() {
+  local n="${1%% *}"
+  if [ -n "${RESET_HALT_BEFORE_PHASE:-}" ] && [ "$n" = "$RESET_HALT_BEFORE_PHASE" ]; then
+    halt_reset "injected halt before phase $n (RESET_HALT_BEFORE_PHASE)"
+  fi
+}
+
 # run_phase "N name" FUNCTION. Called bare, so set -e still aborts on a
 # phase's `return 1` (inside an `if` or `||` it would not).
 run_phase() {
   CURRENT_PHASE="$1"
+  halt_if_injected "$1"
   "$2"
   PHASES_DONE+=("$1")
   CURRENT_PHASE=""
@@ -4281,6 +4297,7 @@ run_phase "7 electric" phase7_electric
 # to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
 # get its producers back, exactly like a passing one does.
 CURRENT_PHASE="8 zero assertion"
+halt_if_injected "8 zero assertion"
 phase8_zero || true
 PHASES_DONE+=("8 zero assertion")
 run_phase "9 restore" phase9_restore_producers
