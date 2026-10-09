@@ -39,6 +39,60 @@ class Scope(unittest.TestCase):
         decl = {"t": {"status": "declared", "tiers": ["edge-02"]}}
         self.assertIsNone(ctf.declaration_for(decl, "t", "edge-01"))
 
+    def test_kind_excuses_every_region_not_edge(self):
+        decl = {"t": {"status": "declared", "tiers": ["region"]}}
+        for tier in ("region-east", "region-west", "region"):
+            self.assertIsNotNone(ctf.declaration_for(decl, "t", tier), tier)
+        self.assertIsNone(ctf.declaration_for(decl, "t", "edge-01"))
+        self.assertIn("declared only for: region",
+                      ctf.scope_note(decl, "t", "edge-01"))
+        self.assertEqual(ctf.scope_note(decl, "t", "region-east"), "")
+
+    def test_kind_does_not_match_prefix_without_dash(self):
+        decl = {"t": {"status": "declared", "tiers": ["edge"]}}
+        self.assertIsNone(ctf.declaration_for(decl, "t", "edgeless-01"))
+        self.assertIsNotNone(ctf.declaration_for(decl, "t", "edge-01"))
+
+    def test_kind_never_stale_with_no_region_deployed(self):
+        out = self._run_main(
+            {"t": {"status": "declared", "tiers": ["region"]}}, ["edge-01"])
+        self.assertNotIn("STALE SCOPE", out)
+
+    def test_exact_id_not_deployed_is_stale(self):
+        out = self._run_main(
+            {"t": {"status": "declared", "tiers": ["region-west"]}},
+            ["edge-01"])
+        self.assertIn("STALE SCOPE  t: tier region-west is not deployed", out)
+
+    def _run_main(self, decl, tier_ids):
+        import contextlib
+        import io
+        names = ("TIER_SUBSCRIPTIONS", "kubectl", "require_cluster", "tiers", "load_idle_declarations",
+                 "broker_topics", "projector_mappings", "direct_ingest",
+                 "stale_keyed_rows", "null_keyed_relayed",
+                 "unentitled_detection", "watermark")
+        saved = {k: getattr(ctf, k) for k in names}
+        ctf.kubectl = lambda *a: "ctx"
+        ctf.require_cluster = lambda c: None
+        ctf.tiers = lambda ns: tier_ids
+        ctf.load_idle_declarations = lambda: decl
+        ctf.broker_topics = lambda ns, t: set()
+        ctf.projector_mappings = lambda ns, t: []
+        ctf.direct_ingest = lambda ns, t: True
+        ctf.stale_keyed_rows = lambda *a: []
+        ctf.null_keyed_relayed = lambda *a: []
+        ctf.unentitled_detection = lambda *a: ([], [])
+        ctf.watermark = lambda *a: 0
+        ctf.TIER_SUBSCRIPTIONS = []
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                ctf.main()
+        finally:
+            for k, v in saved.items():
+                setattr(ctf, k, v)
+        return buf.getvalue()
+
     def test_loader_parses_flow_list(self):
         out = load_text(doc('    tiers: [edge-02, "region-east"]\n'))
         self.assertEqual(out["t1"]["tiers"], ["edge-02", "region-east"])
@@ -59,7 +113,8 @@ class Scope(unittest.TestCase):
         self.assertEqual(out["effector-events"]["tiers"], ["edge-02"])
         self.assertEqual(out["asset-element-telemetry"]["status"], "declared")
         self.assertEqual(out["asset-element-telemetry"]["tiers"],
-                         ["region-east", "region-west"])
+                         ["region"])
+        self.assertTrue(out["asset-element-telemetry"]["idle_unless_profiled"])
         scoped = {"effector-events", "asset-element-telemetry"}
         for k, v in out.items():
             if k not in scoped:

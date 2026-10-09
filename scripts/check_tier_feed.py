@@ -123,6 +123,10 @@ def load_idle_declarations() -> dict:
                       + cur + ": unparseable tiers: scope", file=sys.stderr)
                 raise SystemExit(78)
             out[cur]["tiers"] = ids
+        elif cur and line.strip().startswith("idle_unless_profiled:"):
+            # Only a literal true enables it; anything else is off.
+            out[cur]["idle_unless_profiled"] = (
+                line.split(":", 1)[1].strip() == "true")
     return {k: v for k, v in out.items() if v.get("status") in
             ("declared", "held", "investigate")}
 
@@ -140,10 +144,24 @@ def parse_tier_scope(raw: str) -> list[str] | None:
     return ids or None
 
 
+TIER_KINDS = ("edge", "region", "hq")
+
+
+def tier_in_kind(tier: str, kind: str) -> bool:
+    """A kind matches a tier whose id is the kind or starts with '<kind>-'."""
+    return tier == kind or tier.startswith(kind + "-")
+
+
+def scope_matches(scope: list[str], tier: str) -> bool:
+    """A scope entry is an exact tier id or a tier kind (edge, region, hq)."""
+    return any(e == tier or (e in TIER_KINDS and tier_in_kind(tier, e))
+               for e in scope)
+
+
 def declaration_for(idle_decl: dict, topic: str, tier: str) -> dict | None:
     """The entry for topic if it is unscoped or lists this tier, else None."""
     d = idle_decl.get(topic)
-    if d and ("tiers" not in d or tier in d["tiers"]):
+    if d and ("tiers" not in d or scope_matches(d["tiers"], tier)):
         return d
     return None
 
@@ -151,9 +169,137 @@ def declaration_for(idle_decl: dict, topic: str, tier: str) -> dict | None:
 def scope_note(idle_decl: dict, topic: str, tier: str) -> str:
     """Why an existing entry did not excuse this tier, or empty."""
     d = idle_decl.get(topic)
-    if d and "tiers" in d and tier not in d["tiers"]:
+    if d and "tiers" in d and not scope_matches(d["tiers"], tier):
         return " -- declared only for: " + ", ".join(d["tiers"])
     return ""
+
+
+def parse_sim_config(text: str) -> tuple:
+    """(element_publish_tier, [(platform_variants, match_subsystem), ...]).
+
+    A small line parser for the two shapes needed, so the check keeps running
+    on a bare interpreter with no yaml module. Raises ValueError when the text
+    does not have them: an unreadable config is a finding, never a default.
+    """
+    publish = None
+    profiles: list = []
+    in_profiles = False
+    saw_profiles = False
+    empty_profiles = False
+    collecting = False
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0 and not raw.startswith("- "):
+            in_profiles = False
+            collecting = False
+            key, _, val = raw.partition(":")
+            val = val.strip().strip("\"'")
+            if key.strip() == "element_publish_tier":
+                publish = val
+            elif key.strip() == "asset_profiles":
+                saw_profiles = True
+                if val == "[]":
+                    empty_profiles = True
+                else:
+                    in_profiles = True
+            continue
+        if not in_profiles:
+            continue
+        line = raw
+        if indent == 0 and raw.startswith("- "):
+            profiles.append([[], None])
+            line = "  " + raw[2:]
+            indent = 2
+            collecting = False
+        if not profiles:
+            continue
+        body = line.strip()
+        if indent == 2 and not body.startswith("- "):
+            collecting = False
+            key, _, val = body.partition(":")
+            key, val = key.strip(), val.strip().strip("\"'")
+            if key == "match_subsystem":
+                profiles[-1][1] = val or None
+            elif key == "matches_platform_variants":
+                if val.startswith("[") and val.endswith("]"):
+                    profiles[-1][0].extend(
+                        v.strip().strip("\"'") for v in val[1:-1].split(",")
+                        if v.strip())
+                else:
+                    collecting = True
+            continue
+        if collecting and body.startswith("- ") and ":" not in body:
+            profiles[-1][0].append(body[2:].strip().strip("\"'"))
+        else:
+            collecting = False
+    if publish is None:
+        raise ValueError("no element_publish_tier")
+    if not saw_profiles or (not profiles and not empty_profiles):
+        raise ValueError("no asset_profiles")
+    return publish, [(v, sub) for v, sub in profiles]
+
+
+def read_sim_config(ns: str) -> tuple:
+    """(config text, error). Exactly one of the two is empty."""
+    r = subprocess.run(
+        ["kubectl", "get", "cm", "openddil-logistics-sim-config", "-n", ns,
+         "-o", "jsonpath={.data.config\\.yaml}"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, "config map unreadable: " + (
+            r.stderr.strip().splitlines() or [""])[-1][:60]
+    if not r.stdout.strip():
+        return None, "config map has no config.yaml"
+    return r.stdout, ""
+
+
+def read_edge_assets(ns: str, tier: str) -> tuple:
+    """([(platform_variant, subsystem)], error) from the edge's own store."""
+    pod = "openddil-tier-pg-" + tier + "-0"
+    r = subprocess.run(
+        ["kubectl", "exec", "-n", ns, pod, "--", "psql", "-U", "openddil",
+         "-d", "openddil", "-tAc",
+         "SELECT platform_variant, subsystem FROM telemetry_latest_state;"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, "store unreadable: " + (
+            r.stderr.strip().splitlines() or [""])[-1][:60]
+    rows = []
+    for ln in r.stdout.replace(chr(13), "").splitlines():
+        if ln.strip():
+            v, _, sub = ln.partition("|")
+            rows.append((v, sub))
+    return rows, ""
+
+
+def profiled_assets(ns: str, tier: str) -> tuple:
+    """('count', n) | ('not-edge', None) | ('error', reason).
+
+    An empty element topic at an edge is by design when the edge owns no
+    asset an element profile matches, since the element tree stays at the
+    owning edge. Measure that rather than declare it. UNREADABLE IS NOT
+    CLEAN: any input this cannot read or parse is an error, never a zero.
+    """
+    text, err = read_sim_config(ns)
+    if text is None:
+        return "error", err
+    try:
+        publish, profiles = parse_sim_config(text)
+    except ValueError as e:
+        return "error", "unparseable profiles: " + str(e)
+    if publish != "edge":
+        return "not-edge", None
+    rows, err = read_edge_assets(ns, tier)
+    if rows is None:
+        return "error", err
+    n = 0
+    for variant, sub in rows:
+        if any(variant in vs and (ms is None or sub == ms)
+               for vs, ms in profiles):
+            n += 1
+    return "count", n
 
 
 def watermark(ns: str, tier: str, topic: str) -> int | None:
@@ -517,10 +663,30 @@ def main() -> int:
                 print("  idle/" + d["status"][:11].ljust(12) + g + "   <- "
                       + t + " (hw 0, " + dword + ")")
                 known_idle.append((tier, g, t, d["status"]))
-            else:
-                print("  NOT FLOWING " + g + "   <- " + t
-                      + " (hw 0, UNDECLARED)" + scope_note(idle_decl, t, tier))
-                undeclared.append((tier, g, t))
+                continue
+            raw_d = idle_decl.get(t)
+            if (raw_d and raw_d.get("idle_unless_profiled")
+                    and tier_in_kind(tier, "edge")):
+                kind, val = profiled_assets(ns, tier)
+                if kind == "count" and val == 0:
+                    print("  idle/measured " + g + "   <- " + t
+                          + " (hw 0, 0 profiled assets at " + tier + ")")
+                    continue
+                if kind == "count":
+                    print("  NOT FLOWING " + g + "   <- " + t
+                          + " (hw 0, " + str(val) + " profiled asset(s) at "
+                          + tier + ", topic empty)")
+                    undeclared.append((tier, g, t))
+                    continue
+                if kind == "error":
+                    print("  NOT FLOWING " + g + "   <- " + t
+                          + " (hw 0, cannot measure profiled assets: "
+                          + str(val) + ")")
+                    undeclared.append((tier, g, t))
+                    continue
+            print("  NOT FLOWING " + g + "   <- " + t
+                  + " (hw 0, UNDECLARED)" + scope_note(idle_decl, t, tier))
+            undeclared.append((tier, g, t))
         for gid in stale_keyed_rows(ns, tier, ts):
             print("  STALE KEY   " + gid + "   (row keyed by a tier that is "
                   "not deployed)")
@@ -546,7 +712,7 @@ def main() -> int:
     stale_scope: list[tuple[str, str]] = []
     for topic, d in sorted(idle_decl.items()):
         for tid in d.get("tiers", []):
-            if tid not in ts:
+            if tid not in TIER_KINDS and tid not in ts:
                 print("  STALE SCOPE  " + topic + ": tier " + tid
                       + " is not deployed")
                 stale_scope.append((topic, tid))

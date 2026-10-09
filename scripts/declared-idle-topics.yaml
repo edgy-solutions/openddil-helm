@@ -26,11 +26,17 @@
 #               be uncomfortable — it should not survive many runs.
 #
 # SCOPE
-#   tiers: [<tier id>, ...]   Optional, flow list only. With no `tiers:` key an
-#               entry applies at every tier. With it, the entry applies only
-#               at the listed tiers; at any other tier the topic is judged as
-#               if undeclared. A `tiers:` line in any other form refuses the
-#               run, and a listed id that is not a deployed tier fails it.
+#   tiers: [<tier id or kind>, ...]   Optional, flow list only. With no
+#               `tiers:` key an entry applies at every tier. With it, the
+#               entry applies only at the listed tiers; at any other tier the
+#               topic is judged as if undeclared. A kind (edge, region, hq)
+#               matches every deployed tier whose id is the kind or starts
+#               with `<kind>-`. A `tiers:` line in any other form refuses the
+#               run, and a listed exact id that is not a deployed tier fails
+#               it; a kind is never stale.
+#   idle_unless_profiled: true   Optional. An empty topic at an edge tier not
+#               excused by scope is judged by measurement: idle only when the
+#               edge owns no asset an element profile matches.
 #
 # `held` and `investigate` are NOT passes. They keep the check green-with-a-
 # reason rather than green, and the summary counts them separately so a
@@ -56,21 +62,21 @@ topics:
 
   asset-element-telemetry:
     status: declared
-    tiers: [region-east, region-west]
+    tiers: [region]
+    idle_unless_profiled: true
     reason: >-
       The per-element tree stays at the owning edge: logistics-sim publishes
       it to that edge's broker and only an asset-level rollup, in
       asset-telemetry-windows, crosses the uplink. So the topic is idle by
-      design on a region broker. It does flow on an edge that hosts an asset
-      with an element profile (the DIS mapper declares the sensor subsystem,
-      so the profile matches), and an edge with no such asset has nothing to
-      publish. The checker scopes by tier and cannot say "idle except where a
-      profiled asset lives", so edges are deliberately out of scope: an
-      empty edge topic stays a finding to read, rather than a regression
-      hidden behind a blanket declaration.
+      design on a region broker. It does flow on an edge that hosts
+      an asset with an element profile (the DIS mapper declares the sensor
+      subsystem, so the profile matches), and an edge with no such asset has
+      nothing to publish. The scope is the region kind; an empty topic at an
+      edge is decided by measurement, not by declaration: the checker counts
+      the edge's assets that an element profile matches and reads the topic
+      as idle/measured only when there are none.
     revisit: >-
-      If an edge with no profiled asset keeps reading as a finding, add that
-      edge to the scope. Remove the entry if the tree ever crosses the uplink.
+      Remove the entry if the tree ever crosses the uplink.
 
   asset-element-inventory:
     status: declared
