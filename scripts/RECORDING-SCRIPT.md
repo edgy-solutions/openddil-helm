@@ -13,13 +13,20 @@ Commands assume `KUBECONFIG=~/git/edgy-infra/ansible/kubeconfig` and
 
 ## Demo-day checklist — in this order; stop at the first miss
 
-Run it from a shell where `python` and `kubectl` resolve against the demo cluster. Check first with
-`python --version`: a Windows shell that has only `py` fails step 1 at the tier-feed check with `command not found`.
+Run it from a shell where `kubectl` resolves against the demo cluster. Python 3.8 or later is needed on the
+laptop; the name differs by platform (`python3`, `python`, or `py -3` on a Windows shell that has only the launcher),
+so pick it once by running each candidate, not by trusting PATH (a Windows `python3` can be a store stub that
+resolves and then fails):
+```
+PY=; for c in python3 python "py -3"; do $c -c 'import sys; sys.exit(sys.version_info < (3, 8))' 2>/dev/null && PY=$c && break; done
+echo "PY=${PY:?no Python 3.8+ found: install one before the checklist}"
+```
+Pass: one `PY=` line. `$PY` stays unquoted below so `py -3` works.
 
 **1. Pre-flight** (BEAT 0 says what each failure means):
 ```
 bash scripts/check-advancing.sh openddil 30 && bash scripts/check-derive-stage.sh 60 \
-  && python scripts/check_tier_feed.py openddil && bash scripts/check-shape-sizes.sh openddil \
+  && $PY scripts/check_tier_feed.py openddil && bash scripts/check-shape-sizes.sh openddil \
   && bash scripts/check-releasability-completeness.sh -n openddil && echo "PRE-FLIGHT 5/5"
 ```
 Pass: `PRE-FLIGHT 5/5`. Each check exits non-zero on a miss, so the chain stops at the first one.
@@ -29,7 +36,7 @@ The gate measures each store's effector-launch consumer itself (about a minute p
 ```
 H=<hub-host>
 for p in "$H liaison.coalition" "region-east.$H operator.regioneast" "edge-01.$H operator.atlantia" "edge-02.$H operator.borduria"; do
-  set -- $p; python scripts/oidc_login.py "https://$1" "$2" >/dev/null && echo "login $2 ok" || echo "login $2 FAILED"
+  set -- $p; $PY scripts/oidc_login.py "https://$1" "$2" >/dev/null && echo "login $2 ok" || echo "login $2 FAILED"
 done
 ```
 Pass: four `ok` lines.
@@ -58,6 +65,8 @@ Pass (3): the Job completes (or the fallback exits 0); no `RESET HALTED` in the 
 not restart: do not record. A failed Job leaves `kubectl wait` to time out (`kubectl -n openddil get "$J"` shows it
 at once), and its log ends with the `RESET HALTED` block naming the state; read it, and do not press again until it
 is understood.
+The reset stops and restarts only the simulators whose Deployment name starts with `dis-sim-edge-`. A simulator
+deployed under another name keeps running through the reset and keeps its own schedule.
 
 **5. TAK device connected:**
 ```
@@ -140,7 +149,7 @@ beats below disagree with what was measured, the measurement is here:
 ```
 bash scripts/check-advancing.sh openddil 30      # must exit 0, nine stages
 bash scripts/check-derive-stage.sh 60            # must say COMPLETING
-python scripts/check_tier_feed.py openddil       # must exit 0
+$PY scripts/check_tier_feed.py openddil          # must exit 0 (PY: see the checklist)
 bash scripts/check-shape-sizes.sh openddil       # read path: shapes under ceiling
 bash scripts/check-releasability-completeness.sh -n openddil   # every store; probes each store's effector consumer itself
 ```
