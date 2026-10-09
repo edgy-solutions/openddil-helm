@@ -82,9 +82,14 @@ spec:
       {{- include "openddil.selectorLabels" (dict "component" (printf "sensor-ingest-%s" $edge.id) "root" $root) | nindent 6 }}
   template:
     metadata:
-      {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+      {{- /* checksum/dis-condition-baselines rides sensor-ingest only: it is the
+         only reader of that file (see the helper). */}}
+      {{- $siAnn := compact (list (include "openddil.ontologyDeploymentAnnotation" $root) (include "openddil.disConditionBaselinesAnnotation" $root)) }}
+      {{- if $siAnn }}
       annotations:
+        {{- range $siAnn }}
         {{ . }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}

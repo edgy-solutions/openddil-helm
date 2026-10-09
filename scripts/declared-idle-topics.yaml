@@ -83,8 +83,8 @@ topics:
     status: investigate
     reason: >-
       It now flows on an edge with a profiled asset, from the rollup of the
-      element tree, and on the region above that edge via the edge bridge. HQ
-      receives none: the tier uplink carries region summaries only. It is not
+      element tree, and on the region above that edge via the edge bridge. The
+      region's tier uplink relays it on to HQ as well. It is not
       scoped, because a blanket declaration would hide a stalled edge. Still
       open: whether faust-edge's windowing produces anything for assets with
       no element profile.

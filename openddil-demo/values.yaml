@@ -824,6 +824,10 @@ logisticsSim:
           #   DEGRADED → yellow only ("minor faults, still operational")
           #   FAULT    → yellow + small red ("real problems")
           #   FAILED   → heavier mix ("asset is down")
+          #   POWER_OFF → its own tier
+          # Condition-driven tiers (a resolved condition overrides the above):
+          #   CRITICAL → critical_*; SENSOR_FAILED reuses failed_*;
+          #   NOT_EMITTING / DEACTIVATED lift nothing; DESTROYED → all red.
           # AssetState.severity_tier() resolves the upstream proto
           # power_state + health_state + tx/rx into one of these four
           # tiers; the sim's _synth_health then lifts the configured
@@ -835,6 +839,14 @@ logisticsSim:
           fault_red_fraction:       0.05
           failed_yellow_fraction:   0.30
           failed_red_fraction:      0.20
+
+          # Condition-driven tiers (a resolved condition from the telemetry
+          # feed overrides the tiers above). SENSOR_FAILED reuses the failed_*
+          # pair; NOT_EMITTING / DEACTIVATED lift nothing; DESTROYED lifts every
+          # element into red.
+          critical_yellow_fraction: 0.30
+          critical_red_fraction:    0.20
+          destroyed_red_fraction:   1.0
 
           # Legacy back-compat knob -- kept for older configs that
           # don't yet carry the per-tier fields. Loader uses this
@@ -1580,6 +1592,18 @@ releasability:
   deploymentLayer:
     releasabilityYaml: ""
     usersYaml: ""
+    # A mapping of DIS entity type string ->
+    # {beams, erp_dbm, erp_tolerance_db, silence_after_s}, merged by the DIS
+    # sidecar over dis_condition.yaml's (empty) emission.baselines. Per
+    # deployment because a sensor's emission baseline is a fact about that
+    # deployment's simulator, not about the product. Empty means no emission
+    # claims at all (the receiver claims nothing for an unbaselined type).
+    # A change rolls only the sensor-ingest pods
+    # (checksum/dis-condition-baselines).
+    # Example (made-up type string):
+    #   disConditionBaselinesYaml: |
+    #     "1:2:999:9:9:9:0": { beams: 4, erp_dbm: 80.0, erp_tolerance_db: 6.0, silence_after_s: 15.0 }
+    disConditionBaselinesYaml: ""
 
   # --- authentication ---------------------------------------------------------
   # OFF by default, which leaves the PEP in `header` mode: the subject arrives

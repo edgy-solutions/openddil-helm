@@ -84,6 +84,7 @@ DETECTION_PREFIXES = ("cm-service-", "fusion-service-")
 # A property that has to hold across a boundary gets checked at the boundary.
 RELAYED_KEYED_TOPICS = (
     "telemetry-latest-state", "asset-cm-state", "asset-logistics-status",
+    "asset-telemetry-windows",
     "region-fleet-summary", "region-top-factors", "region-wear-trends",
 )
 

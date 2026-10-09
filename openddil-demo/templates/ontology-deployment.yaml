@@ -5,7 +5,7 @@ renders whether or not releasability.enabled is true: the ontology readers
 (Connect, fusion, the logistics sim) use the ontology either way.
 */ -}}
 {{- $layer := .Values.releasability.deploymentLayer }}
-{{- if or $layer.releasabilityYaml $layer.usersYaml }}
+{{- if or $layer.releasabilityYaml $layer.usersYaml $layer.disConditionBaselinesYaml }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,6 +16,10 @@ data:
   {{- if $layer.releasabilityYaml }}
   releasability.yaml: |
     {{- $layer.releasabilityYaml | nindent 4 }}
+  {{- end }}
+  {{- if $layer.disConditionBaselinesYaml }}
+  dis_condition_baselines.yaml: |
+    {{- $layer.disConditionBaselinesYaml | nindent 4 }}
   {{- end }}
   {{- if $layer.usersYaml }}
   users.yaml: |

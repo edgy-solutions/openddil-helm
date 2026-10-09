@@ -17,6 +17,12 @@
 #   L4. usersYaml set, variant users-promoted -> the shipped variant is copied.
 #   L5. one byte of releasabilityYaml changed -> checksum/ontology-deployment
 #                                changes on every L2 workload.
+#   L6. disConditionBaselinesYaml alone -> ConfigMap has exactly that key; the
+#                                staging script copies only that file (and runs
+#                                with no releasability.yaml in the layer); only
+#                                sensor-ingest carries checksum/dis-condition-baselines.
+#   L7. releasabilityYaml + baselines -> checksum/ontology-deployment equals
+#                                the L2 value on every workload.
 # ===========================================================================
 set -u
 
@@ -182,6 +188,42 @@ elif mode == "L5":
         y = ann(b[n]).get("checksum/ontology-deployment") if n in b else None
         check("L5 %s checksum/ontology-deployment changed" % n, bool(x) and bool(y) and x != y, "%s %s" % (x, y))
 
+elif mode == "L6":
+    l6, root = sys.argv[2], sys.argv[3]
+    cm = [d for d in load(l6) if d["kind"] == "ConfigMap" and d["metadata"]["name"].endswith("-ontology-deployment")]
+    check("L6 baselines alone renders the ConfigMap", len(cm) == 1)
+    check("L6 the ConfigMap has exactly the baselines key", len(cm) == 1 and sorted(cm[0]["data"]) == ["dis_condition_baselines.yaml"], cm and sorted(cm[0]["data"]))
+    ow = ontology_workloads(l6)
+    check("L6 ontology readers exist", len(ow) > 0)
+    for n, d in sorted(ow.items()):
+        s = script(loader(d))
+        check("L6 %s volume" % n, "ontology-deployment" in vols(d))
+        check("L6 %s copies the baselines file" % n, "cp /ontology-deployment/dis_condition_baselines.yaml /shared/ontology/dis_condition_baselines.yaml" in s)
+        check("L6 %s does not copy a releasability.yaml that is not there" % n, "/ontology-deployment/releasability.yaml" not in s)
+        has = "checksum/dis-condition-baselines" in ann(d)
+        check("L6 %s annotation only on sensor-ingest" % n, has == ("sensor-ingest" in n), n)
+    check("L6 sensor-ingest pods exist and carry the annotation", any("sensor-ingest" in n for n in ow))
+    n0 = sorted(ow)[0]
+    base = root + "/l6"
+    for sub in ("bundle/contracts/ontology", "bundle/demo/ontology", "od"):
+        os.makedirs(base + "/" + sub, exist_ok=True)
+    open(base + "/od/dis_condition_baselines.yaml", "w").write("baselines\n")
+    import re
+    for src in re.findall(r"\"/bundle/([^\"]+)\"", script(loader(ow[n0]))):
+        os.makedirs(base + "/bundle/" + src, exist_ok=True)
+    r = run_sh(sandbox(script(loader(ow[n0])), base))
+    got = open(base + "/shared/ontology/dis_condition_baselines.yaml").read() if r.returncode == 0 else r.stderr
+    check("L6 running %s's script (no releasability.yaml in the layer) succeeds and stages the baselines" % n0, got == "baselines\n", got)
+
+elif mode == "L7":
+    a, b = ontology_workloads(sys.argv[2]), ontology_workloads(sys.argv[3])
+    check("L7 same workload set", sorted(a) == sorted(b) and len(a) > 0)
+    for n in sorted(a):
+        x = ann(a[n]).get("checksum/ontology-deployment")
+        y = ann(b[n]).get("checksum/ontology-deployment") if n in b else None
+        check("L7 %s checksum/ontology-deployment unchanged by baselines" % n, bool(x) and x == y, "%s %s" % (x, y))
+        check("L7 %s annotation only on sensor-ingest" % n, ("checksum/dis-condition-baselines" in ann(b[n])) == ("sensor-ingest" in n))
+
 sys.exit(1 if bad else 0)
 PYEOF
 
@@ -207,6 +249,13 @@ run L4 "$TMP/l4.yaml" "$TMPW"
 
 render "$TMP/l5.yaml" --set-file releasability.deploymentLayer.releasabilityYaml="$TMP/rel2.yaml" || exit 1
 run L5 "$TMP/l2.yaml" "$TMP/l5.yaml"
+
+printf '"1:2:999:9:9:9:0": { beams: 4, erp_dbm: 80.0, erp_tolerance_db: 6.0, silence_after_s: 15.0 }\n' > "$TMP/base-in.txt"
+render "$TMP/l6.yaml" --set-file releasability.deploymentLayer.disConditionBaselinesYaml="$TMP/base-in.txt" || exit 1
+run L6 "$TMP/l6.yaml" "$TMPW"
+
+render "$TMP/l7.yaml" --set-file releasability.deploymentLayer.releasabilityYaml="$TMP/rel.yaml" --set-file releasability.deploymentLayer.disConditionBaselinesYaml="$TMP/base-in.txt" || exit 1
+run L7 "$TMP/l2.yaml" "$TMP/l7.yaml"
 
 if [ "$FAIL" = 0 ]; then echo "ALL PASS"; else echo "FAILURES"; fi
 exit "$FAIL"

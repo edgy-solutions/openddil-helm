@@ -207,11 +207,22 @@ subPath-mounts /shared/<dst> at the target absolute path.
       {{- end }}
       {{- end }}
       {{- if and (include "openddil.ontologyDeploymentActive" .) (include "openddil.hasOntologyDst" .) }}
+      {{- /* The DIS condition baselines file, when set, is added beside the
+         bundle's dis_condition.yaml for the sidecar to merge; each file is
+         copied only when its value is set. Said here, not in the rendered
+         shell comment below, so a deployment that sets neither renders the
+         same script and rolls no ontology reader. */}}
       # DEPLOYMENT LAYER, LAST: the deployment's whole releasability.yaml
       # replaces the bundle's copy (no merge). See
       # releasability.deploymentLayer in values.yaml.
+      {{- if .root.Values.releasability.deploymentLayer.releasabilityYaml }}
       cp /ontology-deployment/releasability.yaml /shared/ontology/releasability.yaml
       echo "ontology deployment layer: releasability.yaml ($(wc -c < /ontology-deployment/releasability.yaml | tr -d ' ') bytes)"
+      {{- end }}
+      {{- if .root.Values.releasability.deploymentLayer.disConditionBaselinesYaml }}
+      cp /ontology-deployment/dis_condition_baselines.yaml /shared/ontology/dis_condition_baselines.yaml
+      echo "ontology deployment layer: dis_condition_baselines.yaml ($(wc -c < /ontology-deployment/dis_condition_baselines.yaml | tr -d ' ') bytes)"
+      {{- end }}
       {{- end }}
   resources:
     {{- toYaml .root.Values.bundle.initResources | nindent 4 }}
@@ -227,12 +238,14 @@ subPath-mounts /shared/<dst> at the target absolute path.
 
 {{/*
 Deployment-side ontology layer (releasability.deploymentLayer). Accepts the
-bundleInit dict or the chart root. Renders "true" when releasabilityYaml is set.
+bundleInit dict or the chart root. Renders "true" when releasabilityYaml or
+disConditionBaselinesYaml is set (both are files copied into the staged
+ontology; usersYaml is not, and stays out).
 */}}
 {{- define "openddil.ontologyDeploymentActive" -}}
 {{- $r := . -}}
 {{- if hasKey . "root" -}}{{- $r = .root -}}{{- end -}}
-{{- if $r.Values.releasability.deploymentLayer.releasabilityYaml -}}true{{- end -}}
+{{- if or $r.Values.releasability.deploymentLayer.releasabilityYaml $r.Values.releasability.deploymentLayer.disConditionBaselinesYaml -}}true{{- end -}}
 {{- end }}
 
 {{/* Takes the bundleInit dict; non-empty when some path entry has dst "ontology". */}}
@@ -257,7 +270,9 @@ sha256 of the releasability layer string only. Takes the chart root. Its
 consumers (openddil.ontologyDeploymentAnnotation, on hub, edge, logistics-sim
 and tier pods) copy only releasability.yaml (bundleInit). users.yaml is
 consumed by topaz, which tracks it through checksum/policy (liveReload off) or
-the policy-sync sidecar (liveReload on).
+the policy-sync sidecar (liveReload on). The DIS condition baselines are left
+out on purpose, so a deployment that never sets them renders the same value
+and rolls nothing; see openddil.disConditionBaselinesAnnotation.
 */}}
 {{- define "openddil.ontologyDeploymentChecksum" -}}
 {{- list .Values.releasability.deploymentLayer.releasabilityYaml | toJson | sha256sum -}}
@@ -270,6 +285,20 @@ chart root; renders nothing when the layer is unset.
 {{- define "openddil.ontologyDeploymentAnnotation" -}}
 {{- if include "openddil.ontologyDeploymentActive" . -}}
 checksum/ontology-deployment: {{ include "openddil.ontologyDeploymentChecksum" . | quote }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Pod-template annotation line for the sensor-ingest pod only; renders nothing
+when disConditionBaselinesYaml is unset. Takes the chart root. Only
+sensor-ingest reads dis_condition_baselines.yaml (its DIS sidecar merges it
+over the ontology's empty emission.baselines); the other pods that stage the
+ontology also receive the file and ignore it, so a baselines change must not
+roll them.
+*/}}
+{{- define "openddil.disConditionBaselinesAnnotation" -}}
+{{- with .Values.releasability.deploymentLayer.disConditionBaselinesYaml -}}
+checksum/dis-condition-baselines: {{ . | sha256sum | quote }}
 {{- end -}}
 {{- end }}
 
@@ -890,6 +919,11 @@ messages of DDIL buffer — on the exact indicator a severance test watches.
 One definition, two consumers, no opportunity to disagree. Same shape as
 `openddil.publicOrigin`, and for the same reason: a value that must match in
 three places must be written in one.
+
+A region's uplink carries summaries AND the telemetry window
+(asset-telemetry-windows), so HQ's asset_telemetry_windows fills and the HQ
+fleet summary can read element-level counts; the per-element tree still stays
+at the owning edge, only the window, which carries the element rollup, travels up.
 */}}
 {{- define "openddil.edgeBridgeTopics" -}}
 {{- $edge := .edge -}}
@@ -908,7 +942,7 @@ three places must be written in one.
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
 {{- end }}
 
 {{/*
