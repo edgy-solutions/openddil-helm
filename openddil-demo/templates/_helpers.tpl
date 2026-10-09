@@ -1351,7 +1351,9 @@ mappings:
     handler: telemetry_windows
     table: asset_telemetry_windows
     consumer_group: tier-projector-windows-{{ $tier.id }}
-    decode_as: json
+    # faust-edge writes WindowedTelemetry as protobuf; decoding it as json
+    # refuses every record and the table stays empty.
+    decode_as: openddil.logistics.v1.WindowedTelemetry
     mode: upsert
   - topic: tactical-events
     handler: tactical_events

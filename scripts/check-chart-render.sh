@@ -1690,6 +1690,79 @@ sys.exit(1 if errs else 0)
 G16PY
 rm -f "$G16_VALUES" "$G16_A" "$G16_B"
 
+# --- guard 17: protobuf-wire topics decode as their proto -------------------
+# THE DEFECT MODELLED: a projector mapping that decodes a protobuf topic as
+# json. Every record is refused as "not valid JSON", the table stays empty,
+# and nothing else fails -- the projector logs one warning per partition and
+# carries on. The table below is the producer side's wire format, declared
+# here because the producers live in other repos; extend it when a producer
+# moves a topic to protobuf. The check runs on the real render (must pass)
+# and on a doctored copy (one mapping set to json; must report it).
+echo
+echo "guard 17: protobuf-wire topics decode as their proto in every projector config"
+G17_VALUES="$(mktemp)"
+G17_R="$(mktemp)"
+cat > "$G17_VALUES" <<'G17'
+tierNode:
+  enabled: true
+  tiers: [region-east, edge-01]
+edges:
+  - {id: edge-01, region: region-east, udpPort: 62040, publicOrigin: "http://edge-01.invalid"}
+G17
+render -f "$G17_VALUES" > "$G17_R"
+"$PY" - "$G17_R" <<'G17PY' || fail=1
+import copy, sys, yaml
+WIRE = {
+    "telemetry-latest-state": "openddil.telemetry.v1.EntityTelemetryEvent",
+    "asset-logistics-status": "openddil.logistics.v1.AssetLogisticsStatusUpdate",
+    "asset-telemetry-windows": "openddil.logistics.v1.WindowedTelemetry",
+}
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+def configs(docs):
+    out = []
+    for d in docs:
+        if d.get("kind") == "ConfigMap" and "projector-config" in d["metadata"]["name"]:
+            for k, v in (d.get("data") or {}).items():
+                if k.endswith(".yaml"):
+                    out.append((d["metadata"]["name"], yaml.safe_load(v) or {}))
+    return out
+def check(cfgs):
+    errs, seen = [], {}
+    for name, c in cfgs:
+        for m in c.get("mappings") or []:
+            want = WIRE.get(m.get("topic"))
+            if want is None:
+                continue
+            seen[m["topic"]] = seen.get(m["topic"], 0) + 1
+            if m.get("decode_as") != want:
+                errs.append("%s: %s decode_as %s, the producer writes %s" % (name, m["topic"], m.get("decode_as"), want))
+    for t in WIRE:
+        if not seen.get(t):
+            errs.append("no projector config maps %s -- guard proved nothing for it" % t)
+    return errs, seen
+cfgs = configs(docs)
+errs, seen = check(cfgs)
+for e in errs:
+    print("  FAIL: " + e)
+bad = copy.deepcopy(cfgs)
+for _, c in bad:
+    for m in c.get("mappings") or []:
+        if m.get("topic") == "asset-telemetry-windows":
+            m["decode_as"] = "json"
+            break
+    else:
+        continue
+    break
+derrs, _ = check(bad)
+if not any("asset-telemetry-windows decode_as json" in e for e in derrs):
+    print("  FAIL: guard 17 did not detect a json-decoded protobuf topic -- it cannot fail")
+    errs.append("vacuous")
+if not errs:
+    print("  ok   : %d projector configs; %s; doctored copy detected" % (len(cfgs), ", ".join("%s x%d" % kv for kv in sorted(seen.items()))))
+sys.exit(1 if errs else 0)
+G17PY
+rm -f "$G17_VALUES" "$G17_R"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
