@@ -1150,7 +1150,9 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 #   tier-cm-intake         cm-events, tier broker
 #   cm-intake (hub)        cm-events, hub broker
 #   sensor-ingest-<e>      ingress-dis-raw
-#   logistics-sim          asset-element-telemetry + parts-availability, hq
+#   logistics-sim          asset-element-telemetry on each edge (the chart
+#                          default element_publish_tier is edge), plus
+#                          asset-element-inventory + parts-availability, hq
 #   faust-regional-<r>     fan-in, the three region-* outputs and its table
 #                          changelog, on the tier broker when <r> is a tier,
 #                          else on hq (names as measured on a live broker)
@@ -1222,7 +1224,8 @@ for name in decl:
         e = name.split("-sensor-ingest-", 1)[1]
         want[name] = {f"{e}/ingress-dis-raw"}
     elif name.endswith("-logistics-sim"):
-        want[name] = {"hq/asset-element-telemetry", "hq/parts-availability"}
+        edges = {n.split("-faust-edge-", 1)[1] for n in decl if "-faust-edge-" in n}
+        want[name] = {f"{e}/asset-element-telemetry" for e in edges} |                      {"hq/asset-element-inventory", "hq/parts-availability"}
     elif "-faust-regional-" in name:
         r = name.split("-faust-regional-", 1)[1]
         b = r if r in TIERS else "hq"
