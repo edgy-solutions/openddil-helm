@@ -57,8 +57,12 @@ class Scope(unittest.TestCase):
         out = ctf.load_idle_declarations()
         self.assertEqual(out["effector-events"]["status"], "declared")
         self.assertEqual(out["effector-events"]["tiers"], ["edge-02"])
+        self.assertEqual(out["asset-element-telemetry"]["status"], "declared")
+        self.assertEqual(out["asset-element-telemetry"]["tiers"],
+                         ["region-east", "region-west"])
+        scoped = {"effector-events", "asset-element-telemetry"}
         for k, v in out.items():
-            if k != "effector-events":
+            if k not in scoped:
                 self.assertNotIn("tiers", v, k)
 
 

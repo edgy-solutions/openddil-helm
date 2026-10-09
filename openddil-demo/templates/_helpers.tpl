@@ -901,7 +901,8 @@ three places must be written in one.
 {{- $t = append $t "effector-events" -}}
 {{- $t = append $t "link-heartbeat" -}}
 {{- if $managed -}}
-{{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-telemetry" "asset-element-inventory" "derived-sustainment") -}}
+{{- /* The per-element tree stays at the owning edge; its rollup rides asset-telemetry-windows. */ -}}
+{{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-inventory" "derived-sustainment") -}}
 {{- end -}}
 {{- join "," $t -}}
 {{- end }}

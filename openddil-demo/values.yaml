@@ -714,7 +714,8 @@ assetRegistry:
 # telemetry-latest-state, tracks per-asset OperationalState (power_state,
 # health_state, actively_transmitting, actively_receiving), generates
 # per-element values honoring the upstream state, publishes one whole-
-# asset snapshot per tick to asset-element-telemetry on HQ. The
+# asset snapshot per tick to asset-element-telemetry on the owning edge's
+# broker (config.element_publish_tier). The
 # MaintainerApp SensorArrayView (MRAD_CONFIG path today) consumes via
 # the useAssetElementTelemetry ElectricSQL hook. See openddil-logistics-
 # sim/README.md for envelope shape + element id format.
@@ -748,6 +749,12 @@ logisticsSim:
   config:
     tick_interval_s: 30
     output_topic: asset-element-telemetry
+    # Where the whole-asset snapshot is published. `edge` puts it on the
+    # owning edge's broker (the sim stands in for a sensor reporting at its
+    # edge); the edge derives an asset-level rollup into
+    # asset-telemetry-windows and only that crosses the uplink. The
+    # service's code default is `hq`.
+    element_publish_tier: edge
     # PowerState / HealthState enum names from openddil/telemetry/v1/
     # telemetry.proto that count as "asset is degraded" for synthesis.
     # When the customer sim reports any of these on telemetry-latest-

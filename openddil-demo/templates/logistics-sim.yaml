@@ -10,7 +10,8 @@ every edge broker, tracks per-asset OperationalState (power_state /
 health_state / actively_transmitting / actively_receiving), generates
 synthetic per-element health/temp/load values from per-profile
 synthesis knobs honoring the upstream operational state, publishes
-one whole-asset snapshot per tick to asset-element-telemetry on HQ.
+one whole-asset snapshot per tick to asset-element-telemetry on the owning
+edge's broker (config.element_publish_tier; HQ when that is `hq`).
 
 Gating: rendered only when .Values.logisticsSim.enabled. Disable to
 demo without the sim (SensorArrayView falls back to seeded-RNG
@@ -38,6 +39,15 @@ metadata:
 data:
   config.yaml: |
     {{- toYaml $cfg.config | nindent 4 }}
+{{- $elementTier := "hq" }}
+{{- if $cfg.config }}{{- $elementTier = default "hq" $cfg.config.element_publish_tier }}{{- end }}
+{{- $producesTopics := list }}
+{{- if eq $elementTier "edge" }}
+{{- range .Values.edges }}{{- $producesTopics = append $producesTopics (printf "%s/asset-element-telemetry" .id) }}{{- end }}
+{{- else }}
+{{- $producesTopics = append $producesTopics "hq/asset-element-telemetry" }}
+{{- end }}
+{{- $producesTopics = concat $producesTopics (list "hq/asset-element-inventory" "hq/parts-availability") }}
 {{- $logisticsSimPairs := list }}
 {{- range .Values.edges }}
 {{- $logisticsSimPairs = append $logisticsSimPairs (printf "%s/logistics-sim-%s" .id .id) }}
@@ -57,14 +67,19 @@ metadata:
     openddil.io/consumer-groups: {{ join " " $logisticsSimPairs | quote }}
     # openddil.io/produces-topics --
     # "asset-element-telemetry" is the one whole-asset-snapshot topic this
-    # service publishes per tick, on HQ (see this file's own header
-    # comment). CODE DEFAULT, not a value this chart sets -- there is no
+    # service publishes per tick: on each edge's broker when
+    # config.element_publish_tier is "edge" (one entry per edge, from the
+    # SAME .Values.edges range as above), else on HQ (a nil config or a
+    # missing key is "hq", the service's code default). The topic name is a
+    # CODE DEFAULT, not a value this chart sets -- there is no
     # LOGISTICS_SIM_OUTPUT_TOPIC env to derive it from, same situation as
-    # LOGISTICS_SIM_INPUT_TOPIC below. "parts-availability" is the spare-
+    # LOGISTICS_SIM_INPUT_TOPIC below. "asset-element-inventory" is also
+    # published by the service, on HQ; the annotation omitted it until now.
+    # "parts-availability" is the spare-
     # parts stand-in's topic, also a CODE DEFAULT (parts_availability.topic
     # in the service's default config, which this chart does not override);
     # the stand-in always runs, on its own interval, on HQ.
-    openddil.io/produces-topics: "hq/asset-element-telemetry hq/parts-availability"
+    openddil.io/produces-topics: {{ join " " $producesTopics | quote }}
 spec:
   replicas: 1
   strategy:
