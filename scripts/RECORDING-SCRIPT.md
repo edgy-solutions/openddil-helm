@@ -372,8 +372,11 @@ the lab. None of it is the co-located simulator's (see the placeholders).
 
 The stand-in drives the launcher from a posture schedule. Its clock, `t0`, is
 the schedule start: the launcher's `posture schedule fired ... t+0` log line.
-The reset does **not** restart this clock: it quiesces the edge sims, not the
-launcher. To start the beat on a known clock, restart the launcher and read t0:
+The reset (Restart exercise) restarts this clock: it stops and restarts every
+Deployment labelled `openddil.io/role=simulator`, the launcher included. After
+a reset the launcher reads `emplaced` at t0+4 at all three tiers, from the
+first record into the emptied stores (measured 2026-10-10). Without a reset,
+to start the beat on a known clock, restart the launcher and read t0:
 
 ```
 kubectl -n openddil rollout restart deploy/dis-sim-launcher
