@@ -303,16 +303,24 @@ Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
    released to a destination whose nations include BDR, and **refused** by an
    ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
    camera; it is the same ledger as BEAT 2a.
-4. **HQ — the action arrives** on `<dry run: the actions pane — the
-   released-records pane the deployment configures for the action
-   destination>`:
-   `<dry run: the action shown — task, part, source of the part — and the
-   time from report to action>`.
-   `<dry run: whether the figure the action cites is shown with the faulted
-   section highlighted; until then, do not mention a figure>`.
+4. **HQ — the action arrives** on the actions pane, the released-records
+   pane the deployment configures for the action destination. The row reads
+   **remove and replace array module, section 3**; part
+   `part:array-module`, **from region-east**; outcome approved; two
+   approvals (a regional officer and the coalition supervisor); it cites
+   three modules (fault isolation, remove, install). Decision: **ADMIT**.
+   Report to answer: 1 s; report to admitted action: 30 s, one intake poll
+   (measured 2026-10-10, rev 134).
+   **FIGURE** on the row opens the cited figure, "Detail A, Section 3", with
+   section 3 highlighted.
+   If BIT already raised this fault, Ada's report joins that fault's event
+   (same event id, her report as a second source). The row is the same
+   action, re-stamped, not a new row. Say "the action updates"; don't
+   wait for a second row.
 
-*The beat:* `<dry run: one sentence, from what the action actually says>` —
-the report was filed at the edge, crossed the boundary once, under a label,
+*The beat:* HQ sees the edge's report come back as an approved action:
+replace the array module in section 3 with the spare from region-east. The
+report was filed at the edge, crossed the boundary once, under a label,
 and came back as an action, and HQ can show which records went out and which
 did not.
 
