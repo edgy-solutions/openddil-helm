@@ -44,7 +44,7 @@ Pass: four `ok` lines.
 **3. Reset** and **4. Exercise restart**: one action, because the restart is refused unless this reset reached a
 measured zero. Primary path: sign in as the supervisor and press **Restart exercise** in the exercise panel (the button
 shows only with `exerciseControl.resetJob.enabled`). It runs the reset as an in-cluster Job, so no laptop is needed;
-about 12 minutes on the lab. A second press while it runs is refused (`reset_running`). Then read the result:
+about 13 minutes on the lab. A second press while it runs is refused (`reset_running`). Then read the result:
 ```
 J=$(kubectl -n openddil get jobs -l app.kubernetes.io/component=exercise-reset \
   --sort-by=.metadata.creationTimestamp -o name | tail -1)
@@ -369,13 +369,15 @@ report was filed at the edge, crossed the boundary once, under a label,
 and came back as an action, and HQ can show which records went out and which
 did not.
 
-## Between BEAT 2b and BEAT 3 — Restart exercise (off camera, ~11 min)
+## Between BEAT 2b and BEAT 3 — Restart exercise (off camera, ~13 min)
 
 Sign in as the supervisor and press **Restart exercise** in the exercise
 panel; read the result as in pre-flight steps 3 and 4. Measured 2026-10-10
-(rev 136): the Job took **647 s** and, on the dry run, **731 s**; verdict
+(rev 136): the Job took **647 s**, **731 s** on the dry run and **769 s** on the
+round trip after it; verdict
 PASS, last line `RESTART SENT (adapter 200)`, one `DECLARED UNMEASURED`.
-Budget ~12 minutes. It stops and restarts every simulator labelled
+Budget ~13 minutes; the spread is in the last phase (waiting for
+subscriptions to show live after the restart). It stops and restarts every simulator labelled
 `openddil.io/role=simulator` (six on the lab, 0 `NOT A PRODUCER`), so every
 schedule starts again from its own t0: the launcher reads `emplaced` from
 its container's start at all three tiers, and BEAT 3m's clock starts here.
