@@ -113,11 +113,24 @@ jobs:
           OPENDDIL_BUNDLE_EXAMPLE: ${{ github.workspace }}/openddil-customer-bundle-example
         run: ./scripts/check-mirror-coverage.sh
 
+      # toxiproxy renders only with link control on, so the default render
+      # above never sees its image. Cover that render too.
+      - name: Mirror coverage, link control on
+        env:
+          OPENDDIL_BUNDLE_EXAMPLE: ${{ github.workspace }}/openddil-customer-bundle-example
+        run: |
+          printf 'linkControl:\n  enabled: true\n' > /tmp/link-control-on.yaml
+          ./scripts/check-mirror-coverage.sh --extra-values /tmp/link-control-on.yaml
+
       # A check nobody has watched fail is a check nobody has tested. Plant an
-      # image no mirror has ever heard of and require a non-zero exit.
+      # image no mirror has ever heard of and require a non-zero exit. The
+      # plant turns link control on: with it off, toxiproxy is not rendered
+      # and the planted image could never fail anything.
       - name: Mirror coverage red-check
         run: |
           cat > /tmp/planted.yaml <<'YAML'
+          linkControl:
+            enabled: true
           toxiproxy:
             image:
               repository: docker.io/library/nginx
