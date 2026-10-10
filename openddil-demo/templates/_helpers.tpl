@@ -753,6 +753,28 @@ Usage: {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
 {{- end }}
 
 {{/*
+openddil.childTierIds -- comma-joined ids of the tiers whose effective parent
+is this tier. Called as (dict "tier" $tier "root" $root).
+
+Separate from openddil.uplinkLinks on purpose: uplinkLinks is EMPTY unless
+linkControl is on (it describes severable proxies), but a tier measures
+heartbeat arrival from its children whether or not toggles exist. Same
+filter (an edge, or a tier-managed tier), same order, no linkControl gate.
+*/}}
+{{- define "openddil.childTierIds" -}}
+{{- $self := .tier.id | toString -}}
+{{- $root := .root -}}
+{{- $ids := list -}}
+{{- range (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if or (eq .kind "edge") (include "openddil.isTierManaged" (dict "id" .id "root" $root)) }}
+{{- $p := include "openddil.effectiveParent" (dict "tier" . "root" $root) | fromYaml -}}
+{{- if eq $p.host $self }}{{- $ids = append $ids (.id | toString) -}}{{- end }}
+{{- end }}
+{{- end }}
+{{- join "," $ids -}}
+{{- end }}
+
+{{/*
 openddil.uplinkPort — one tier's own uplink port, or "" if it has none.
 
 Usage: include "openddil.uplinkPort" (dict "tier" $tier "root" $root)

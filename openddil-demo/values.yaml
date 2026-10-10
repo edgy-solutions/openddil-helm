@@ -905,14 +905,15 @@ frontend:
 # Every buffer monitor (projector-<edge>, tier-projector-<tier>) produces one
 # heartbeat per period to `link-heartbeat` on its own broker; the topic rides
 # the same bridge/uplink as the data to HQ, where projector-hq measures
-# arrival and writes the link_status table (one row per link). Reachability
-# is what arrived; idle is traffic measured at the source, reported apart
-# from down.
+# arrival and writes the link_status table (one row per link). Each tier
+# projector also measures its direct children's heartbeats on its own broker
+# and writes link_status in its own store. Reachability is what arrived; idle
+# is traffic measured at the source, reported apart from down.
 linkStatus:
   enabled: true
   heartbeatPeriodS: 2     # seconds between heartbeats
   idleAfterS: 30          # traffic sum unchanged this long => idle
-  downAfterS: 15          # no heartbeat arrival this long at HQ => down
+  downAfterS: 15          # no heartbeat arrival this long at the measuring tier => down
   # Log-end offsets of these topics, on the edge's own broker, are summed to
   # decide active vs idle.
   trafficTopics: [raw-sensor-stream, tactical-events, effector-events]

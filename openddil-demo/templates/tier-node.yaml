@@ -733,6 +733,16 @@ spec:
               value: {{ $root.Values.linkStatus.heartbeatPeriodS | quote }}
             - name: LINK_IDLE_AFTER_S
               value: {{ $root.Values.linkStatus.idleAfterS | quote }}
+            # This tier measures heartbeat arrival from its direct children
+            # on its own broker, the same way HQ does for every link.
+            - name: LINK_MONITOR_ENABLED
+              value: {{ if and $root.Values.linkStatus.enabled (include "openddil.childTierIds" (dict "tier" $tier "root" $root)) }}"true"{{ else }}"false"{{ end }}
+            - name: LINK_EXPECTED_IDS
+              value: {{ include "openddil.childTierIds" (dict "tier" $tier "root" $root) | quote }}
+            - name: LINK_DECLARED_IDLE
+              value: {{ $kids := splitList "," (include "openddil.childTierIds" (dict "tier" $tier "root" $root)) }}{{ $idle := list }}{{ range (splitList "," (include "openddil.linkDeclaredIdleIds" $root)) }}{{ if and . (has . $kids) }}{{ $idle = append $idle . }}{{ end }}{{ end }}{{ join "," $idle | quote }}
+            - name: LINK_DOWN_AFTER_S
+              value: {{ $root.Values.linkStatus.downAfterS | quote }}
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL
