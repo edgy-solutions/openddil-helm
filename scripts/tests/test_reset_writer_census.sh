@@ -386,6 +386,26 @@ out="$( (set -e; bridge_graph) 2>&1 )"; rc=$?
 grep -q "DEST_PORT 99999 matches no proxy" <<<"$out" && pass "5c: halt names the unresolvable port" \
   || fail "5c: expected halt message not found"
 
+# With link control off there is no toxiproxy and no ${RELEASE}-toxiproxy-config:
+# every bridge's DEST_HOST is its destination broker's own Service, and the
+# missing ConfigMap must not halt.
+reset_fixtures
+REDPANDA_PODS=("$RELEASE-redpanda-hq-0" "$RELEASE-redpanda-edge-03-0" \
+               "$RELEASE-redpanda-region-east-0" "$RELEASE-redpanda-edge-02-0" \
+               "$RELEASE-redpanda-edge-01-0")
+BG_FIXTURE_ROWS=(
+  $'Deployment/edge-hq-bridge-01\tedge-01/region-edge-01-source-edge-01\tDEST_HOST='"$RELEASE"'-redpanda-region-east.openddil.svc.cluster.local|DEST_PORT=9092|'
+  $'Deployment/edge-hq-bridge-02\tedge-02/region-edge-02-source-edge-02\tDEST_HOST='"$RELEASE"'-redpanda-region-east.openddil.svc.cluster.local|DEST_PORT=9092|'
+  $'Deployment/edge-hq-bridge-03\tedge-03/region-edge-03-source-edge-03\tDEST_HOST='"$RELEASE"'-redpanda-hq.openddil.svc.cluster.local|DEST_PORT=9092|'
+  $'Deployment/tier-uplink-region-east\tregion-east/region-region-east-hq-source\tDEST_HOST='"$RELEASE"'-redpanda-hq.openddil.svc.cluster.local|DEST_PORT=9092|'
+)
+out="$( (set -e; bridge_graph; topo_sort_redpanda_pods) 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && pass "5d: direct DEST_HOSTs with no toxiproxy ConfigMap resolve (rc 0)" \
+  || fail "5d: rc=$rc, expected 0"
+grep -q "phase 4 order (source-first): edge-01 edge-02 edge-03 region-east hq" <<<"$out" \
+  && pass "5d: order is edge-01, edge-02, edge-03, region-east, hq" \
+  || fail "5d: order did not match the direct-wired edges as expected"
+
 # ===========================================================================
 # case 6 — destination stability: a double read that keeps moving retries up
 # to DEST_READ_TRIES then halts; a post-trim double read that regresses on
