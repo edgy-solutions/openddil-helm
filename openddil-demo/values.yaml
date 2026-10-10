@@ -1743,16 +1743,6 @@ releasability:
   oversightRoles:
     - auditor
 
-  # The WAN sever/restore toggle is gated separately from the oversight
-  # roles above: it is an AFFORDANCE check (gateway/pep.py's /proxies/
-  # route), not a row filter, so it lives beside OPENDDIL_OVERSIGHT_ROLES's
-  # source (this block) rather than under a new top-level key. A string,
-  # not a list, because it is handed straight through as the
-  # OPENDDIL_WAN_CONTROL_ROLES env var, which the gateway parses as CSV
-  # (_parse_roles_csv) the same way its own built-in default "supervisor"
-  # already is.
-  wanControlRoles: "supervisor"
-
   # --- CLASS 4: known to need labels, not yet stamped. REFUSED meanwhile. ---
   #
   # Declared so the gate can tell "a table we know about and have not
@@ -1851,9 +1841,8 @@ exerciseControl:
   # OPENDDIL_EXERCISE_CONTROL_URL/ROLES when this is true (releasability.yaml).
   enabled: false
   port: 8095
-  # Gateway role list, same parsing as releasability.wanControlRoles (comma
-  # list, no further validation at render time -- control.py's own consumer
-  # owns that).
+  # Gateway role list, comma-separated; no further validation at render
+  # time -- control.py's own consumer owns that.
   roles: "supervisor"
   # {name, endpoint, operations: {op: {method, path, body}}}. Overlays carry
   # the real map; op keys must be one of pause/resume/stop/restart/run --

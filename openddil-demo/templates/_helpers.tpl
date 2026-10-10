@@ -735,6 +735,9 @@ Usage: {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
 {{- if include "openddil.linkControlEnabled" $root }}
 {{- range (include "openddil.tierList" $root | fromYamlArray) }}
 {{- if or (eq .kind "edge") (include "openddil.isTierManaged" (dict "id" .id "root" $root)) }}
+{{- if eq (.id | toString) "uplink" }}
+{{- fail "openddil.uplinkLinks: a tier id may not be literally \"uplink\" while linkControl is on -- the PEP's /proxies/uplink route would shadow it" -}}
+{{- end }}
 {{- $p := include "openddil.effectiveParent" (dict "tier" . "root" $root) | fromYaml -}}
 {{- $index := len $out -}}
 {{- $out = append $out (dict

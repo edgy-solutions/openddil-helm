@@ -1156,18 +1156,28 @@ spec:
             # admin API; see infrastructure.yaml's own comment.
             - name: OPENDDIL_WAN_CONTROL_URL
               value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
-            - name: OPENDDIL_WAN_CONTROL_ROLES
-              value: {{ $root.Values.releasability.wanControlRoles | quote }}
             # THIS TIER'S own uplink (openddil.uplinkPort non-empty for a
-            # tier in openddil.uplinkLinks). Rendered only when the tier has
-            # one; a tier PEP can address no other link.
+            # tier in openddil.uplinkLinks), with its effective parent for
+            # display. Rendered only when the tier has one.
             {{- $tierUplinkPort := include "openddil.uplinkPort" (dict "tier" $tier "root" $root) }}
             {{- if $tierUplinkPort }}
+            {{- $tierParent := include "openddil.effectiveParent" (dict "tier" $tier "root" $root) | fromYaml }}
             - name: OPENDDIL_WAN_UPLINK
               value: {{ printf "uplink-%s" $tier.id | quote }}
-            - name: OPENDDIL_WAN_LINKS
-              value: {{ printf "uplink-%s" $tier.id | quote }}
+            - name: OPENDDIL_WAN_UPLINK_PARENT
+              value: {{ $tierParent.host | quote }}
             {{- end }}
+            # DIRECT children: the uplinkLinks entries whose parent is this
+            # tier. Always rendered, possibly "" (a leaf), so the PEP never
+            # falls back to a default.
+            {{- $wanChildren := list -}}
+            {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
+            {{- if eq .parentBrokerHost ($tier.id | toString) }}
+            {{- $wanChildren = append $wanChildren .id -}}
+            {{- end }}
+            {{- end }}
+            - name: OPENDDIL_WAN_CHILDREN
+              value: {{ join "," $wanChildren | quote }}
             {{- end }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}

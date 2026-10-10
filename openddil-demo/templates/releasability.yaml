@@ -545,17 +545,18 @@ spec:
             # admin API; see infrastructure.yaml's own comment.
             - name: OPENDDIL_WAN_CONTROL_URL
               value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
-            - name: OPENDDIL_WAN_CONTROL_ROLES
-              value: {{ $root.Values.releasability.wanControlRoles | quote }}
-            # This is the ROOT pep: HQ has no uplink of its own, but it may
-            # address every tier's uplink by exact name -- see
-            # openddil.uplinkLinks and gateway/pep.py's WAN_LINKS.
-            {{- $wanLinks := list -}}
+            # This is the ROOT pep: HQ has no uplink of its own, so no
+            # _UPLINK. It addresses its DIRECT children's uplinks -- the
+            # openddil.uplinkLinks entries whose parentBrokerHost is hq --
+            # at /proxies/<child id> (gateway/pep.py's WAN_CHILDREN).
+            {{- $wanChildren := list -}}
             {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
-            {{- $wanLinks = append $wanLinks (printf "uplink-%s" .id) -}}
+            {{- if eq .parentBrokerHost "hq" }}
+            {{- $wanChildren = append $wanChildren .id -}}
             {{- end }}
-            - name: OPENDDIL_WAN_LINKS
-              value: {{ join "," $wanLinks | quote }}
+            {{- end }}
+            - name: OPENDDIL_WAN_CHILDREN
+              value: {{ join "," $wanChildren | quote }}
             {{- end }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
