@@ -388,12 +388,21 @@ carries that decision and its time.
 
 | t0 + | sim action | posture at edge-01 — lab stand-in (dis-sim) | logistics picture — **drafted, not built** |
 |---|---|---|---|
-| 0 | raise | `emplaced` at **t0+20** after a restart (20 s hold; measured 2026-10-08) | *drafted, not built:* launcher ready, 5/5 on hand |
+| 0 | raise | `emplaced` at **t0+20** after a restart (20 s hold; measured 2026-10-08). A launcher already `emplaced` stays so, its posture-since unchanged (measured 2026-10-10) | *drafted, not built:* launcher ready, 5/5 on hand |
 | 120 / 180 / 240 | fires 2, 1, 1 | `emplaced` | *drafted, not built:* remaining 1/5 (expended 4), DEGRADED |
-| 300 | stow | `march_ordered` at **t0+300**, immediate (measured 2026-10-08) | *drafted, not built:* unchanged; the launcher is packing up |
-| 330 | move | `moving` at **t0+340** (10 s hold; measured 2026-10-08) | *drafted, not built:* unchanged; the asset is in transit |
-| 390 | stop | `emplacing` at **t0+410** (20 s hold; measured 2026-10-07) | *drafted, not built:* unchanged |
-| 420 | raise | `emplaced` at **t0+420**, immediate (measured 2026-10-07) | *drafted, not built:* ready again, still 1/5 |
+| 300 | stow | `march_ordered` at **t0+299**, immediate (measured 2026-10-10) | *drafted, not built:* unchanged; the launcher is packing up |
+| 330 | move | `moving` at **t0+339** (10 s hold; measured 2026-10-10) | *drafted, not built:* unchanged; the asset is in transit |
+| 390 | stop | `emplacing` at **t0+409** (20 s hold; measured 2026-10-10) | *drafted, not built:* unchanged |
+| 420 | raise | `emplaced` at **t0+419**, immediate (measured 2026-10-10) | *drafted, not built:* ready again, still 1/5 |
+
+Each change reached the edge-01, region and HQ stores within the same second and was on all three at the first
+5 s poll after it (measured 2026-10-10): with the links up, the tiers agree to within 5 s.
+
+On screen, each tier shows the posture with its time in state, ticking: edge-01's **Posture** card (`EMPLACED 40s`),
+a posture badge on every row of the region and HQ asset lists, and posture counts per region (the region's fleet
+panel and HQ's fleet summary: emplaced / march ord. / moving / emplacing). Platforms other than the launcher read
+`moving` by the speed rule; that is expected. Give the region screen ~35 s after load before reading it (its rows
+sync after the page renders; at 20 s it showed none, 2026-10-10).
 
 The logistics-picture column is the intended picture, not a screen that
 exists. Do not narrate it on camera until a dry run shows it.
@@ -409,11 +418,11 @@ the 1 s start; not re-measured on the baked image).
 1. Wait until HQ shows `march_ordered` (from ~t0+300).
 2. At ~t0+320, on HQ, move the **WAN slider** to cut (BEAT 3). The region
    reads severed within ~10 s.
-3. **While cut**, edge-01 and the region see `moving` (t0+340), then
-   `emplacing` (t0+410), then `emplaced` (t0+420). HQ holds `march_ordered`,
+3. **While cut**, edge-01 and the region see `moving` (t0+339), then
+   `emplacing` (t0+409), then `emplaced` (t0+419). HQ holds `march_ordered`,
    labelled stale, its age growing.
 4. At ~t0+430, heal (BEAT 4). HQ converges to `emplaced`, and its
-   posture-since reads **t0+420: the edge's time, not the heal time.**
+   posture-since reads **t0+419: the edge's time, not the heal time.**
 
 *The beat:* the move happened while HQ could not see it. When the link came
 back, HQ shows not only where the launcher is now but when it got there, as
@@ -421,9 +430,6 @@ decided at the edge.
 
 Placeholders (do not record over one that is still open):
 
-- `<dry run: the screen that shows posture. At frontend HEAD (2026-10-07) no
-  pane renders the posture column; it is in every tier's store. Until a pane
-  shows it, do not narrate posture on camera.>`
 - `<co-located simulator: the route, the emplacement site, the march order's
   issuing echelon and its timing, authored on the simulator side. The times
   above are the lab stand-in's schedule, not the scenario's.>`
