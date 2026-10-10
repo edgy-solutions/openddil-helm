@@ -30,11 +30,12 @@ Frontend (port-forward):
 
 {{- if include "openddil.linkControlEnabled" . }}
 DDIL sever (toxiproxy):
-  Each tier's own WAN toggle severs that tier's own uplink through
-  /proxies/uplink (toxiproxy uplink-<id>, to its parent broker). The root
-  (HQ) has no uplink of its own; its toggles address each child's link,
-  /proxies/uplink-<id>. Disabling a proxy severs the link for real, not
-  simulated.
+  One link per uplink: each child tier's uplink to its parent is its own
+  toxiproxy proxy, uplink-<child id>. A tier's screen toggles its own
+  uplink (/proxies/uplink) and each direct child's (/proxies/<child id>),
+  so the same link is cut from either end. HQ has no uplink. The same
+  route sets a link's latency, jitter and bandwidth; a slow link stays up.
+  Disabling a proxy severs the link for real, not simulated.
 
 {{ end -}}
 Tear down:

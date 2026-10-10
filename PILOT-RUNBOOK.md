@@ -840,11 +840,14 @@ and a live row count.
 ### Sever
 
 ```bash
-curl -X POST http://localhost:8474/proxies/hq-link \
+curl -X POST http://localhost:8475/proxies/uplink-$PILOT \
   -H 'Content-Type: application/json' -d '{"enabled": false}'
 ```
 
-*(port-forward toxiproxy first: `kubectl -n $NS port-forward svc/$REL-toxiproxy 8474:8474`)*
+*(port-forward toxiproxy's admin API first: `kubectl -n $NS port-forward svc/$REL-toxiproxy 8475:8475`.
+Needs `linkControl.enabled: true`. Each tier's uplink is its own proxy, `uplink-<tier id>`; the shared
+`hq-link` proxy is retired (ADR-0021 amendment 2026-10-10). The same cut is the pilot's uplink toggle on its
+own screen, or its row on the parent's screen.)*
 
 ### What to capture, in order
 
@@ -916,7 +919,7 @@ severance at ~1.65 msg/s, then back to 1 within 20 seconds of healing.
 ### Heal — rung (iv)
 
 ```bash
-curl -X POST http://localhost:8474/proxies/hq-link \
+curl -X POST http://localhost:8475/proxies/uplink-$PILOT \
   -H 'Content-Type: application/json' -d '{"enabled": true}'
 ```
 
