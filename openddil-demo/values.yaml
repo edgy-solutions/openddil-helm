@@ -1125,6 +1125,11 @@ egress:
     # intake polling a destination's artifacts by kind (ADR-0046 §5). Opaque
     # JSON, passed through as-is. Empty by default -- no mount, no file.
     artifacts: []
+    # How the stub answers each event it receives, served after `artifacts`
+    # at GET /artifacts. Empty = the stand-in answers nothing. When set, it is
+    # the responder config documented in egress/stub_sink.py (Responder),
+    # mounted as response.json beside artifacts.json.
+    respond: {}
 
 # --- Utility images (template-internal: Atlas, Alpine, curl) ----------------
 # Three small images referenced by chart templates rather than by service-

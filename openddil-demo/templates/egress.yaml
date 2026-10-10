@@ -789,6 +789,9 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
 data:
   artifacts.json: {{ toJson .Values.egress.stubSink.artifacts | quote }}
+  {{- if .Values.egress.stubSink.respond }}
+  response.json: {{ toJson .Values.egress.stubSink.respond | quote }}
+  {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -810,7 +813,13 @@ spec:
       annotations:
         # A changed artifact list must roll the stub, the same way a changed
         # config rolls the assembler/forwarder above.
+        {{- /* The answer config rolls it too, but only when set: an empty one
+             keeps the expression below unchanged so existing releases don't roll. */}}
+        {{- if .Values.egress.stubSink.respond }}
+        checksum/artifacts: {{ toJson (list .Values.egress.stubSink.artifacts .Values.egress.stubSink.respond) | sha256sum | quote }}
+        {{- else }}
         checksum/artifacts: {{ toJson .Values.egress.stubSink.artifacts | sha256sum | quote }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -832,6 +841,10 @@ spec:
               value: {{ .Values.egress.stubSink.idField | quote }}
             - name: OPENDDIL_STUB_ARTIFACTS_PATH
               value: {{ printf "%s/artifacts.json" $stubArtifactsMountPath | quote }}
+            {{- if .Values.egress.stubSink.respond }}
+            - name: OPENDDIL_STUB_RESPONSE_PATH
+              value: {{ printf "%s/response.json" $stubArtifactsMountPath | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: "INFO"
           ports:
