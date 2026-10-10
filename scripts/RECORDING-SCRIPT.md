@@ -103,10 +103,13 @@ beats below disagree with what was measured, the measurement is here:
   liaison 20**. Bram sees **5 on the Edge-02 screen** and **9 on the HQ
   screen**. Region partials are `ATL` 11, `ATL,BDR` 1, `BDR` 8 (sum 20)
   (measured 2026-10-10, rev 136). The beats below carry these numbers.
-* **Region screen header** now counts the fleet placed on the 3D scene, and
-  the scene centres on the fleet when no FOBs are configured: the header
-  read `20 ASSETS` against 20 live rows in the region store (measured
-  2026-10-08, rev 118). It used to read `0 ASSETS`; that is fixed.
+* **Region screen title counts the AOR list, and says apart how many the
+  map placed:** `20 ASSETS` and `20 ON MAP` against 20 live rows in the
+  region store (measured 2026-10-10, rev 137). Before rev 137 the title
+  counted only what the 3D scene placed (an asset needs a position or a FOB
+  match, on a tier the scene draws), so it could read `0 ASSETS` with a full
+  AOR list, as one rev 136 screen did. If `ON MAP` is lower than `ASSETS`,
+  the difference is assets the scene could not place yet.
 * **`LINK: STALE` at rest is an HTTP/1.1 effect, and the lab does not show
   it.** Over HTTP/1.1 a browser opens at most six connections to a host, the
   edge page holds eight live feeds, and the link row waits its turn. Served
@@ -121,13 +124,26 @@ beats below disagree with what was measured, the measurement is here:
   `sever-tier.sh`. Measured times to flip: **region ~10 s, the HQ view of
   the HQ-attached edge ~16 s**; back up in **~9 s and ~15 s**. Leave that
   long before pointing at a screen.
-* **Every link has its own row now.** HQ's link card lists edge-01,
-  edge-02, edge-03 and region-east; the region's lists edge-01 and edge-02;
-  each edge and the region carry their own uplink. Each row has a toggle
-  and `LAT` / `JIT` / `BW` with `SET` and `CLR`. Any signed-in viewer can
-  use them (the role gate is gone). Nothing restarts; every screen stays
-  reachable. **The reset does not restore the rows or clear the toxics**:
-  set every row back on and `CLR` every toxic by hand before the next beat.
+* **Every link has its own row, in the screen's header.** HQ's header
+  carries its two direct links, edge-03 and region-east (since rev 137 they
+  sit where the old status dots were; the `DIRECT LINKS` card is gone); the
+  region's header carries edge-01 and edge-02; each edge and the region
+  carry their own uplink. Each row has a toggle and `LAT` / `JIT` / `BW`
+  with `SET` and `CLR`. Any signed-in viewer can use them. Nothing
+  restarts; every screen stays reachable. **The reset does not restore the
+  rows or clear the toxics**: set every row back on and `CLR` every toxic by
+  hand before the next beat.
+* **The region's link card counts every link it watches**, its uplink plus
+  edge-01 and edge-02: `3 UP · 0 IDLE · 0 DOWN` at rest (measured
+  2026-10-10, rev 137).
+* **Uplink labels name the parent.** Each edge screen reads `UPLINK TO
+  REGION-EAST` and `UPLINK BUFFER → region-east`; the region reads `UPLINK
+  TO HQ` and `UPLINK BUFFER → HQ` (measured 2026-10-10, rev 137; the buffer
+  label read `EDGE→HQ BUFFER` on the edges and the region before).
+* **`Restart exercise` needs the supervisor login** (`liaison.coalition`):
+  it destroys exercise state and takes about 13 minutes. The gateway refuses
+  anyone else's press with that reason (measured 2026-10-10, rev 137: 403
+  for `operator.atlantia`, no reset started).
 * **BEAT 3 from HQ's region-east row** (measured 2026-10-10, rev 133): no
   `SEVERED and PROVEN` and no 60 s wait. The region screen stays reachable
   and reads `REGIONAL↔HQ: SEVERED`. **The edge screens stay `LINK UP`**:
@@ -145,13 +161,14 @@ beats below disagree with what was measured, the measurement is here:
   `sever-tier.sh edge-01` is the heavier cut: it restarts edge-01's pods and
   closes its ingress, so edge-01's screen is unreachable (502 at login).
   Under either, edge-02, the region and HQ stay `LINK UP`.
-* **A row heal flickers before it settles.** After turning a row back on,
-  the heartbeats queued during the cut arrive in a burst: the row reads up
-  while its data age is still minutes old, drops back to down once the
-  burst ends, then reads up with fresh data. Measured 2026-10-10 (rev 136)
-  on both heals: region-east at HQ up at +10 and +20 s, down at +30 s, idle
-  and fresh by ~+2.5 min; edge-01 up at +20 and +30 s, down at +40 s, up and
-  fresh (0.4 s) at +50 s. **Point at the healed row at ~+60 s**, not before.
+* **A row heal reads up once, then stays.** The heartbeats queued during the
+  cut still arrive in a burst after the heal, but a link reads up only after
+  three consecutive fresh heartbeats (sent within the last 15 s); the stale
+  burst is skipped. Measured 2026-10-10 (rev 137): region-east at HQ up at
+  **+30 s** (then `idle`, its at-rest word), edge-01 at the region and at HQ
+  up at **+45 s** with data age 1.1 s; neither went back down. On rev 136
+  the same edge-01 heal flickered: up at +9 s, down at +25 s, up at +37 s.
+  **Point at the healed row at ~+50 s.**
 * **The HQ-attached edge is invisible.** Under a cut HQ keeps edge-03 fresh
   (1–5 s) while the tier edges go stale, but edge-03's only asset is
   unlabelled and shown to no one, so no screen draws its row or its
@@ -252,17 +269,18 @@ last clause is why all four logins happen now.
 Show Ada and Bram side by side.
 
 * **Ada sees 12 assets. Bram sees 5 at edge-02 and 9 at the hub. The
-  liaison sees 20.** (Measured 2026-10-10, rev 136: Ada's radar draws 12,
-  Bram's hub header reads `9 ASSETS`.)
+  liaison sees 20.** (Measured 2026-10-10, rev 136: Ada's radar draws 12;
+  rev 137: Bram's hub header reads `9 ASSETS` under his entitlement.)
 * Same screen, same role at their own tier, different fleets — **not two
   filtered views of one list; two different answers to the same query**,
   decided by the subject's entitlements and the data's labels.
 * On the region screen: the rollup is composed of **three class partials**
   (`ATL` 11, `ATL,BDR` 1, `BDR` 8). Rhea sees all three summed to 20; Ada
   would see 12 of the same rollup.
-* **Region screen, 3D scene** — the fleet placed on the map, with the header
-  counting what it placed: `20 ASSETS` against 20 live rows in the region
-  store (measured 2026-10-08, rev 118). Click an asset to drill in.
+* **Region screen, 3D scene** — the fleet placed on the map, with the title
+  count matching the AOR list: `20 ASSETS` and `20 ON MAP` against 20 live
+  rows in the region store (measured 2026-10-10, rev 137). Click an asset
+  to drill in.
 * **One radar's condition, the same at every tier.** `dis:1:1:1008` steps
   through its condition on the simulator's schedule (120 s steps, a 2400 s
   cycle). At the `damage moderate` step edge-01 reads it CRITICAL from its
@@ -390,7 +408,7 @@ Then:
   2026-10-10 (rev 136): the open edge-01 screen still read 0 assets 3.5 min
   after the reset finished; a reloaded one read 12 at once. Run the
   four-profile login check anyway (4/4 on the dry run).
-* **Links:** set every row on every link card back on and `CLR` every
+* **Links:** set every link row back on and `CLR` every
   toxic; the reset leaves them as they were.
 * **Wait 5 minutes** before BEAT 3 for the reasons in the pre-flight notes.
 
@@ -405,8 +423,9 @@ of the HQ-attached edge; wait that long before pointing at a screen.
 
 ## BEAT 3 — dimension 1, region cut from HQ (~4 min)
 
-On the HQ screen as `liaison.coalition`, turn off **region-east's row** on
-the link card. Measured 2026-10-10 (rev 133): HQ's row reads down by +20 s,
+On the HQ screen as `liaison.coalition`, turn off **region-east's row** in
+the header strip. Measured 2026-10-10 (rev 133): HQ's row reads down by +20 s
+(rev 137: +15 s),
 HQ's summary `1 UP · 0 IDLE · 2 DOWN` (edge-01 and edge-02 ride
 region-east), the region screen `REGIONAL↔HQ: SEVERED`.
 
@@ -428,10 +447,10 @@ support or a blank where a fleet was.
 
 ## BEAT 4 — heal (~1 min)
 
-Turn region-east's row back on. The row reads up at +30 s and HQ's summary
-`3 UP · 0 IDLE · 0 DOWN` (measured 2026-10-10, rev 133); on the dry run
-(rev 136) the row flickered up, down, then up (see the caveats), so point
-at it at ~+60 s. HQ's region view converged in **under 10 s** after the old
+Turn region-east's row back on. The row reads up once at **+30 s** and stays
+(measured 2026-10-10, rev 137; edge-01 and edge-02 at HQ with it, no
+flicker), HQ's summary `3 UP · 0 IDLE · 0 DOWN` (rev 133); point at it at
+~+40 s. HQ's region view converged in **under 10 s** after the old
 slider's heal (2026-10-05); after the row heal on the dry run HQ's launcher
 row caught up at **+41 s**, carrying the edge's time (BEAT 3m). **Say the number
 moved** — minutes stale to seconds — because convergence that cannot be seen
@@ -528,7 +547,10 @@ Placeholders (do not record over one that is still open):
 ## BEAT 5 — dimension 2, edge-01 cut (~4 min)
 
 On the region screen (as `operator.regioneast`), turn off **edge-01's row**
-on the link card. Nothing restarts. Measured 2026-10-10 (rev 133): edge-01
+in the header. Nothing restarts. Measured 2026-10-10 (rev 137): at +30 s the
+region's link card reads `2 UP · 0 IDLE · 1 DOWN`, and edge-01's own screen
+reads `DDIL: LINK SEVERED` over `UPLINK BUFFER → region-east`, the buffer
+that holds what edge-01 cannot send. Measured 2026-10-10 (rev 133): edge-01
 reads down in the region store and at HQ by +20 s while edge-02 stays up;
 **edge-01's own screen stays up and reads `DDIL: LINK SEVERED`**; HQ's
 summary reads `2 UP · 0 IDLE · 1 DOWN` with an edge-01 `DOWN` badge.
@@ -568,9 +590,9 @@ region.
 ## BEAT 6 — heal and close (~1 min)
 
 **If BEAT 5 cut from the row:** turn edge-01's row back on. edge-01 reads up
-in the region store and at HQ at +40 s (measured 2026-10-10, rev 133); on
-the dry run (rev 136) it flickered up at +20 s, down at +40 s, and was up
-with fresh data at +50 s, so say "back" at ~+60 s. Its own screen returns
+once in the region store and at HQ at **+45 s**, with fresh data (1.1 s),
+and stays up (measured 2026-10-10, rev 137; the rev 136 flicker is gone),
+so say "back" at ~+50 s. Its own screen returns
 to `UPLINK: LINK UP`. Nothing restarted, so there is no backoff
 to wait out. The two options below apply only after `sever-tier.sh`.
 
