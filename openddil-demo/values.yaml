@@ -1839,12 +1839,9 @@ releasability:
 # above for why that pattern exists (no image to build, no wheels at start).
 exerciseControl:
   # HQ only; off by default. The root pep only gets
-  # OPENDDIL_EXERCISE_CONTROL_URL/ROLES when this is true (releasability.yaml).
+  # OPENDDIL_EXERCISE_CONTROL_URL when this is true (releasability.yaml).
   enabled: false
   port: 8095
-  # Gateway role list, comma-separated; no further validation at render
-  # time -- control.py's own consumer owns that.
-  roles: "supervisor"
   # {name, endpoint, operations: {op: {method, path, body}}}. Overlays carry
   # the real map; op keys must be one of pause/resume/stop/restart/run --
   # same ALLOWED_OPS set control.py refuses to start without (see exercise/

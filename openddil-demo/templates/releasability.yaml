@@ -568,8 +568,6 @@ spec:
             # See values.yaml exerciseControl and templates/exercise-control.yaml.
             - name: OPENDDIL_EXERCISE_CONTROL_URL
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
-            - name: OPENDDIL_EXERCISE_CONTROL_ROLES
-              value: {{ $root.Values.exerciseControl.roles | quote }}
             {{- end }}
           ports:
             - containerPort: 8080
