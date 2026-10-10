@@ -99,20 +99,23 @@ beats below disagree with what was measured, the measurement is here:
 * **BEAT 0:** the advancing check can report `region rollups … FROZEN` over
   its 20 s window while the rollup is moving: it emits in bursts. Re-run
   once; a second FROZEN is real.
-* **BEAT 2 numbers have moved** (the fleet gained one ATL asset): **Ada sees
-  9, the liaison 15**. Bram sees **6 on the Edge-02 screen** and **7 on the
-  HQ screen**. Region partials are `ATL` 8, `ATL,BDR` 1, `BDR` 6 (sum 15).
+* **BEAT 2 numbers have moved** (the fleet grew to 20): **Ada sees 12, the
+  liaison 20**. Bram sees **5 on the Edge-02 screen** and **9 on the HQ
+  screen**. Region partials are `ATL` 11, `ATL,BDR` 1, `BDR` 8 (sum 20)
+  (measured 2026-10-10, rev 136). The beats below carry these numbers.
 * **Region screen header** now counts the fleet placed on the 3D scene, and
   the scene centres on the fleet when no FOBs are configured: the header
   read `20 ASSETS` against 20 live rows in the region store (measured
   2026-10-08, rev 118). It used to read `0 ASSETS`; that is fixed.
-* **An edge screen can show `LINK: STALE` for a second at rest.** Measured
-  once in 150 s on one edge screen, link healthy, on two separate runs. The
-  cause is the browser, not the link: over plain HTTP a browser opens at most
-  six connections to a host, the edge page holds eight live feeds, and the
-  link row waits its turn for up to ~20 s. The region screen's feeds change
-  every second and do not show it. If it shows on camera, say it is the
-  screen's feed, not the link.
+* **`LINK: STALE` at rest is an HTTP/1.1 effect, and the lab does not show
+  it.** Over HTTP/1.1 a browser opens at most six connections to a host, the
+  edge page holds eight live feeds, and the link row waits its turn. Served
+  over HTTP/2 (TLS), the feeds share one connection: 0 `LINK: STALE` in 363
+  one-second samples on two edge screens, link healthy. The same edge screen
+  forced to HTTP/1.1 showed `LINK: STALE` once for ~10 s in 180 s (measured
+  2026-10-10, rev 136). If a viewer's path downgrades to HTTP/1.1 (a proxy
+  in between) and it shows on camera, say it is the screen's feed, not the
+  link.
 * **The LINK indicator now follows reachability** (probe plus the age of the
   last exchange), so it agrees with the story under the slider AND under
   `sever-tier.sh`. Measured times to flip: **region ~10 s, the HQ view of
@@ -142,6 +145,13 @@ beats below disagree with what was measured, the measurement is here:
   `sever-tier.sh edge-01` is the heavier cut: it restarts edge-01's pods and
   closes its ingress, so edge-01's screen is unreachable (502 at login).
   Under either, edge-02, the region and HQ stay `LINK UP`.
+* **A row heal flickers before it settles.** After turning a row back on,
+  the heartbeats queued during the cut arrive in a burst: the row reads up
+  while its data age is still minutes old, drops back to down once the
+  burst ends, then reads up with fresh data. Measured 2026-10-10 (rev 136)
+  on both heals: region-east at HQ up at +10 and +20 s, down at +30 s, idle
+  and fresh by ~+2.5 min; edge-01 up at +20 and +30 s, down at +40 s, up and
+  fresh (0.4 s) at +50 s. **Point at the healed row at ~+60 s**, not before.
 * **The HQ-attached edge is invisible.** Under a cut HQ keeps edge-03 fresh
   (1–5 s) while the tier edges go stale, but edge-03's only asset is
   unlabelled and shown to no one, so no screen draws its row or its
@@ -241,13 +251,15 @@ last clause is why all four logins happen now.
 
 Show Ada and Bram side by side.
 
-* **Ada sees 8 assets. Bram sees 7. The liaison sees 14.**
+* **Ada sees 12 assets. Bram sees 5 at edge-02 and 9 at the hub. The
+  liaison sees 20.** (Measured 2026-10-10, rev 136: Ada's radar draws 12,
+  Bram's hub header reads `9 ASSETS`.)
 * Same screen, same role at their own tier, different fleets — **not two
   filtered views of one list; two different answers to the same query**,
   decided by the subject's entitlements and the data's labels.
 * On the region screen: the rollup is composed of **three class partials**
-  (`ATL` 7, `ATL,BDR` 1, `BDR` 6). Rhea sees all three summed to 14; Ada
-  would see 8 of the same rollup.
+  (`ATL` 11, `ATL,BDR` 1, `BDR` 8). Rhea sees all three summed to 20; Ada
+  would see 12 of the same rollup.
 * **Region screen, 3D scene** — the fleet placed on the map, with the header
   counting what it placed: `20 ASSETS` against 20 live rows in the region
   store (measured 2026-10-08, rev 118). Click an asset to drill in.
@@ -257,7 +269,7 @@ Show Ada and Bram side by side.
   appearance, and the HQ fleet summary's element counts for region-east read
   **160 critical / 1745 degraded**, the same as edge-01's bands for that
   asset (measured 2026-10-09, rev 130: edge, region and HQ equal on 20 of 20
-  steps). HQ holds the counts, not the elements: the element tree stays at
+  steps; again 160 / 1745 at all three on 2026-10-10, rev 136). HQ holds the counts, not the elements: the element tree stays at
   the owning edge and only its rollup crosses.
 
 *The beat:* the aggregate is no more visible than its least visible input.
@@ -266,9 +278,11 @@ Show Ada and Bram side by side.
 
 Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 
-1. **TAK device — the fleet with readiness.** 9 tracks, `dis:1:1:1000`–`1008`
-   (measured 2026-10-03; `1005` is destroyed and still shown — a C2 viewer
-   needs to see the loss). Nine is right, not eight. The destroyed track
+1. **TAK device — the fleet with readiness.** 12 tracks: `dis:1:1:1000`–`1009`
+   and two more ATL tracks (measured 2026-10-10, rev 136, read at the TAK
+   server; the device itself was not on the lab). `1005` is destroyed and
+   still shown — a C2 viewer needs to see the loss. Twelve is right, not
+   eleven. The destroyed track
    stays on the picture because it says destroyed: operational status and
    reporting status are two columns so that it can. **Point at `1005` and
    say:** "that one's dead and still beaconing." Readiness reads as
@@ -280,15 +294,15 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
    2026-10-03: no cert → *certificate required*, other device's cert → *bad
    certificate*, 0 bytes either way).
 3. **HQ view — the egress admission pane.** "**N of M admitted**", a refused
-   count, and a **withheld** line. Measured 2026-10-03 for the C2 destination,
-   one viewer at a time at the hub:
+   count, and a **withheld** line. Measured 2026-10-10 (rev 136) for the C2
+   destination, one viewer at a time at the hub:
 
    | viewer | admitted | refused | withheld |
    |---|---|---|---|
-   | `liaison.coalition` | 9 | 6 | 1 |
-   | `operator.regioneast` | 9 | 6 | 1 |
-   | `operator.atlantia` | 9 | 0 | 1 |
-   | `operator.borduria` | 1 | 6 | 1 |
+   | `liaison.coalition` | 12 | 8 | 1 |
+   | `operator.regioneast` | 12 | 8 | 1 |
+   | `operator.atlantia` | 12 | 0 | 1 |
+   | `operator.borduria` | 1 | 8 | 1 |
 
    Show two of these: the HQ profile (the liaison) and `operator.borduria`
    in a **fifth browser profile** at `<hub-host>`, logged in before any cut.
@@ -305,15 +319,16 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
    expends 4 of its load of 5 in three launches by t+300: edge-01, the
    region and HQ read it DEGRADED, the effector factor saying `remaining 1/5
    (expended 4)`. A resupply arrives every 600 s from t+660, and the
-   launcher reads OK again at all three tiers (measured 2026-10-09). The
+   launcher reads OK again at all three tiers (measured 2026-10-09; again
+   2026-10-10, rev 136: three resupplies seen by t+1886, OK at all three). The
    factor clears above 25 %, so the screen says OK from the first resupply;
    the climb itself, 1 → 2 → 3 → 4 → 5 at t+660 / 1260 / 1860 / 2460 and
    never past 5, is in the launcher's state, not on a card. The reset
    restarts this count with the launcher.
 
 *The beat:* the boundary keeps a ledger, and each viewer reads only the part
-of it about records they could see anyway. Bram's 1 of 7 is the same gate,
-reading the same records, as the liaison's 9 of 15.
+of it about records they could see anyway. Bram's 1 of 9 is the same gate,
+reading the same records, as the liaison's 12 of 20.
 
 ## BEAT 2b — one fault, connected: from a technician's report to an action (~3 min)
 
@@ -340,7 +355,7 @@ Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
    approvals (a regional officer and the coalition supervisor); it cites
    three modules (fault isolation, remove, install). Decision: **ADMIT**.
    Report to answer: 1 s; report to admitted action: 30 s, one intake poll
-   (measured 2026-10-10, rev 134).
+   (measured 2026-10-10, rev 134; again under 1 s and 27 s on rev 136).
    **FIGURE** on the row opens the cited figure, "Detail A, Section 3", with
    section 3 highlighted.
    If BIT already raised this fault, Ada's report joins that fault's event
@@ -358,18 +373,24 @@ did not.
 
 Sign in as the supervisor and press **Restart exercise** in the exercise
 panel; read the result as in pre-flight steps 3 and 4. Measured 2026-10-10
-(rev 136): the Job took **647 s**, verdict PASS, last line `RESTART SENT
-(adapter 200)`, one `DECLARED UNMEASURED`. It stops and restarts every
-simulator labelled `openddil.io/role=simulator` (six on the lab, 0 `NOT A
-PRODUCER`), so every schedule starts again from its own t0: the launcher
-reads `emplaced` at t0+4 at all three tiers, and BEAT 3m's clock starts
-here. Then:
+(rev 136): the Job took **647 s** and, on the dry run, **731 s**; verdict
+PASS, last line `RESTART SENT (adapter 200)`, one `DECLARED UNMEASURED`.
+Budget ~12 minutes. It stops and restarts every simulator labelled
+`openddil.io/role=simulator` (six on the lab, 0 `NOT A PRODUCER`), so every
+schedule starts again from its own t0: the launcher reads `emplaced` from
+its container's start at all three tiers, and BEAT 3m's clock starts here.
+Then:
 
+* **Reload every screen.** The four profiles stay signed in (no new sign-in
+  needed), but a screen left open across the reset goes `LINK: STALE` while
+  the producers are stopped, then `LINK: UNKNOWN` with an empty fleet once
+  the stores are cleared, and does **not** refill on its own. Measured
+  2026-10-10 (rev 136): the open edge-01 screen still read 0 assets 3.5 min
+  after the reset finished; a reloaded one read 12 at once. Run the
+  four-profile login check anyway (4/4 on the dry run).
 * **Links:** set every row on every link card back on and `CLR` every
   toxic; the reset leaves them as they were.
 * **Wait 5 minutes** before BEAT 3 for the reasons in the pre-flight notes.
-* `<dry run: whether the four signed-in profiles survive the reset or must
-  sign in again>`.
 
 ## Before BEAT 3 — what the LINK indicator tracks
 
@@ -406,9 +427,11 @@ support or a blank where a fleet was.
 ## BEAT 4 — heal (~1 min)
 
 Turn region-east's row back on. The row reads up at +30 s and HQ's summary
-`3 UP · 0 IDLE · 0 DOWN` (measured 2026-10-10, rev 133). HQ's region view
-converged in **under 10 s** after the old slider's heal (2026-10-05);
-`<dry run: HQ's region view convergence after the row heal>`. **Say the number
+`3 UP · 0 IDLE · 0 DOWN` (measured 2026-10-10, rev 133); on the dry run
+(rev 136) the row flickered up, down, then up (see the caveats), so point
+at it at ~+60 s. HQ's region view converged in **under 10 s** after the old
+slider's heal (2026-10-05); after the row heal on the dry run HQ's launcher
+row caught up at **+41 s**, carrying the edge's time (BEAT 3m). **Say the number
 moved** — minutes stale to seconds — because convergence that cannot be seen
 to move is indistinguishable from a screen that was never stale.
 
@@ -426,7 +449,8 @@ the schedule start: the launcher's `posture schedule fired ... t+0` log line.
 The reset (Restart exercise) restarts this clock: it stops and restarts every
 Deployment labelled `openddil.io/role=simulator`, the launcher included. After
 a reset the launcher reads `emplaced` at t0+4 at all three tiers, from the
-first record into the emptied stores (measured 2026-10-10). Without a reset,
+first record into the emptied stores (measured 2026-10-10; on the dry run
+its posture-since equalled the container's start time). Without a reset,
 to start the beat on a known clock, restart the launcher and read t0:
 
 ```
@@ -478,6 +502,15 @@ the 1 s start; not re-measured on the baked image).
 4. At ~t0+430, heal (BEAT 4). HQ converges to `emplaced`, and its
    posture-since reads **t0+419: the edge's time, not the heal time.**
 
+Dry run 2026-10-10 (rev 136), t0 = the launcher container's start after the
+reset: `march_ordered` t0+300 at all three; cut at t0+321, HQ's row down at
++20 s, HQ `1 UP · 0 IDLE · 2 DOWN`, region `REGIONAL↔HQ: SEVERED`; while
+cut, edge-01 and the region read `moving` t0+340, `emplacing` t0+410,
+`emplaced` t0+420, and HQ held `march_ordered`; HQ's own consumers stayed
+Stable and kept reading. Heal at t0+432: HQ read `emplaced` at +41 s, its
+posture-since **equal to the edge's to the second** (t0+420), not the heal
+time.
+
 *The beat:* the move happened while HQ could not see it. When the link came
 back, HQ shows not only where the launcher is now but when it got there, as
 decided at the edge.
@@ -489,8 +522,6 @@ Placeholders (do not record over one that is still open):
   above are the lab stand-in's schedule, not the scenario's.>`
 - `<co-located simulator: whether the fires come before the move (as in the
   stand-in) or after re-emplacement.>`
-- `<dry run: HQ's posture convergence time after the heal, and the measured
-  posture-since at HQ against the edge's.>`
 
 ## BEAT 5 — dimension 2, edge-01 cut (~4 min)
 
@@ -499,6 +530,9 @@ on the link card. Nothing restarts. Measured 2026-10-10 (rev 133): edge-01
 reads down in the region store and at HQ by +20 s while edge-02 stays up;
 **edge-01's own screen stays up and reads `DDIL: LINK SEVERED`**; HQ's
 summary reads `2 UP · 0 IDLE · 1 DOWN` with an edge-01 `DOWN` badge.
+Again on the dry run (rev 136): down at both stores at +20 s, the same two
+screens; after 120 s edge-01's data age was 132.7 s in the region store
+against edge-02's 0.2 s.
 
 The heavier cut, if the beat needs edge-01 gone entirely:
 ```
@@ -519,8 +553,9 @@ show that version from the region and HQ screens.
 3. **Optional, before the cut — a slow link is not a cut.** On the same row,
    set `LAT` 2000 and `SET`. edge-01's data age rises while edge-02's holds:
    region store 0.8 → 2.8 s, HQ 0.4 → 2.5 s, edge-02 1.0 / 0.7 s; the row
-   stays up and its `LAT` field shows 2000 (measured 2026-10-10, rev 133).
-   `CLR` before you cut.
+   stays up and its `LAT` field shows 2000 (measured 2026-10-10, rev 133;
+   dry run rev 136: region store 0.6 → 2.6 s, edge-02 0.5 s). `CLR` before
+   you cut.
 
 *The beat, and say it plainly:* HQ can tell **a quiet edge from a downed
 region uplink**, because it carries both ages instead of fusing them. Under
@@ -531,8 +566,10 @@ region.
 ## BEAT 6 — heal and close (~1 min)
 
 **If BEAT 5 cut from the row:** turn edge-01's row back on. edge-01 reads up
-in the region store and at HQ at +40 s (measured 2026-10-10, rev 133); its
-own screen returns to `LINK UP`. Nothing restarted, so there is no backoff
+in the region store and at HQ at +40 s (measured 2026-10-10, rev 133); on
+the dry run (rev 136) it flickered up at +20 s, down at +40 s, and was up
+with fresh data at +50 s, so say "back" at ~+60 s. Its own screen returns
+to `UPLINK: LINK UP`. Nothing restarted, so there is no backoff
 to wait out. The two options below apply only after `sever-tier.sh`.
 
 **After `sever-tier.sh`, choose the heal mode before you start. Both are
