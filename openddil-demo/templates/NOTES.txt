@@ -28,13 +28,15 @@ Frontend (port-forward):
 
 {{- end }}
 
+{{- if include "openddil.linkControlEnabled" . }}
 DDIL sever (toxiproxy):
   Each tier's own WAN toggle severs that tier's own uplink through
   /proxies/uplink (toxiproxy uplink-<id>, to its parent broker). The root
-  (HQ) toggle severs HQ's own uplink, /proxies/hq-link, the advertised
-  address of the HQ broker's PLAINTEXT listener. Disabling a proxy severs
-  the link for real, not simulated.
+  (HQ) has no uplink of its own; its toggles address each child's link,
+  /proxies/uplink-<id>. Disabling a proxy severs the link for real, not
+  simulated.
 
+{{ end -}}
 Tear down:
   helm -n {{ .Release.Namespace }} uninstall {{ .Release.Name }}
   # PVCs for postgres / redpanda persist by default — delete by hand if needed:

@@ -538,26 +538,25 @@ spec:
               value: {{ join "," $root.Values.releasability.subjectScopedTables | quote }}
             - name: OPENDDIL_OVERSIGHT_ROLES
               value: {{ join "," $root.Values.releasability.oversightRoles | quote }}
-            # WAN sever/restore control. Base URL only -- the gateway
-            # appends /proxies/hq-link itself (gateway/pep.py). Port is
-            # toxiproxy's proxyPort (8475), which is actually the admin API
-            # port despite the name; see infrastructure.yaml's own comment.
+            {{- if include "openddil.linkControlEnabled" $root }}
+            # WAN sever/restore control (linkControl.enabled only). Base URL
+            # only -- the gateway appends /proxies/<link> itself
+            # (gateway/pep.py). Port is toxiproxy's proxyPort (8475), the
+            # admin API; see infrastructure.yaml's own comment.
             - name: OPENDDIL_WAN_CONTROL_URL
               value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
             - name: OPENDDIL_WAN_CONTROL_ROLES
               value: {{ $root.Values.releasability.wanControlRoles | quote }}
-            # P5: this is the ROOT pep, so its own uplink is the original
-            # shared hq-link, and it may address every tier's uplink too
-            # (plus hq-link itself) by exact name -- see
-            # openddil.uplinkLinks and gateway/pep.py's WAN_UPLINK/WAN_LINKS.
-            {{- $wanLinks := list "hq-link" -}}
+            # This is the ROOT pep: HQ has no uplink of its own, but it may
+            # address every tier's uplink by exact name -- see
+            # openddil.uplinkLinks and gateway/pep.py's WAN_LINKS.
+            {{- $wanLinks := list -}}
             {{- range (include "openddil.uplinkLinks" $root | fromYamlArray) }}
             {{- $wanLinks = append $wanLinks (printf "uplink-%s" .id) -}}
             {{- end }}
-            - name: OPENDDIL_WAN_UPLINK
-              value: "hq-link"
             - name: OPENDDIL_WAN_LINKS
               value: {{ join "," $wanLinks | quote }}
+            {{- end }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE

@@ -67,8 +67,8 @@ metadata:
     # "egress-gate-c2" is a CODE DEFAULT group id (matches the gate's own
     # component name; no group env var exists to derive from -- see the
     # Problem section of SPEC-consumer-declarations.md, measured on the lab:
-    # this consumer reaches the hq broker through toxiproxy and resolved to
-    # PROXY/... under IP-based ownership, so a reset never quiesced it).
+    # a consumer reaching a broker through a proxy resolved to PROXY/...
+    # under IP-based ownership, so a reset never quiesced it).
     openddil.io/consumer-groups: "hq/egress-gate-c2"
     # openddil.io/produces-topics -- every route's sink_topic, on hq: the
     # c2 route's is the SAME .Values.egress.sinkTopic value

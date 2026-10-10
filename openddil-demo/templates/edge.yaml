@@ -5,8 +5,8 @@
        simulator access)
      * redpanda-connect (DIS Bronze → Silver mapper, ontology+proto-aware)
      * faust-edge (per-asset processing, prognostics)
-     * edge-hq-bridge (Kafka MirrorMaker analogue: edge cluster → HQ cluster
-       via toxiproxy)
+     * edge-hq-bridge (Kafka MirrorMaker analogue: edge cluster → its parent
+       cluster, through its own severable proxy when linkControl.enabled)
      * projector (Kafka → Postgres projection for ElectricSQL consumers)
 */}}
 {{- $root := . -}}
@@ -242,7 +242,7 @@ metadata:
     # WORKLOAD's own metadata (not spec.template: that would roll the pod on
     # every annotation edit). reset-scenario.sh reads this instead of
     # resolving ownership from connection source IP -- every consumer that
-    # reaches a broker through toxiproxy resolved to PROXY/... there and was
+    # reaches a broker through a proxy resolved to PROXY/... there and was
     # silently skipped by a reset.
     #
     # "connect-dis-mapper" is a CODE DEFAULT baked into the DIS Bronze->Silver
@@ -467,10 +467,8 @@ spec:
 # It also removes a dependency on the bare-name ALIAS Services.
 #
 # The bundled files hardcoded docker-compose hostnames
-# (`redpanda-edge-01:9092`, `toxiproxy:8474`). Those DO resolve, because
-# infrastructure.yaml and hub.yaml deliberately publish unprefixed alias
-# Services for exactly this reason — a documented compatibility shim for
-# compose-era configs, not an accident. So the bridge worked wherever the
+# (`redpanda-edge-01:9092` and a compose-era proxy host). Those names only resolve
+# where an unprefixed alias Service exists. So the bridge worked wherever the
 # edge ids matched the baked filenames; the lab failure was the missing FILE
 # alone, and never reached hostname resolution.
 #
@@ -493,7 +491,7 @@ data:
 {{- include "openddil.edgeBridgeConnectYaml" (dict "edge" $edge "root" $root "edgeBroker" $edgeBroker) | nindent 4 }}
 ---
 # ===========================================================================
-# edge-hq-bridge-{{ $edge.id }} — edge cluster → HQ cluster via toxiproxy
+# edge-hq-bridge-{{ $edge.id }} — edge cluster → its parent cluster
 # ===========================================================================
 # Config comes from the generated ConfigMap above, NOT from the bundle.
 apiVersion: apps/v1
@@ -513,8 +511,8 @@ metadata:
     # them, so it has no local "writer" identity for the census to quiesce.
     # The reset instead reads this Deployment's own DEST_HOST/DEST_PORT env
     # below as a bridge-graph edge (source broker = this consumer-groups
-    # pair's broker-id, destination = whatever toxiproxy proxy listens on
-    # DEST_PORT) to order phase 4's trim sources-before-destinations.
+    # pair's broker-id, destination = the parent broker, or the proxy that
+    # fronts it when linkControl.enabled, on DEST_PORT) to order phase 4's trim sources-before-destinations.
 spec:
   replicas: 1
   selector:
@@ -561,10 +559,10 @@ spec:
           # appearance of configurability while the real coupling lived
           # somewhere else, which is how this stayed broken.
           #
-          # The bridge consumes from the edge cluster and produces to HQ
-          # THROUGH toxiproxy, which is why the output address is toxiproxy
-          # rather than redpanda-hq — that is the severance-injection seam,
-          # not an accident.
+          # The bridge consumes from the edge cluster and produces to its
+          # parent: directly by default, or THROUGH its own `uplink-<id>`
+          # link proxy when linkControl.enabled — that is the
+          # severance-injection seam, not an accident.
           {{- if $root.Values.relayStallProbe.enabled }}
           # STALL -> LIVENESS. Readiness stays Connect's own notion of
           # connected; the remedy for a wedge is a restart, and restart is
@@ -625,7 +623,7 @@ spec:
 # the same rule the detection cutover applied to cm-service and fusion,
 # which this Deployment was missed by.
 #
-# It also read the edge broker DIRECTLY, never through toxiproxy, and that
+# It also read the edge broker DIRECTLY, never through a severable link, and that
 # is how it stayed invisible: the severance rehearsal cut the bridge and
 # this path was not on it, so HQ stayed fresh through every sever anyone
 # ever ran. HQ was never observed to diverge, so "HQ converges" was

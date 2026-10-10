@@ -1,6 +1,6 @@
 {{- /*
    hub.yaml — HQ-tier services that depend on infrastructure (postgres-hq,
-   redpanda-hq, toxiproxy) being up:
+   redpanda-hq) being up:
      * electric-sync (ElectricSQL HTTP gateway over postgres-hq replication)
      * restate-server (StatefulSet with PVC for /restate-data)
      * restate-hub (consumer bridge — mounts restate_hub.py from bundle)
@@ -11,7 +11,7 @@
        asset-registry-events on HQ broker for consumer cache pub/sub)
      * logistics-fusion-service + logistics-fusion-bootstrap (post-install Job)
      * projector-hq (HQ-cluster topic projection to postgres-hq)
-     * frontend (nginx-served static + /proxies/ proxy to toxiproxy)
+     * frontend (nginx-served static + /proxies/ proxy to the PEP)
 */}}
 {{- include "openddil.validateEdgeAttachment" . }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
@@ -146,8 +146,9 @@ spec:
 # Alias Service so the frontend nginx's hardcoded `electric-sync:5133`
 # upstream resolves (used by the /electric/ proxy_pass block added when
 # VITE_ELECTRIC_URL was made build-time-overridable). Same pattern as
-# the `toxiproxy` alias below — unprefixed name matching docker-compose's
-# container hostname so nginx.conf is portable between the two envs.
+# the compose-hostname aliases elsewhere — unprefixed name matching
+# docker-compose's container hostname so nginx.conf is portable between the
+# two envs.
 apiVersion: v1
 kind: Service
 metadata:
@@ -1089,9 +1090,8 @@ spec:
 # ===========================================================================
 # frontend
 # ===========================================================================
-# The frontend nginx hardcodes `toxiproxy` as the proxy upstream hostname.
-# In k8s we satisfy that by adding a SECOND Service named exactly `toxiproxy`
-# (no Release.Name prefix) that selects the same toxiproxy pod. See below.
+# The frontend's /proxies/ route goes to the PEP, which fronts the per-uplink
+# link-control API only when linkControl.enabled.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1247,25 +1247,3 @@ data:
   deployment.json: |
     {{ include "openddil.frontendDeploymentJson" . }}
 {{- end }}
----
-# Alias service so frontend nginx's hardcoded `toxiproxy:8475` resolves.
-# This is intentionally unprefixed (not {{ .Release.Name }}-toxiproxy) —
-# it's a fixed hostname the frontend image expects. One chart install per
-# namespace, so the unqualified name is safe.
-apiVersion: v1
-kind: Service
-metadata:
-  name: toxiproxy
-  labels:
-    {{- include "openddil.labels" . | nindent 4 }}
-    openddil.io/alias: "true"
-spec:
-  selector:
-    {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 4 }}
-  ports:
-    - name: api
-      port: {{ .Values.toxiproxy.apiPort }}
-      targetPort: api
-    - name: proxy
-      port: {{ .Values.toxiproxy.proxyPort }}
-      targetPort: proxy

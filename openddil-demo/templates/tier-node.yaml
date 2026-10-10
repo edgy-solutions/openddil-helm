@@ -715,7 +715,7 @@ spec:
             # link.
             - name: BUFFER_ROW_ID
               value: {{ $tier.id | quote }}
-            # Reachability threshold input, not a toxiproxy address. Measured
+            # Reachability threshold input, not a link address. Measured
             # relay commit gaps at rest: 0.5-1.5s for tier bridges/uplinks.
             # The monitor severs after 2*(E+H) = 2*(1.5+2) = 7s with no
             # exchange, and restores after 2 consecutive exchanges.
@@ -1149,27 +1149,26 @@ spec:
               value: {{ join "," $root.Values.releasability.subjectScopedTables | quote }}
             - name: OPENDDIL_OVERSIGHT_ROLES
               value: {{ join "," $root.Values.releasability.oversightRoles | quote }}
-            # WAN sever/restore control. Base URL only -- the gateway
-            # appends /proxies/hq-link itself (gateway/pep.py). Port is
-            # toxiproxy's proxyPort (8475), which is actually the admin API
-            # port despite the name; see infrastructure.yaml's own comment.
+            {{- if include "openddil.linkControlEnabled" $root }}
+            # WAN sever/restore control (linkControl.enabled only). Base URL
+            # only -- the gateway appends /proxies/<link> itself
+            # (gateway/pep.py). Port is toxiproxy's proxyPort (8475), the
+            # admin API; see infrastructure.yaml's own comment.
             - name: OPENDDIL_WAN_CONTROL_URL
               value: {{ printf "http://%s-toxiproxy%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.toxiproxy.proxyPort | quote }}
             - name: OPENDDIL_WAN_CONTROL_ROLES
               value: {{ $root.Values.releasability.wanControlRoles | quote }}
-            # P5: THIS TIER'S own uplink, if it has one (openddil.uplinkPort
-            # non-empty for a tier in openddil.uplinkLinks). Falls back to
-            # hq-link -- unreachable in practice for a tier PEP, since a
-            # tier is rendered only when it's an edge or a tier-managed
-            # region, and both are always in the link set -- so a tier PEP
-            # degrades to the pre-P5 shared link rather than naming nothing.
+            # THIS TIER'S own uplink (openddil.uplinkPort non-empty for a
+            # tier in openddil.uplinkLinks). Rendered only when the tier has
+            # one; a tier PEP can address no other link.
             {{- $tierUplinkPort := include "openddil.uplinkPort" (dict "tier" $tier "root" $root) }}
-            {{- $tierWanUplink := "hq-link" }}
-            {{- if $tierUplinkPort }}{{- $tierWanUplink = printf "uplink-%s" $tier.id }}{{- end }}
+            {{- if $tierUplinkPort }}
             - name: OPENDDIL_WAN_UPLINK
-              value: {{ $tierWanUplink | quote }}
+              value: {{ printf "uplink-%s" $tier.id | quote }}
             - name: OPENDDIL_WAN_LINKS
-              value: {{ $tierWanUplink | quote }}
+              value: {{ printf "uplink-%s" $tier.id | quote }}
+            {{- end }}
+            {{- end }}
             - name: OPENDDIL_COOKIE_SAMESITE
               value: {{ $root.Values.releasability.oidc.cookieSameSite | quote }}
             - name: OPENDDIL_COOKIE_SECURE

@@ -1,26 +1,27 @@
 {{- /*
    infrastructure.yaml — stateful primitives the rest of the chart depends on:
      * One redpanda-edge StatefulSet + Service per entry in .Values.edges
-     * One redpanda-hq StatefulSet + Service (advertises via toxiproxy)
+     * One redpanda-hq StatefulSet + Service
      * Postgres-HQ StatefulSet + Service
-     * Toxiproxy Deployment + Service + ConfigMap (DDIL sever mechanism)
+     * Toxiproxy Deployment + Service + ConfigMap (DDIL sever mechanism),
+       only when linkControl.enabled
      * topic-init Job (post-install hook) — creates the 17 Kafka topics on
        all four clusters
 */}}
 
+{{- if include "openddil.linkControlEnabled" . }}
 # =============================================================================
-# Toxiproxy — DDIL sever mechanism
+# Toxiproxy — DDIL sever mechanism (linkControl.enabled only)
 # =============================================================================
-# Mediates produce traffic from edge-hq-bridge to redpanda-hq. Disabling the
-# hq-link proxy via toxiproxy's HTTP API severs the link for real (TCP socket
-# is closed, in-flight produces fail, consumer-group lag at the bridge climbs).
-# The frontend's WAN-link toggle hits /proxies/hq-link.
-#
-# P5: ONE PROXY PER TIER UPLINK, not just hq-link. openddil.uplinkLinks adds
-# an `uplink-<id>` proxy for every edge and every tier-managed region, each
-# severable on its own -- see openddil.bridgeTarget and
-# openddil.toxiproxyConfigJson (the content both this ConfigMap and the
-# Deployment's checksum/config annotation below render).
+# ONE PROXY PER TIER UPLINK. openddil.uplinkLinks lists an `uplink-<id>`
+# proxy for every edge and every tier-managed region; each tier's bridge
+# publishes to its parent broker through its own proxy (openddil.bridgeTarget).
+# Disabling one via toxiproxy's HTTP API severs that link for real (TCP
+# socket is closed, in-flight produces fail, consumer-group lag at the bridge
+# climbs). The PEP's link routes front this API. Content comes from
+# openddil.toxiproxyConfigJson, which both this ConfigMap and the
+# Deployment's checksum/config annotation below render. Off, none of this
+# exists and every bridge dials its parent broker directly.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -63,25 +64,17 @@ spec:
         - name: toxiproxy
           image: "{{ include "openddil.thirdPartyImage" .Values.toxiproxy.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.toxiproxy.image.pullPolicy "root" .) }}
-          # Naming gotcha: the values keys here are bass-ackwards from their
-          # actual roles, but consistently so across the chart:
-          #   * .Values.toxiproxy.apiPort (default 8474) — where the hq-link
-          #     toxic LISTENS for Kafka traffic from edge-hq bridges (the
-          #     toxiproxy.json `listen` field below). Service port name "api".
-          #   * .Values.toxiproxy.proxyPort (default 8475) — the toxiproxy
-          #     admin REST API (where /proxies/* lives). Service port name
-          #     "proxy". `-port` defaults to 8474 in toxiproxy-server, which
-          #     collides with the hq-link toxic on apiPort; the proxy wins
-          #     and the admin API fails to bind. Pinning -port to proxyPort
-          #     puts admin on 8475 — what nginx's /proxies/ and the
-          #     projector's edge_buffer monitor both expect.
+          # .Values.toxiproxy.proxyPort (default 8475) is the toxiproxy admin
+          # REST API (where /proxies/* lives), Service port name "proxy".
+          # Each uplink proxy listens on its own port (the per-uplink ports
+          # below). `-port` is pinned to proxyPort because that is where the
+          # PEP's link routes and the projector's edge_buffer monitor expect
+          # the admin API.
           args:
             - "-host=0.0.0.0"
             - "-port={{ .Values.toxiproxy.proxyPort }}"
             - "-config=/etc/toxiproxy.json"
           ports:
-            - name: api
-              containerPort: {{ .Values.toxiproxy.apiPort }}
             - name: proxy
               containerPort: {{ .Values.toxiproxy.proxyPort }}
             {{- range (include "openddil.uplinkLinks" . | fromYamlArray) }}
@@ -109,9 +102,6 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" "toxiproxy" "root" .) | nindent 4 }}
   ports:
-    - name: api
-      port: {{ .Values.toxiproxy.apiPort }}
-      targetPort: api
     - name: proxy
       port: {{ .Values.toxiproxy.proxyPort }}
       targetPort: proxy
@@ -121,6 +111,7 @@ spec:
       targetPort: {{ .listenerName | replace "_" "-" }}
     {{- end }}
 ---
+{{- end }}
 # =============================================================================
 # Redpanda — one single-broker StatefulSet per edge cluster
 # =============================================================================
@@ -208,17 +199,18 @@ spec:
             - --node-id
             - "0"
             - --kafka-addr
-            # P5: plus one `uplink_<n>://0.0.0.0:<port>` per child link whose
-            # effective parent is THIS broker ($extraKafkaAddr above) --
-            # empty, hence no change, for a tier with no children.
+            {{- /* Plus one `uplink_<n>://0.0.0.0:<port>` per child link whose
+                   effective parent is THIS broker ($extraKafkaAddr above) --
+                   empty when link control is off or for a tier with no
+                   children. */}}
             - PLAINTEXT://0.0.0.0:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://0.0.0.0:{{ $.Values.redpandaEdge.outsidePort }}{{ $extraKafkaAddr }}
             - --advertise-kafka-addr
             # In-cluster clients hit the Service DNS; OUTSIDE listener kept for
             # kubectl port-forward debugging (advertise localhost so the
-            # forwarded client can resolve). Plus one matching
-            # `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>` per child
-            # link ($extraAdvertiseAddr above), so metadata for that
-            # listener answers with the severable toxiproxy address.
+            # forwarded client can resolve).
+            {{- /* Plus one matching `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>`
+                   per child link ($extraAdvertiseAddr above), so metadata for
+                   that listener answers with the severable proxy address. */}}
             - PLAINTEXT://{{ $name }}{{ include "openddil.svcDomain" $ }}:{{ $.Values.redpandaEdge.internalPort }},OUTSIDE://localhost:{{ $.Values.redpandaEdge.outsidePort }}{{ $extraAdvertiseAddr }}
             # NO AUTO-CREATED TOPICS.
             #
@@ -465,17 +457,17 @@ spec:
 {{- end }}
 {{- end }}
 # =============================================================================
-# Redpanda-HQ — advertises via toxiproxy
+# Redpanda-HQ
 # =============================================================================
-# PLAINTEXT listener ADVERTISES toxiproxy's address (not the broker's own)
-# so the edge-hq-bridge's Kafka client is actually mediated by toxiproxy.
-# Without this, the bridge bootstraps through toxiproxy then jumps directly
-# to the broker, and DDIL sever never severs anything.
+# PLAINTEXT advertises the broker's OWN Service, so every HQ-local Kafka
+# client (projector, relay, topic-init) reaches it directly.
 #
-# P5: plus one extra listener per uplink whose effective parent is hq
-# itself (openddil.uplinkLinks, parentBrokerHost == "hq") -- same mechanism
-# as the per-tier brokers above, just keyed to the literal "hq" rather than
-# a tier id, since hq isn't a tierList entry.
+{{- /* With linkControl.enabled, plus one extra listener per uplink whose
+       effective parent is hq itself (openddil.uplinkLinks, parentBrokerHost ==
+       "hq") -- advertised as the proxy address so that child's bridge stays
+       mediated by its own proxy after bootstrap. Same mechanism as the
+       per-tier brokers above, keyed to the literal "hq" rather than a tier
+       id, since hq isn't a tierList entry. Off, no extra listeners exist. */}}
 {{- $hqChildLinks := list -}}
 {{- range (include "openddil.uplinkLinks" . | fromYamlArray) }}
 {{- if eq .parentBrokerHost "hq" }}{{- $hqChildLinks = append $hqChildLinks . -}}{{- end }}
@@ -534,16 +526,18 @@ spec:
             - --node-id
             - "0"
             - --kafka-addr
-            # P5: plus one `uplink_<n>://0.0.0.0:<port>` per $hqChildLinks
-            # entry above -- empty, hence no change, when nothing bridges
-            # straight to hq (every tier under a tier-managed subtree).
+            {{- /* Plus one `uplink_<n>://0.0.0.0:<port>` per $hqChildLinks
+                   entry above -- empty when link control is off or nothing
+                   bridges straight to hq (every tier under a tier-managed
+                   subtree). */}}
             - PLAINTEXT://0.0.0.0:{{ .Values.redpandaHq.kafkaPort }},OUTSIDE://0.0.0.0:{{ .Values.redpandaHq.outsidePort }}{{ $hqExtraKafkaAddr }}
             - --advertise-kafka-addr
-            # PLAINTEXT advertises TOXIPROXY (load-bearing — see docker-compose
-            # comment + ADR for rationale). OUTSIDE for kubectl port-forward.
-            # Plus one matching `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>`
-            # per $hqChildLinks entry, same reasoning as the per-tier brokers.
-            - PLAINTEXT://{{ .Release.Name }}-toxiproxy{{ include "openddil.svcDomain" . }}:{{ .Values.toxiproxy.apiPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}{{ $hqExtraAdvertiseAddr }}
+            # PLAINTEXT advertises this broker's own Service. OUTSIDE for
+            # kubectl port-forward.
+            {{- /* Plus one matching `uplink_<n>://<release>-toxiproxy<svcDomain>:<port>`
+                   per $hqChildLinks entry, same reasoning as the per-tier
+                   brokers. */}}
+            - PLAINTEXT://{{ .Release.Name }}-redpanda-hq{{ include "openddil.svcDomain" . }}:{{ .Values.redpandaHq.kafkaPort }},OUTSIDE://localhost:{{ .Values.redpandaHq.outsidePort }}{{ $hqExtraAdvertiseAddr }}
             # NO AUTO-CREATED TOPICS.
             #
             # This is the FRESH-INSTALL path and it is deliberately not the only

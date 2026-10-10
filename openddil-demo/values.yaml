@@ -5,7 +5,7 @@
 # redpanda broker, DIS sensor-ingest, redpanda-connect, faust-edge,
 # projector, edge-hq-bridge), 2 regional faust aggregators, and an HQ
 # tier (postgres-hq, electric-sync, restate-server, restate-hub,
-# projector-hq, cm-service, logistics-fusion, frontend, toxiproxy).
+# projector-hq, cm-service, logistics-fusion, frontend).
 #
 # To shrink to a smaller footprint, drop entries from `edges:` and
 # `regions:` below — the templates loop over these lists.
@@ -191,10 +191,10 @@ redpandaEdge:
   outsidePort: 9093
   adminPort: 9644
 
-# --- Redpanda HQ (single broker, advertises via toxiproxy) ------------------
-# The OUTSIDE/PLAINTEXT split here is load-bearing: edge-hq-bridge connects
-# via toxiproxy:8474 (the only way DDIL sever is real), so PLAINTEXT must
-# advertise toxiproxy. The OUTSIDE listener is for debug / kubectl-port-forward.
+# --- Redpanda HQ (single broker) --------------------------------------------
+# PLAINTEXT advertises the broker's own Service, so every HQ-local client
+# reaches it directly. Severable uplinks (linkControl.enabled) are separate
+# per-child listeners. The OUTSIDE listener is for debug / kubectl-port-forward.
 redpandaHq:
   image:
     repository: docker.redpanda.com/redpandadata/redpanda
@@ -249,10 +249,17 @@ postgresHq:
     limits:   { cpu: 500m, memory: 1Gi }
   port: 5432
 
+# --- Link control (demo-only severable uplinks) -----------------------------
+# Off (default): no toxiproxy, every bridge dials its parent broker directly,
+# and the PEP serves no link routes. On: one severable `uplink-<id>` proxy per
+# tier uplink (toxiproxy), for the DDIL sever demo.
+linkControl:
+  enabled: false
+
 # --- Toxiproxy --------------------------------------------------------------
-# DDIL sever mechanism. Mediates produce traffic from edge-hq-bridge to
-# redpanda-hq. Disabling the proxy severs the link; re-enabling it
-# restores buffered traffic.
+# DDIL sever mechanism, rendered only when linkControl.enabled. Mediates
+# produce traffic on each tier's uplink. Disabling a proxy severs that link;
+# re-enabling it restores buffered traffic.
 toxiproxy:
   image:
     repository: ghcr.io/shopify/toxiproxy
@@ -266,14 +273,13 @@ toxiproxy:
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 200m, memory: 256Mi }
-  apiPort: 8474
   proxyPort: 8475
   # Base port for the PER-TIER uplink proxies (openddil.uplinkLinks):
   # one port per link, this value plus the link's index in that list.
   # The same number is used in three places for a given link -- toxiproxy's
   # listen address, the parent broker's extra `uplink_<n>` listener, and
   # that broker's Service port -- so it is fully deterministic and needs
-  # no state. hq-link's own apiPort above is unaffected.
+  # no state.
   uplinkPortBase: 18400
 
 # --- Electric SQL -----------------------------------------------------------
