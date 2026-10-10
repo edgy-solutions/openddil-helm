@@ -65,8 +65,9 @@ Pass (3): the Job completes (or the fallback exits 0); no `RESET HALTED` in the 
 not restart: do not record. A failed Job leaves `kubectl wait` to time out (`kubectl -n openddil get "$J"` shows it
 at once), and its log ends with the `RESET HALTED` block naming the state; read it, and do not press again until it
 is understood.
-The reset stops and restarts only the simulators whose Deployment name starts with `dis-sim-edge-`. A simulator
-deployed under another name keeps running through the reset and keeps its own schedule.
+The reset stops and restarts every simulator whose Deployment carries the label `openddil.io/role=simulator`,
+whatever its name. A simulator Deployment without that label keeps running through the reset and keeps its own
+schedule; the reset prints a `NOT A PRODUCER` line naming each one it leaves running.
 
 **5. TAK device connected:**
 ```

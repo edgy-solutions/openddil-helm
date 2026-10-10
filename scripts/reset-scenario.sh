@@ -100,6 +100,9 @@ SKIP_AGGREGATOR=false
 SKIP_STORES=false
 SKIP_ELECTRIC=false
 SKIP_PRODUCERS=false
+# Simulators are found by this declared label, not by a name pattern, so a
+# simulator deployed under any name is stopped and restarted by the reset.
+SIMULATOR_SELECTOR="${SIMULATOR_SELECTOR:-openddil.io/role=simulator}"
 RED_CHECK_TOPIC_CONFIG=false   # JUDGMENT CALL 10 red-check, see phase4_topics
 CENSUS_ONLY=false              # census-derived-quiesce read-only preview, see run_census_only
 RED_CHECK_ELECTRIC=false       # electric shape-handle red-check, see the RED-CHECK block before phase1_baseline
@@ -150,6 +153,9 @@ USAGE
   Env overrides:
     NS       target namespace (default: openddil)
     RELEASE  helm release name, used for name-pattern discovery (default: openddil)
+    SIMULATOR_SELECTOR
+             label selector that declares a Deployment a simulator producer
+             (default: openddil.io/role=simulator); also --simulator-selector
     RESET_HALT_BEFORE_PHASE  fault injection for rehearsing a refused reset:
              when set to a phase number (2, 3, 3b, 4 ... 10), the run halts
              at the start of that phase with exit 2, exactly like any
@@ -178,7 +184,8 @@ FLAGS
                       topic reads clean.
   --skip-stores       Do not DELETE FROM any Postgres table.
   --skip-electric     Do not delete the Electric pods.
-  --skip-producers    Do not scale producers down or back up.
+  --skip-producers    Do not scale producers (release-owned producers and every
+                      Deployment matching SIMULATOR_SELECTOR) down or back up.
   --red-check-topic-config
                       After the first pure-compact topic is policy-trimmed
                       (alter, trim, alter back), perturb its cleanup.policy
@@ -247,6 +254,7 @@ while [ $# -gt 0 ]; do
     --skip-stores) SKIP_STORES=true ;;
     --skip-electric) SKIP_ELECTRIC=true ;;
     --skip-producers) SKIP_PRODUCERS=true ;;
+    --simulator-selector) shift; SIMULATOR_SELECTOR="$1" ;;
     --red-check-topic-config) RED_CHECK_TOPIC_CONFIG=true ;;
     --census-only) CENSUS_ONLY=true ;;
     --red-check-quiesce) RED_CHECK_QUIESCE=true ;;
@@ -384,8 +392,27 @@ mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
 # holds partitions on a topic that phase 4 policy-trims. It goes down in phase 2
 # and comes back in phase 9 with the other producers. Once back, it re-polls the
 # destination and the rows return. That is a refill, the same as every producer.
-mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
-  "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^dis-sim-edge-|^${RELEASE}-egress-intake\$")
+#
+# Simulators are producers too, but they are found by the label they declare
+# (SIMULATOR_SELECTOR, default openddil.io/role=simulator), not by a name: a
+# simulator is deployed from a customer bundle under whatever name the bundle
+# chose, so a name pattern here silently skips the ones it does not know.
+# Restarting a simulator also restarts its scenario clock (posture, condition
+# and destroy schedules count from process start), which is why EVERY
+# simulator must be stopped and restarted, not only the edge ones.
+discover_simulators() {
+  # `|| true` for the same reason as discover(): no match is not an error.
+  kubectl get deploy -n "$NS" -l "$SIMULATOR_SELECTOR" -o name 2>/dev/null \
+    | sed 's#^[^/]*/##' || true
+}
+# Release-owned producers by name, then declared simulators; deduped, stable.
+mapfile -t PRODUCER_DEPLOYS < <(
+  {
+    discover deploy \
+      "^${RELEASE}-logistics-sim\$|^${RELEASE}-sensor-ingest-edge-|^${RELEASE}-egress-intake\$"
+    discover_simulators
+  } | awk 'NF && !seen[$0]++'
+)
 
 # JUDGMENT CALL 10 — SUPERSEDED. This used to be a hand-written name-pattern
 # list of state consumers to quiesce around phase 4's delete-and-recreate of
@@ -414,6 +441,16 @@ mapfile -t PRODUCER_DEPLOYS < <(discover deploy \
 echo "discovered: postgres=${#POSTGRES_PODS[@]} restate=${#RESTATE_PODS[@]}" \
      "redpanda=${#REDPANDA_PODS[@]} electric=${#ELECTRIC_PODS[@]}" \
      "faust=${#FAUST_DEPLOYS[@]} producers=${#PRODUCER_DEPLOYS[@]}"
+# Declared exception, never a silent pass: a simulator Deployment that does
+# not carry the simulator label is not touched by this reset, so say so here.
+mapfile -t _SIM_DECLARED < <(discover_simulators)
+while IFS= read -r _dsim; do
+  [ -n "$_dsim" ] || continue
+  _is_declared=false
+  for _s in "${_SIM_DECLARED[@]:-}"; do [ "$_s" = "$_dsim" ] && _is_declared=true; done
+  $_is_declared || echo "   NOT A PRODUCER: ${_dsim} (no openddil.io/role=simulator label; reset leaves it running)"
+done < <(kubectl get deploy -n "$NS" -l app.kubernetes.io/name=dis-sim -o name 2>/dev/null \
+           | sed 's#^[^/]*/##' || true)
 
 # ===========================================================================
 # CENSUS — derive the quiesce set for phase 4 from measured reality instead
