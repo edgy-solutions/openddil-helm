@@ -716,6 +716,9 @@ data:
        remembering this file. */ -}}
 {{- include "openddil.keycloakTierClients" $root }}
 {{- include "openddil.pictureServiceClients" $root }}
+{{- if $root.Values.releasability.oidc.enabled }}
+{{- include "openddil.keycloakExternalClients" $root }}
+{{- end }}
 
   substitutions.sh: |
     set -eu
@@ -768,11 +771,25 @@ data:
     # template; it surfaced as Keycloak importing a client whose secret was
     # the literal placeholder. Clever matching on a shared literal is how a
     # substitution silently does nothing.
+{{- if $root.Values.releasability.oidc.enabled }}
+{{- range $i, $c := $root.Values.releasability.keycloak.externalClients }}
+    # External client secrets go through sed, so refuse any character that
+    # could end the substitution or be read as part of it. Never echoed.
+    case "${OPENDDIL_EXT_CLIENT_SECRET_{{ $i }}}" in
+      ""|*[!A-Za-z0-9._~-]*) echo "FATAL: externalClients[{{ $i }}] secret is empty or has a character outside [A-Za-z0-9._~-]" >&2; exit 1 ;;
+    esac
+{{- end }}
+{{- end }}
     sed -e "s|__PEP_CLIENT_SECRET__|${OPENDDIL_PEP_CLIENT_SECRET}|g" \
         -e "s|__PEP_REDIRECT_URI__|${OPENDDIL_PEP_REDIRECT_URI}|g" \
 {{- if $root.Values.picture.enabled }}
 {{- range $i, $c := $root.Values.picture.serviceClients }}
         -e "s|__SVC_CLIENT_SECRET_{{ $i }}__|${OPENDDIL_SVC_CLIENT_SECRET_{{ $i }}}|g" \
+{{- end }}
+{{- end }}
+{{- if $root.Values.releasability.oidc.enabled }}
+{{- range $i, $c := $root.Values.releasability.keycloak.externalClients }}
+        -e "s|__EXT_CLIENT_SECRET_{{ $i }}__|${OPENDDIL_EXT_CLIENT_SECRET_{{ $i }}}|g" \
 {{- end }}
 {{- end }}
         /tmp/realm.json > /import/realm-openddil.json
@@ -852,7 +869,7 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
         {{- /* sessionTtlSeconds is baked into the realm import (SSO lifetimes); without it here a TTL-only change never rolls Keycloak or re-imports the realm */}}
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -878,6 +895,16 @@ spec:
             {{- range $i, $c := $root.Values.picture.serviceClients }}
             # Picture service client secret, read from the named Secret.
             - name: OPENDDIL_SVC_CLIENT_SECRET_{{ $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $c.existingSecret.name | quote }}
+                  key: {{ $c.existingSecret.key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $root.Values.releasability.oidc.enabled }}
+            {{- range $i, $c := $root.Values.releasability.keycloak.externalClients }}
+            # External client secret, read from the named Secret.
+            - name: OPENDDIL_EXT_CLIENT_SECRET_{{ $i }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $c.existingSecret.name | quote }}

@@ -1823,6 +1823,14 @@ releasability:
     resources:
       requests: { cpu: 100m, memory: 768Mi }
       limits:   { cpu: 1000m, memory: 3Gi }
+    # Confidential OIDC clients for external relying parties: for example another
+    # Keycloak that brokers this realm as an OIDC identity provider. Each entry:
+    #   clientId:       realm client id; unique, and distinct from every other realm client
+    #   redirectUris:   exact https URIs (no wildcard; the render refuses one)
+    #   existingSecret: {name, key} of a Secret holding the client secret. Read by the
+    #                   Keycloak pod only; never rendered. Characters [A-Za-z0-9._~-] only.
+    # Only effective when releasability.enabled and releasability.oidc.enabled.
+    externalClients: []
 
   pep:
     image:

@@ -1765,6 +1765,78 @@ from an env var fed by the referenced Secret, so the value is never rendered.
 {{- end }}
 
 {{/*
+openddil.externalClientsValidate — fail the render on a malformed
+releasability.keycloak.externalClients.
+
+Emits nothing. Called wherever the list is consumed. Checks: clientId,
+redirectUris and existingSecret.name/key present; every redirect URI is https
+and has no wildcard; clientIds unique; and no collision with a client the realm
+already carries (the PEP clients, the tier clients, the picture service clients).
+*/}}
+{{- define "openddil.externalClientsValidate" -}}
+{{- $root := . -}}
+{{- $taken := dict $root.Values.releasability.oidc.clientId true "openddil-pep" true -}}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) -}}
+{{- $_ := set $taken (include "openddil.tierClientId" (dict "id" $tier.id "root" $root)) true -}}
+{{- end -}}
+{{- if $root.Values.picture.enabled -}}
+{{- range $p := $root.Values.picture.serviceClients -}}
+{{- $_ := set $taken $p.clientId true -}}
+{{- end -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $c := $root.Values.releasability.keycloak.externalClients -}}
+{{- if not $c.clientId -}}{{- fail (printf "releasability.keycloak.externalClients[%d]: clientId is required" $i) -}}{{- end -}}
+{{- if not $c.redirectUris -}}{{- fail (printf "releasability.keycloak.externalClients[%d] (%s): redirectUris is required and must not be empty" $i $c.clientId) -}}{{- end -}}
+{{- if not (and $c.existingSecret $c.existingSecret.name $c.existingSecret.key) -}}{{- fail (printf "releasability.keycloak.externalClients[%d] (%s): existingSecret.name and existingSecret.key are required" $i $c.clientId) -}}{{- end -}}
+{{- range $u := $c.redirectUris -}}
+{{- if not (hasPrefix "https://" (toString $u)) -}}{{- fail (printf "releasability.keycloak.externalClients[%d] (%s): redirect URI %q must start with https://" $i $c.clientId $u) -}}{{- end -}}
+{{- if contains "*" (toString $u) -}}{{- fail (printf "releasability.keycloak.externalClients[%d] (%s): redirect URI %q must not contain a wildcard" $i $c.clientId $u) -}}{{- end -}}
+{{- end -}}
+{{- if hasKey $seen $c.clientId -}}{{- fail (printf "releasability.keycloak.externalClients[%d]: duplicate clientId %q" $i $c.clientId) -}}{{- end -}}
+{{- if hasKey $taken $c.clientId -}}{{- fail (printf "releasability.keycloak.externalClients[%d] (%s): clientId collides with an existing realm client" $i $c.clientId) -}}{{- end -}}
+{{- $_ := set $seen $c.clientId true -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.keycloakExternalClients — realm client fragment, one confidential
+authorization-code client per releasability.keycloak.externalClients entry, each
+followed by a comma (spliced after the picture clients, ahead of the bundle
+realm's own). The secret is the placeholder __EXT_CLIENT_SECRET_<i>__;
+prepare-realm substitutes it from an env var fed by the referenced Secret, so
+the value is never rendered. The realm database is ephemeral and re-imported on
+every start, so a client added by hand in the admin console would not survive.
+PKCE is accepted but not required: a brokering identity provider may not send
+it, and the client is confidential with exact redirect URIs.
+*/}}
+{{- define "openddil.keycloakExternalClients" -}}
+{{- $root := . }}
+{{- include "openddil.externalClientsValidate" $root }}
+{{- range $i, $c := $root.Values.releasability.keycloak.externalClients }}
+    {
+      "clientId": {{ $c.clientId | quote }},
+      "name": {{ printf "External relying party (%s)" $c.clientId | quote }},
+      "description": "Confidential authorization-code client for an external relying party.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__EXT_CLIENT_SECRET_{{ $i }}__",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [ {{ range $j, $u := $c.redirectUris }}{{ if $j }}, {{ end }}{{ $u | quote }}{{ end }} ],
+      "webOrigins": [],
+      "attributes": { "post.logout.redirect.uris": "+" },
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["openid", "profile", "email"]
+    },
+{{- end }}
+{{- end }}
+
+{{/*
 openddil.pictureClientMap — JSON object {clientId: destination} for the PEP.
 */}}
 {{- define "openddil.pictureClientMap" -}}
