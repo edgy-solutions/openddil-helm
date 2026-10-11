@@ -771,7 +771,7 @@ spec:
             - name: LINK_ID
               value: {{ $edge.id | quote }}
             - name: LINK_TRAFFIC_TOPICS
-              value: {{ join "," $root.Values.linkStatus.trafficTopics | quote }}
+              value: {{ include "openddil.linkTrafficTopics" (dict "tier" $edge "root" $root) | quote }}
             - name: LINK_HEARTBEAT_PERIOD_S
               value: {{ $root.Values.linkStatus.heartbeatPeriodS | quote }}
             - name: LINK_IDLE_AFTER_S

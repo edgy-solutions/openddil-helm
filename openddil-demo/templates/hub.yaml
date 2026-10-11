@@ -14,6 +14,7 @@
      * frontend (nginx-served static + /proxies/ proxy to the PEP)
 */}}
 {{- include "openddil.validateEdgeAttachment" . }}
+{{- include "openddil.validateLinkStatus" . }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
 {{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
     .Values.postgresHq.auth.username
@@ -1109,7 +1110,7 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
-      {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
+      {{- if include "openddil.frontendDeploymentJsonWanted" . }}
       annotations:
         checksum/deployment-config: {{ include "openddil.frontendDeploymentJson" . | sha256sum | quote }}
       {{- end }}
@@ -1188,7 +1189,7 @@ spec:
               mountPath: /usr/share/nginx/html/figures
               readOnly: true
             {{- end }}
-            {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
+            {{- if include "openddil.frontendDeploymentJsonWanted" . }}
             # Only the hub view gets this: the tier frontends (tier-node.yaml)
             # have their own deployment.json carrying tier shape, not this.
             - name: deployment-config
@@ -1206,7 +1207,7 @@ spec:
             name: {{ .Values.frontend.figures.configMap }}
             optional: true
         {{- end }}
-        {{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
+        {{- if include "openddil.frontendDeploymentJsonWanted" . }}
         - name: deployment-config
           configMap:
             name: {{ .Release.Name }}-frontend-deployment-config
@@ -1225,7 +1226,7 @@ spec:
     - name: http
       port: {{ .Values.frontend.port }}
       targetPort: http
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled }}
+{{- if include "openddil.frontendDeploymentJsonWanted" . }}
 ---
 # The hub view's released-records panes (ADR-0046 §5): per-destination
 # tables the hub shell renders from .Values.frontend.releasedRecordsPanes.

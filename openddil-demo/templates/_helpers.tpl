@@ -989,6 +989,49 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- end }}
 
 {{/*
+openddil.relayTopics -- the topics one tier's relay carries to its parent: a
+tier that rolls up carries the uplink set, a leaf carries its edge bridge set.
+One definition, shared with the monitor: BRIDGE_TOPICS and the link traffic
+meter both render from it.
+
+Usage: include "openddil.relayTopics" (dict "tier" $t "root" $root)
+*/}}
+{{- define "openddil.relayTopics" -}}
+{{- if .tier.hasChildren -}}
+{{- include "openddil.tierUplinkTopics" .root -}}
+{{- else -}}
+{{- include "openddil.edgeBridgeTopics" (dict "edge" .tier "root" .root) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.linkTrafficTopics -- what a link's traffic meter counts: the topics
+its own relay carries, minus link-heartbeat. The heartbeat is excluded because
+it is produced every period whatever else moves; counting it would read every
+link as active. Order is the relay's order.
+
+Usage: include "openddil.linkTrafficTopics" (dict "tier" $t "root" $root)
+*/}}
+{{- define "openddil.linkTrafficTopics" -}}
+{{- $out := list -}}
+{{- range (splitList "," (include "openddil.relayTopics" .)) }}
+{{- if ne . "link-heartbeat" }}{{- $out = append $out . -}}{{- end }}
+{{- end -}}
+{{- join "," $out -}}
+{{- end }}
+
+{{/*
+openddil.validateLinkStatus -- refuses a value the chart no longer reads, so a
+stale override fails the render instead of being silently ignored. Called
+unconditionally from hub.yaml.
+*/}}
+{{- define "openddil.validateLinkStatus" -}}
+{{- if hasKey .Values.linkStatus "trafficTopics" -}}
+{{- fail "linkStatus.trafficTopics is no longer read: each link counts the topics its relay carries (openddil.linkTrafficTopics); remove it" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.edgeBridgeConnectYaml — the edge->parent bridge config, as content.
 
 EXTRACTED SO THE CHECKSUM CAN HASH THE THING ITSELF.
@@ -1538,6 +1581,33 @@ variant:
 {{- end }}
 
 {{/*
+openddil.hqChildLinks -- HQ's direct children with their shape, as a JSON
+array of {id, hasChildren}, in openddil.childTierIds order; "[]" when HQ has
+no children. Read by the hub frontend's deployment.json, and by the gate that
+decides whether that file is rendered at all, so the two cannot disagree.
+*/}}
+{{- define "openddil.hqChildLinks" -}}
+{{- $tiers := include "openddil.tierList" . | fromYamlArray -}}
+{{- $out := list -}}
+{{- range (splitList "," (include "openddil.childTierIds" (dict "tier" (dict "id" "hq") "root" .))) }}
+{{- $cid := . }}
+{{- range $tiers }}
+{{- if eq (.id | toString) $cid }}{{- $out = append $out (dict "id" $cid "hasChildren" (.hasChildren | default false)) }}{{- end }}
+{{- end }}
+{{- end }}
+{{- toJson $out -}}
+{{- end }}
+
+{{/*
+openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
+deployment.json: any configured pane or FOB, releasability, or any HQ child
+link (whose shape places its header row). Empty otherwise.
+*/}}
+{{- define "openddil.frontendDeploymentJsonWanted" -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") }}true{{- end -}}
+{{- end }}
+
+{{/*
 The hub frontend's deployment.json: configured released-records panes, plus
 the egress admission pane when releasability is on (the pane is then served
 through the hub PEP), plus the declared edge attachments (DECLARED ONLY,
@@ -1561,6 +1631,12 @@ ConfigMap and the pod's checksum annotation cannot disagree.
 {{- end -}}
 {{- if .Values.frontend.fobs -}}
 {{- $_ := set $d "fobs" .Values.frontend.fobs -}}
+{{- end -}}
+{{- /* Each direct child's SHAPE (not its name): a child that rolls up sits on
+       the hub->HQ segment, a leaf child on a direct edge->HQ line. */ -}}
+{{- $childLinks := include "openddil.hqChildLinks" . | fromJsonArray -}}
+{{- if $childLinks -}}
+{{- $_ := set $d "childLinks" $childLinks -}}
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}

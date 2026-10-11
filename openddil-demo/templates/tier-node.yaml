@@ -708,7 +708,7 @@ spec:
             # Derived from the helper the relay config itself renders from, so
             # the thing measured and the thing measuring cannot disagree.
             - name: BRIDGE_TOPICS
-              value: {{ if $tier.hasChildren }}{{ include "openddil.tierUplinkTopics" $root | quote }}{{ else }}{{ include "openddil.edgeBridgeTopics" (dict "edge" $tier "root" $root) | quote }}{{ end }}
+              value: {{ include "openddil.relayTopics" (dict "tier" $tier "root" $root) | quote }}
             # The link this tier owns, named for what it is. A leaf's is the
             # edge->HQ bridge; an intermediate's is its own uplink, and its
             # screen should not say EDGE->HQ BUFFER while showing a region's
@@ -728,7 +728,7 @@ spec:
             - name: LINK_ID
               value: {{ $tier.id | quote }}
             - name: LINK_TRAFFIC_TOPICS
-              value: {{ join "," $root.Values.linkStatus.trafficTopics | quote }}
+              value: {{ include "openddil.linkTrafficTopics" (dict "tier" $tier "root" $root) | quote }}
             - name: LINK_HEARTBEAT_PERIOD_S
               value: {{ $root.Values.linkStatus.heartbeatPeriodS | quote }}
             - name: LINK_IDLE_AFTER_S
