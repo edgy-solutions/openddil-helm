@@ -26,6 +26,23 @@ adapter block with no consequence.
 {{- if not (has $op $allowedOps) }}
 {{- fail (printf "exerciseControl.adapter.operations entry %q is not one of %s" $op (toJson $allowedOps)) }}
 {{- end }}
+{{- $steps := list }}
+{{- if kindIs "slice" $opDef }}
+{{- if not $opDef }}
+{{- fail (printf "exerciseControl.adapter.operations.%s must not be an empty list" $op) }}
+{{- end }}
+{{- $steps = $opDef }}
+{{- else }}
+{{- $steps = list $opDef }}
+{{- end }}
+{{- range $i, $step := $steps }}
+{{- if not (kindIs "map" $step) }}
+{{- fail (printf "exerciseControl.adapter.operations.%s: each call must be an object {method, path, body}" $op) }}
+{{- end }}
+{{- if or (not $step.method) (not $step.path) }}
+{{- fail (printf "exerciseControl.adapter.operations.%s: call %d is missing method or path" $op $i) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- /*
 RESET JOB (exerciseControl.resetJob.enabled). The Job template the control

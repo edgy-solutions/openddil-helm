@@ -1847,7 +1847,10 @@ exerciseControl:
   # OPENDDIL_EXERCISE_CONTROL_URL when this is true (releasability.yaml).
   enabled: false
   port: 8095
-  # {name, endpoint, operations: {op: {method, path, body}}}. Overlays carry
+  # {name, endpoint, operations: {op: {method, path, body}}}. An op may also
+  # be a non-empty list of calls, sent in order and halted at the first
+  # non-2xx or transport error, e.g. restart: [{method: POST, path: /rewind},
+  # {method: POST, path: /run}]. Overlays carry
   # the real map; op keys must be one of pause/resume/stop/restart/run --
   # same ALLOWED_OPS set control.py refuses to start without (see exercise/
   # control.py), checked again here at render time so a bad map fails
@@ -1869,9 +1872,10 @@ exerciseControl:
   # egress rules take.
   adapterEgress: []
   # The reset as an in-cluster Job. Off by default. When on, the control
-  # service gains a "reset" op (not an adapter op: it never reaches the
-  # adapter) that creates a Job from a template this chart renders into a
-  # ConfigMap. The Job runs scripts/restart-exercise.sh from the reset-runner
+  # service gains a "reset" op (not an adapter op) that creates a Job from a
+  # template this chart renders into a ConfigMap. When the adapter has a
+  # pause op, the press sends it first; a failed pause refuses the reset and
+  # creates no Job, so the reset never runs under a live simulator. The Job runs scripts/restart-exercise.sh from the reset-runner
   # image in its in-cluster mode: the same cluster guard (the expected context
   # is in-cluster:<release namespace>), the same halt semantics, and the
   # restart still goes through control's own gate. The Job never retries

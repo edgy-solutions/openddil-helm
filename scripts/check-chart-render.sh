@@ -1384,6 +1384,35 @@ g14_fail_check "bad operations key" 'operations entry "launch"' \
   --set exerciseControl.adapter.endpoint=https://example.invalid/api \
   --set exerciseControl.adapter.operations.launch.method=POST \
   --set exerciseControl.adapter.operations.launch.path=/launch
+g14_fail_check "op with no path" 'operations.pause: call 0 is missing method or path' \
+  --set releasability.enabled=true --set exerciseControl.enabled=true \
+  --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+  --set exerciseControl.adapter.operations.pause.method=POST
+g14_fail_check "empty call list" 'operations.restart must not be an empty list' \
+  --set releasability.enabled=true --set exerciseControl.enabled=true \
+  --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+  --set-json 'exerciseControl.adapter.operations.restart=[]'
+g14_fail_check "call list entry with no path" 'operations.restart: call 1 is missing method or path' \
+  --set releasability.enabled=true --set exerciseControl.enabled=true \
+  --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+  --set-json 'exerciseControl.adapter.operations.restart=[{"method":"POST","path":"/rewind"},{"method":"POST"}]'
+
+# 14c2: a call list renders into adapter.json as a list, in order.
+render --set releasability.enabled=true --set exerciseControl.enabled=true \
+       --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+       --set-json 'exerciseControl.adapter.operations.restart=[{"method":"POST","path":"/rewind"},{"method":"POST","path":"/run"}]' \
+  | "$PY" -c '
+import json, sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+cm = [d for d in docs if d.get("kind") == "ConfigMap"
+      and (d.get("metadata") or {}).get("name") == "t-exercise-control-adapter"]
+ops = json.loads(cm[0]["data"]["adapter.json"])["operations"] if cm else {}
+paths = [c.get("path") for c in ops.get("restart") or []] if isinstance(ops.get("restart"), list) else None
+if paths != ["/rewind", "/run"]:
+    print("  FAIL [14c2]: restart call list did not render as [/rewind, /run]: " + str(ops.get("restart")))
+    sys.exit(1)
+print("  ok   [14c2]: restart call list renders in order: " + str(paths))
+' || fail=1
 
 # 14d-14g: the reset Job (exerciseControl.resetJob). One checker, four modes.
 # 14d is the absence side only: with resetJob off nothing reset-related may
