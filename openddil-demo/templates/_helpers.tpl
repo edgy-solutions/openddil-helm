@@ -1661,6 +1661,7 @@ Takes .broker — the host:port string passed to `-X brokers=`.
 {{- define "openddil.topicInitCreateLoop" -}}
 {{- $B := .broker }}
 echo "INFO: Initializing topics on {{ $B }}"
+drift=0
 # ---------------------------------------------------------
 # compression.type=lz4 ON EVERY TOPIC RESTATE SUBSCRIBES TO
 # ---------------------------------------------------------
@@ -1700,6 +1701,11 @@ echo "INFO: Initializing topics on {{ $B }}"
 # re-registers Restate never firing. Verified with `sh -n`
 # (2026-09-17) rather than by reading. Keep prose ABOVE the
 # `for`, and syntax-check this script when it changes.
+# Partition drift (spec -p N vs the live count) is logged after each
+# topic below. It is not fixed and not fatal: topic-init never alters
+# partitions, and a mismatch must not fail the hook (a failed hook leaves
+# the release pending-upgrade). The hook's log is deleted on success, so
+# scripts/check-topic-partitions.sh is the durable report.
 for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
@@ -1750,8 +1756,36 @@ for spec in \
   if [ -n "$setargs" ]; then
     rpk -X brokers={{ $B }} topic alter-config $topic $setargs || true
   fi
+  {{- include "openddil.topicInitDriftCheck" (dict "broker" $B) | nindent 2 }}
 done
+{{- include "openddil.topicInitDriftSummary" (dict "broker" $B) | nindent 0 }}
 echo "INFO: Topics initialized on {{ $B }}"
+{{- end -}}
+
+{{/*
+openddil.topicInitDriftCheck / openddil.topicInitDriftSummary -- partition
+drift is LOGGED here, never fixed and never fatal. `topic create` leaves an
+existing topic's partition count alone, so a spec that later said -p 8 over a
+topic created at 1 stays at 1 forever; raising it on a compacted keyed topic
+restarts offsets and needs a cold reset. The hook's log is deleted when the
+hook succeeds, so scripts/check-topic-partitions.sh is the durable report.
+Every command is safe under `set -e` when it matches nothing.
+Takes .broker -- the host:port string (or shell variable) used for `-X brokers=`.
+*/ -}}
+{{- define "openddil.topicInitDriftCheck" -}}
+want=$(printf '%s' "$args" | sed -n -E 's/.*-p ([0-9]+).*/\1/p')
+livelist=$(rpk -X brokers={{ .broker }} topic list 2>/dev/null) || livelist=""
+if [ -n "$want" ] && [ -n "$livelist" ]; then
+  have=$(printf '%s\n' "$livelist" | awk -v t="$topic" '$1 == t { print $2; exit }')
+  if [ "$have" != "$want" ]; then
+    echo "TOPIC_INIT_PARTITION_DRIFT topic=$topic spec=$want live=${have:-missing} broker={{ .broker }}"
+    drift=$((drift + 1))
+  fi
+fi
+{{- end -}}
+
+{{- define "openddil.topicInitDriftSummary" -}}
+echo "INFO: partition drift on {{ .broker }}: $drift topic(s); topic-init never changes partition counts; scripts/check-topic-partitions.sh reports it"
 {{- end -}}
 
 {{/*

@@ -916,6 +916,11 @@ spec:
               # Ledger row LR-0043-C.
               HQB={{ .Release.Name }}-redpanda-hq:{{ .Values.redpandaHq.kafkaPort }}
               echo "INFO: Initializing HQ-only egress topics on $HQB"
+              drift=0
+              # Partition drift (spec -p N vs the live count) is logged after
+              # each topic. It is not fixed and not fatal: topic-init never
+              # alters partitions, and the hook's log is deleted on success, so
+              # scripts/check-topic-partitions.sh is the durable report.
               {{- if .Values.releasability.enabled }}
               for spec in                 "egress-c2-status|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" "parts-availability|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"{{- range .Values.egress.hubTopics }} "{{ . }}"{{- end }}               ; do
               {{- else }}
@@ -928,5 +933,7 @@ spec:
                 if [ -n "$setargs" ]; then
                   rpk -X brokers=$HQB topic alter-config $topic $setargs || true
                 fi
+                {{- include "openddil.topicInitDriftCheck" (dict "broker" "$HQB") | nindent 16 }}
               done
+              {{- include "openddil.topicInitDriftSummary" (dict "broker" "$HQB") | nindent 14 }}
               echo "INFO: HQ-only egress topics initialized on $HQB"
