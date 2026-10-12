@@ -1792,6 +1792,55 @@ sys.exit(1 if errs else 0)
 G17PY
 rm -f "$G17_VALUES" "$G17_R"
 
+# --- guard 18: a chart-version bump alone does not roll exercise control ----
+# THE DEFECT MODELLED: the control Deployment's checksum/reset-job taken over
+# a Job template that carries helm.sh/chart (name-version). Every Chart.yaml
+# version bump then changed the annotation and rolled exercise control with
+# nothing it runs having changed. Helm cannot override Chart.version with
+# --set, so the chart is packaged at two versions. A third render changes what
+# the Job runs (activeDeadlineSeconds); its annotation MUST differ, or the
+# comparison could not fail and the equality above proves nothing.
+echo
+echo "guard 18: exercise-control reset-job checksum ignores the chart version"
+G18_DIR="$(mktemp -d)"
+G18_A="$(mktemp)"
+G18_B="$(mktemp)"
+G18_C="$(mktemp)"
+helm package "$CHART" --version 0.0.1 -d "$G18_DIR" >/dev/null
+helm package "$CHART" --version 0.0.2 -d "$G18_DIR" >/dev/null
+g18_render() {  # $1 = packaged chart; the rest are helm args
+  local pkg="$1"; shift
+  helm template t "$pkg" --namespace ns9 --set releasability.enabled=true     --set exerciseControl.enabled=true     --set exerciseControl.adapter.endpoint=https://example.invalid/api     --set exerciseControl.adapter.operations.pause.method=POST     --set exerciseControl.adapter.operations.pause.path=/pause     --set exerciseControl.resetJob.enabled=true "$@" 2>/dev/null
+}
+g18_render "$G18_DIR/openddil-demo-0.0.1.tgz" > "$G18_A"
+g18_render "$G18_DIR/openddil-demo-0.0.2.tgz" > "$G18_B"
+g18_render "$G18_DIR/openddil-demo-0.0.1.tgz" --set exerciseControl.resetJob.activeDeadlineSeconds=4321 > "$G18_C"
+"$PY" - "$G18_A" "$G18_B" "$G18_C" <<'G18PY' || fail=1
+import sys, yaml
+def ann(p):
+    for d in yaml.safe_load_all(open(p, encoding="utf-8")):
+        if d and d.get("kind") == "Deployment" and (d.get("metadata") or {}).get("name") == "t-exercise-control":
+            return (((d.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("annotations", {}).get("checksum/reset-job")
+    return None
+a, b, c = (ann(p) for p in sys.argv[1:4])
+errs = []
+for name, v in (("0.0.1", a), ("0.0.2", b), ("0.0.1 with a changed deadline", c)):
+    if not v:
+        errs.append("checksum/reset-job missing or empty at " + name + " -- the guard would be vacuous")
+if not errs:
+    if a != b:
+        errs.append("checksum/reset-job differs between chart 0.0.1 and 0.0.2 -- a version-only bump would roll exercise control")
+    if c == a:
+        errs.append("checksum/reset-job did not change when the reset Job's deadline changed -- guard 18 cannot fail")
+for e in errs:
+    print("  FAIL: " + e)
+if not errs:
+    print("  ok   : checksum/reset-job equal across chart 0.0.1 and 0.0.2, and different when the Job's deadline changes")
+sys.exit(1 if errs else 0)
+G18PY
+rm -f "$G18_DIR/openddil-demo-0.0.1.tgz" "$G18_DIR/openddil-demo-0.0.2.tgz" "$G18_A" "$G18_B" "$G18_C"
+rmdir "$G18_DIR"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

@@ -47,12 +47,18 @@ adapter block with no consequence.
 {{- /*
 RESET JOB (exerciseControl.resetJob.enabled). The Job template the control
 service's reset op instantiates, built once here so the ConfigMap and the
-Deployment's checksum annotation are over the same bytes. Nothing in this
+Deployment's checksum annotation are over nearly the same bytes. The
+checksum is taken over a copy without the helm.sh/chart label, so a chart
+version bump alone does not roll the control service. The consequence: after
+a version-only bump the running pod's reset Jobs keep the previous
+helm.sh/chart label until its next roll (cosmetic). Any change to what the
+Job runs, or to any other label, still moves the checksum. Nothing in this
 block renders while resetJob is off.
 */}}
 {{- $rj := $root.Values.exerciseControl.resetJob | default dict }}
 {{- $rjOn := $rj.enabled | default false }}
 {{- $job := dict }}
+{{- $jobSum := dict }}
 {{- if $rjOn }}
 {{- $cmd := list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
 {{- range $rj.declareUnmeasured | default list }}
@@ -91,6 +97,9 @@ block renders while resetJob is off.
         "activeDeadlineSeconds" (int64 $rj.activeDeadlineSeconds)
         "ttlSecondsAfterFinished" (int64 $rj.ttlSecondsAfterFinished)
         "template" (dict "metadata" (dict "labels" $jobLabels) "spec" $podSpec)) }}
+{{- $jobSum = deepCopy $job }}
+{{- $_ := set (index $jobSum "metadata") "labels" (omit $jobLabels "helm.sh/chart") }}
+{{- $_ := set (index $jobSum "spec" "template" "metadata") "labels" (omit $jobLabels "helm.sh/chart") }}
 {{- end }}
 {{- /*
 Rate sources: empty -> one URL per edges[] entry, against the edge's
@@ -151,7 +160,7 @@ spec:
       annotations:
         checksum/config: {{ toJson $adapter | sha256sum | quote }}
         {{- if $rjOn }}
-        checksum/reset-job: {{ toJson $job | sha256sum | quote }}
+        checksum/reset-job: {{ toJson $jobSum | sha256sum | quote }}
         {{- end }}
     spec:
       {{- if $rjOn }}
