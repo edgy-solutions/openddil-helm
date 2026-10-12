@@ -53,7 +53,7 @@ topics:
       in this deployment can author a capability snapshot. ADR-0038 already
       states it. Watermark 0 on every broker is the correct value, not a gap.
     revisit: >-
-      A feed that does carry loadout — AFSim/VR-Forces, or a customer source —
+      A feed that does carry loadout — AFSim, the co-located simulator, or a customer source —
       changes this from declared to expected-flowing, and this entry should be
       removed rather than amended. That producer must stamp provenance.edge_id
       on every snapshot: when other nodes run their own fusion, logistics

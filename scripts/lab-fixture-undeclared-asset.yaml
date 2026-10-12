@@ -30,7 +30,7 @@
 # NOT APPLIED BY `tools/dis-sim/deploy.sh`, AND IT CARRIES ITS OWN SOURCE.
 #
 # That script belongs to the customer bundle EXAMPLE, whose two edges are
-# edge-northpoint and edge-capeverdant. Running it against this lab would
+# edge-north and edge-south. Running it against this lab would
 # repoint the running sims at Services that do not exist here.
 #
 # It also refreshes the shared ConfigMap `dis-sim-src`, and on this lab that

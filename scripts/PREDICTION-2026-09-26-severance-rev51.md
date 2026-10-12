@@ -43,7 +43,7 @@ It is fine, and checked rather than assumed, twice:
   outright — so the selector key survives by design, not by luck.
 * Measured live, before the cut: `region-east status` resolves a **12-component
   site**, and all three simulator-exception selectors match running pods —
-  `logistics-sim`, `dis-sim-edge-northpoint`, `dis-sim-edge-capeverdant`. The
+  `logistics-sim` and the two example edge simulators' Deployments. The
   simulator exception matters as much as the subject set: if it silently
   matched nothing, the site's own sensor feed would be cut, the tier would
   freeze, and the run would report a false negative that looks exactly like the

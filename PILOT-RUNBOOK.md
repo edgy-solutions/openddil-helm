@@ -34,7 +34,7 @@ every divergence is declared.
 
 | | work cluster | lab | note |
 |---|---|---|---|
-| edge ids | `edge-01…03` | `edge-northpoint`, `edge-capeverdant` | **name-parameterized.** Everything below uses `$PILOT`; nothing depends on the literal name (that became true in 0.1.40 — see GD-09). |
+| edge ids | `edge-01…03` | `edge-north`, `edge-south` | **name-parameterized.** Everything below uses `$PILOT`; nothing depends on the literal name (that became true in 0.1.40 — see GD-09). |
 | P1 Atlas re-baseline | **required** | not applicable | work-cluster-only: the lab store is created fresh by this chart, so there is no pre-existing schema to re-baseline. |
 | P2/P3 measurements | real ORBAT data | synthetic sim data | work-cluster-only for *values*. The lab confirms the **queries run**; it cannot confirm the numbers mean anything. |
 | fleet | populated | logistics-sim generated | affects rung (ii) parity richness, not the mechanism. |
@@ -405,21 +405,21 @@ kubectl -n $NS exec $REL-postgres-hq-0 -- \
 
 ---
 
-## 0.5 VR-Forces preparation — do this BEFORE the session
+## 0.5 Simulator preparation — do this BEFORE the session
 
 Every parameter below was established by driving this pipeline with real
 IEEE 1278.1 traffic in rehearsal. Treat this as configuration to apply, not
 investigation to perform. **One genuine unknown remains — the enumeration
 coverage check in step 4. Walk in holding its answer.**
 
-### 1. Wire settings VR-Forces must emit
+### 1. Wire settings the co-located simulator must emit
 
 | setting | value | why |
 |---|---|---|
 | DIS protocol version | **7** | `sensor-ingest` decodes via `opendis` `dis7`. Version 6 PDUs are structurally close but not verified here. |
 | PDU type | **1** (Entity State) | the only type the ingestor extracts. Fire/Detonation PDUs are received and ignored. |
 | Exercise ID | **1** (or match `DIS_EXERCISE_ID`) | not currently filtered on — recorded so a later filter does not surprise anyone. |
-| Heartbeat | **~5 s** | VR-Forces default. Also what fusion's gone-quiet staleness detection is tuned against; much faster floods the buffer and proves less. |
+| Heartbeat | **~5 s** | common simulator default. Also what fusion's gone-quiet staleness detection is tuned against; much faster floods the buffer and proves less. |
 | Transport | **UDP unicast** to the ingest Service | see step 2 — broadcast/multicast is the thing most likely to bite. |
 
 ### 2. Network path to sensor-ingest
@@ -431,17 +431,17 @@ kubectl -n $NS get svc | grep sensor-ingest
 # edge-01 -> 62040/UDP, edge-02 -> 62041/UDP, edge-03 -> 62042/UDP
 ```
 
-**The reachability question, stated plainly:** VR-Forces normally emits DIS as
+**The reachability question, stated plainly:** The co-located simulator normally emits DIS as
 **broadcast or multicast** on a simulation LAN. A Kubernetes ClusterIP Service
 is **unicast only** — broadcast will not reach it, and multicast requires
 cluster network support that should not be assumed. Resolve one of:
 
-- point VR-Forces at a **unicast** destination (the NodePort on any node, or
+- point the co-located simulator at a **unicast** destination (the NodePort on any node, or
   a LoadBalancer address), **or**
 - run a small relay on the simulation LAN that joins the multicast group and
   forwards unicast to the Service.
 
-Confirm before the session — this is configuration on the VR-Forces side and
+Confirm before the session — this is configuration on the simulator side and
 cannot be fixed from inside the cluster.
 
 ```bash
@@ -494,7 +494,7 @@ the Predator B key:
 python openddil-customer-bundle-example/tools/dis-sim/dis_sim.py --list-types
 ```
 
-**Before the session, answer:** which entity types will the VR-Forces
+**Before the session, answer:** which entity types will the simulator
 scenario actually emit, and is each one in that list? Every gap is either a
 scenario change or an ontology addition — and ontology additions are
 deployment configuration, so they belong in the deployment's overlay rather
@@ -510,7 +510,7 @@ kubectl -n $NS exec $REL-tier-pg-$PILOT-0 -- psql -U openddil -d openddil -tAc \
 **A large `UNKNOWN` bucket is the coverage gap made visible.** That query is
 the fastest read on whether the ontology matches the scenario.
 
-### 5. No VR-Forces yet? Use the rehearsal generator
+### 5. No co-located simulator yet? Use the rehearsal generator
 
 `openddil-customer-bundle-example/tools/dis-sim/` emits real EntityState PDUs
 using the same library the ingestor decodes with, so the wire format is not

@@ -453,7 +453,7 @@ sensorIngest:
     requests: { cpu: 50m,  memory: 128Mi }
     limits:   { cpu: 250m, memory: 256Mi }
   httpPort: 8080
-  # If your DIS PDU producer (VR-Forces, test harness, etc.) lives OUTSIDE
+  # If your DIS PDU producer (the co-located simulator, test harness, etc.) lives OUTSIDE
   # the cluster, set externalAccess.enabled=true to expose the UDP port via
   # NodePort. The cluster's --service-node-port-range must include each
   # edge's udpPort (default range is 30000-32767; defaults here are
@@ -520,7 +520,7 @@ faustEdge:
   # These are now the values coefficients.py itself declares. That is a
   # deliberate choice of DECLARED defaults over invented ones: per ADR-0020
   # and the coefficients file's own header, real calibration is the
-  # AFSim/VR-Forces phase, and a number picked here to produce a pleasing
+  # AFSim or co-located-simulator phase, and a number picked here to produce a pleasing
   # spread would be authored fiction wearing a physical unit.
   #
   # ⚠ WHAT THIS DOES NOT FIX, because numbers cannot:
