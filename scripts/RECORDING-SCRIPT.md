@@ -236,9 +236,14 @@ the suite measured a byte of what the read path carries. This one does.
   report must be filed again (measured 2026-10-03: the BIT-only event
   re-appeared 3.5 minutes after the egress pods started).
 * **A scenario reset clears filed reports too**, by design. The BIT-only
-  event came back 21 s after the reset's restore (measured 2026-10-03). Wait
+  event came back 21 s after the reset's restore (measured 2026-10-03; 22 s
+  after the reset Job ended on 2026-10-12, rev 142). After an upgrade it
+  took 4 min 46 s from the egress pods starting (2026-10-12, rev 142). Wait
   5 minutes after an upgrade or a reset before rolling, so the HQ pane shows
   the BIT-only event before BEAT 2b files the report.
+* **Each of those re-opened events is delivered to the consumer's
+  destination once.** An upgrade or a reset is a new event there, by design;
+  BEAT 2b's own report on the same episode is not (it reads `duplicate`).
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
@@ -270,7 +275,8 @@ Show Ada and Bram side by side.
 
 * **Ada sees 12 assets. Bram sees 5 at edge-02 and 9 at the hub. The
   liaison sees 20.** (Measured 2026-10-10, rev 136: Ada's radar draws 12;
-  rev 137: Bram's hub header reads `9 ASSETS` under his entitlement.)
+  rev 137: Bram's hub header reads `9 ASSETS` under his entitlement; all
+  four again on the 2026-10-12 dry run, rev 142.)
 * Same screen, same role at their own tier, different fleets — **not two
   filtered views of one list; two different answers to the same query**,
   decided by the subject's entitlements and the data's labels.
@@ -279,7 +285,8 @@ Show Ada and Bram side by side.
   would see 12 of the same rollup.
 * **Region screen, 3D scene** — the fleet placed on the map, with the title
   count matching the AOR list: `20 ASSETS` and `20 ON MAP` against 20 live
-  rows in the region store (measured 2026-10-10, rev 137). Click an asset
+  rows in the region store (measured 2026-10-10, rev 137; again 2026-10-12,
+  rev 142, with the partials at 11 / 1 / 8). Click an asset
   to drill in.
 * **One radar's condition, the same at every tier.** `dis:1:1:1008` steps
   through its condition on the simulator's schedule (120 s steps, a 2400 s
@@ -287,7 +294,8 @@ Show Ada and Bram side by side.
   appearance, and the HQ fleet summary's element counts for region-east read
   **160 critical / 1745 degraded**, the same as edge-01's bands for that
   asset (measured 2026-10-09, rev 130: edge, region and HQ equal on 20 of 20
-  steps; again 160 / 1745 at all three on 2026-10-10, rev 136). HQ holds the counts, not the elements: the element tree stays at
+  steps; again 160 / 1745 at all three on 2026-10-10, rev 136, and on
+  2026-10-12, rev 142, 75 s into the step). HQ holds the counts, not the elements: the element tree stays at
   the owning edge and only its rollup crosses.
 
 *The beat:* the aggregate is no more visible than its least visible input.
@@ -298,7 +306,8 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 
 1. **TAK device — the fleet with readiness.** 12 tracks: `dis:1:1:1000`–`1009`
    and two more ATL tracks (measured 2026-10-10, rev 136, read at the TAK
-   server; the device itself was not on the lab). `1005` is destroyed and
+   server; the device itself was not on the lab; again 2026-10-12, rev 142:
+   22 events, 12 distinct tracks). `1005` is destroyed and
    still shown — a C2 viewer needs to see the loss. Twelve is right, not
    eleven. The destroyed track
    stays on the picture because it says destroyed: operational status and
@@ -313,7 +322,8 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
    certificate*, 0 bytes either way).
 3. **HQ view — the egress admission pane.** "**N of M admitted**", a refused
    count, and a **withheld** line. Measured 2026-10-10 (rev 136) for the C2
-   destination, one viewer at a time at the hub:
+   destination, one viewer at a time at the hub; the same four rows again on
+   2026-10-12 (rev 142):
 
    | viewer | admitted | refused | withheld |
    |---|---|---|---|
@@ -373,9 +383,21 @@ Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
    approvals (a regional officer and the coalition supervisor); it cites
    three modules (fault isolation, remove, install). Decision: **ADMIT**.
    Report to answer: 1 s; report to admitted action: 30 s, one intake poll
-   (measured 2026-10-10, rev 134; again under 1 s and 27 s on rev 136).
+   (measured 2026-10-10, rev 134; again under 1 s and 27 s on rev 136; under
+   1 s and 10 s on 2026-10-12, rev 142).
    **FIGURE** on the row opens the cited figure, "Detail A, Section 3", with
-   section 3 highlighted.
+   section 3 highlighted (rev 142 dry run: the figure opened with its
+   highlight; the probe did not read the title text, so check it by eye).
+5. **HQ — three more rows on the same asset, refused.** On the lab the
+   action stand-in also answers with three deliberately flawed copies of the
+   same action, and the pane refuses each one for its own reason:
+   `label_mismatch` (the action's label does not match the record it
+   answers), `approver_unentitled` (an approver is known but not entitled to
+   approve), `approver_unresolved` (an approver the deployment cannot
+   resolve). They are decided in the same poll as the ADMIT row (measured
+   2026-10-12, rev 142: all four at report + 10 s, all on the same event).
+   Say it plainly: **admission is decided per action, and a refusal says
+   why.**
    If BIT already raised this fault, Ada's report joins that fault's event
    (same event id, her report as a second source). The row is the same
    action, re-stamped, not a new row. Say "the action updates"; don't
@@ -392,7 +414,7 @@ did not.
 Sign in as the supervisor and press **Restart exercise** in the exercise
 panel; read the result as in pre-flight steps 3 and 4. Measured 2026-10-10
 (rev 136): the Job took **647 s**, **731 s** on the dry run and **769 s** on the
-round trip after it; verdict
+round trip after it (**724 s** on the 2026-10-12 dry run, rev 142); verdict
 PASS, last line `RESTART SENT (adapter 200)`, one `DECLARED UNMEASURED`.
 Budget ~13 minutes; the spread is in the last phase (waiting for
 subscriptions to show live after the restart). It stops and restarts every simulator labelled
@@ -425,7 +447,7 @@ of the HQ-attached edge; wait that long before pointing at a screen.
 
 On the HQ screen as `liaison.coalition`, turn off **region-east's row** in
 the header strip. Measured 2026-10-10 (rev 133): HQ's row reads down by +20 s
-(rev 137: +15 s),
+(rev 137: +15 s; rev 142: +20 s),
 HQ's summary `1 UP · 0 IDLE · 2 DOWN` (edge-01 and edge-02 ride
 region-east), the region screen `REGIONAL↔HQ: SEVERED`.
 
@@ -449,7 +471,8 @@ support or a blank where a fleet was.
 
 Turn region-east's row back on. The row reads up once at **+30 s** and stays
 (measured 2026-10-10, rev 137; edge-01 and edge-02 at HQ with it, no
-flicker), HQ's summary `3 UP · 0 IDLE · 0 DOWN` (rev 133); point at it at
+flicker; **+35 s** on the 2026-10-12 dry run, rev 142, again once), HQ's
+summary `3 UP · 0 IDLE · 0 DOWN` (rev 133; rev 142); point at it at
 ~+40 s. HQ's region view converged in **under 10 s** after the old
 slider's heal (2026-10-05); after the row heal on the dry run HQ's launcher
 row caught up at **+41 s**, carrying the edge's time (BEAT 3m). **Say the number
@@ -530,7 +553,11 @@ cut, edge-01 and the region read `moving` t0+340, `emplacing` t0+410,
 `emplaced` t0+420, and HQ held `march_ordered`; HQ's own consumers stayed
 Stable and kept reading. Heal at t0+432: HQ read `emplaced` at +41 s, its
 posture-since **equal to the edge's to the second** (t0+420), not the heal
-time.
+time. Again on the 2026-10-12 dry run (rev 142): `march_ordered` t0+300 at
+all three; cut at t0+322, HQ's row down at +20 s, the same two screens;
+`moving` t0+340, `emplacing` t0+410, `emplaced` t0+420 at edge-01 and the
+region while HQ held `march_ordered`; heal at t0+431, HQ `emplaced` at +36 s
+with posture-since t0+420.
 
 *The beat:* the move happened while HQ could not see it. When the link came
 back, HQ shows not only where the launcher is now but when it got there, as
@@ -556,7 +583,9 @@ reads down in the region store and at HQ by +20 s while edge-02 stays up;
 summary reads `2 UP · 0 IDLE · 1 DOWN` with an edge-01 `DOWN` badge.
 Again on the dry run (rev 136): down at both stores at +20 s, the same two
 screens; after 120 s edge-01's data age was 132.7 s in the region store
-against edge-02's 0.2 s.
+against edge-02's 0.2 s. And on 2026-10-12 (rev 142): down at HQ at +16 s
+and in the region at +17 s, the same two screens; at +125 s, 124.2 s
+against 1.7 s in the region store, 123.2 s against 0.8 s at HQ.
 
 The heavier cut, if the beat needs edge-01 gone entirely:
 ```
@@ -578,8 +607,11 @@ show that version from the region and HQ screens.
    set `LAT` 2000 and `SET`. edge-01's data age rises while edge-02's holds:
    region store 0.8 → 2.8 s, HQ 0.4 → 2.5 s, edge-02 1.0 / 0.7 s; the row
    stays up and its `LAT` field shows 2000 (measured 2026-10-10, rev 133;
-   dry run rev 136: region store 0.6 → 2.6 s, edge-02 0.5 s). `CLR` before
-   you cut.
+   dry run rev 136: region store 0.6 → 2.6 s, edge-02 0.5 s). On the
+   2026-10-12 dry run (rev 142) the region store's edge-01 age stepped
+   between ~2.3 and ~4.3 s rather than holding near 2.6 (HQ 1.4 → 3.1–3.4 s;
+   edge-02 0.2–0.4 s): say "two to four seconds", not one number. `CLR`
+   before you cut.
 
 *The beat, and say it plainly:* HQ can tell **a quiet edge from a downed
 region uplink**, because it carries both ages instead of fusing them. Under
@@ -591,8 +623,9 @@ region.
 
 **If BEAT 5 cut from the row:** turn edge-01's row back on. edge-01 reads up
 once in the region store and at HQ at **+45 s**, with fresh data (1.1 s),
-and stays up (measured 2026-10-10, rev 137; the rev 136 flicker is gone),
-so say "back" at ~+50 s. Its own screen returns
+and stays up (measured 2026-10-10, rev 137; the rev 136 flicker is gone).
+On the 2026-10-12 dry run (rev 142) it came up once at **+53 s** (HQ) and
++54 s (region), with no flicker, so say "back" at ~+55 s, not +50. Its own screen returns
 to `UPLINK: LINK UP`. Nothing restarted, so there is no backoff
 to wait out. The two options below apply only after `sever-tier.sh`.
 
@@ -649,7 +682,9 @@ partitioned by entitlement, degraded honestly under a cut, converged on heal.
 
 Log in as `observer.unlisted` / `demo`. Authentication succeeds; the screen
 serves nothing. **Authentication is not authorisation**, and the subject who
-is entitled to nothing sees nothing rather than everything.
+is entitled to nothing sees nothing rather than everything. (Measured
+2026-10-12, rev 142, at the hub: every count `0 ASSETS`, the pipeline panel
+`No assets in the pipeline.`)
 
 ## Do not, during the recording
 
