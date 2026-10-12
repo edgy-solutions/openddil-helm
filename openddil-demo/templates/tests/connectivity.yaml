@@ -115,8 +115,8 @@ spec:
         - name: PGPASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ .Release.Name }}-postgres-hq
-              key: POSTGRES_PASSWORD
+              name: {{ .Values.postgresHq.auth.existingSecret | default (printf "%s-postgres-hq" .Release.Name) | quote }}
+              key: {{ .Values.postgresHq.auth.passwordKey | quote }}
       command:
         - sh
         - -c

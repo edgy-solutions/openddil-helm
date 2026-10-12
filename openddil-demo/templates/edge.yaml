@@ -706,15 +706,7 @@ spec:
           env:
             - name: KAFKA_BROKERS
               value: {{ $edgeBroker | quote }}
-            - name: POSTGRES_DSN
-              value: {{ printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
-                  $root.Values.postgresHq.auth.username
-                  $root.Values.postgresHq.auth.password
-                  $root.Release.Name
-                  (include "openddil.svcDomain" $root)
-                  (int $root.Values.postgresHq.port)
-                  $root.Values.postgresHq.auth.database
-                | quote }}
+            {{- include "openddil.pgHqEnv" $root | nindent 12 }}
             - name: METRICS_PORT
               value: {{ $root.Values.projector.port | quote }}
             - name: RATE_LIMIT_PER_SEC

@@ -33,7 +33,6 @@
 */}}
 {{- $pgHost := printf "%s-postgres-hq%s" .Release.Name (include "openddil.svcDomain" .) }}
 {{- $pgUser := .Values.postgresHq.auth.username }}
-{{- $pgPass := .Values.postgresHq.auth.password }}
 {{- $pgDb   := .Values.postgresHq.auth.database }}
 {{- $pgPort := .Values.postgresHq.port }}
 apiVersion: batch/v1
@@ -93,6 +92,8 @@ spec:
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.utilities.atlas.pullPolicy "root" .) }}
           resources:
             {{- toYaml .Values.jobs.resources | nindent 12 }}
+          env:
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
           # See tier-node.yaml's atlas-apply for why --tx-mode none.
           args:
             - migrate
@@ -102,7 +103,10 @@ spec:
             - --tx-mode
             - none
             - --url
-            - postgres://{{ $pgUser }}:{{ $pgPass }}@{{ $pgHost }}:{{ $pgPort }}/{{ $pgDb }}?sslmode=disable
+            # URL-only image: env expansion from the PG* parts above keeps the rendered
+            # Job free of the password. A password with URL-reserved characters must be
+            # percent-encoded in the Secret.
+            - "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
           volumeMounts:
             - name: bundle-shared
               mountPath: /schema
@@ -116,11 +120,7 @@ spec:
           resources:
             {{- toYaml .Values.jobs.resources | nindent 12 }}
           env:
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-postgres-hq
-                  key: POSTGRES_PASSWORD
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
           command:
             - sh
             - -c

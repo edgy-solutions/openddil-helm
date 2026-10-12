@@ -655,6 +655,19 @@ stringData:
   client-secret: {{ required "releasability.oidc.clientSecret is required when oidc is enabled" $root.Values.releasability.oidc.clientSecret | quote }}
 {{- end }}
 {{- if $root.Values.releasability.keycloak.enabled }}
+{{- if not $root.Values.releasability.keycloak.adminExistingSecret }}
+---
+# Bootstrap admin password. A normal resource: only the keycloak container reads it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $root.Release.Name }}-keycloak-admin
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+type: Opaque
+stringData:
+  {{ $root.Values.releasability.keycloak.adminPasswordKey }}: {{ $root.Values.releasability.keycloak.adminPassword | quote }}
+{{- end }}
 ---
 # ===========================================================================
 # keycloak — the identity provider. AUTHENTICATION ONLY.
@@ -941,7 +954,10 @@ spec:
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               value: {{ $root.Values.releasability.keycloak.adminUser | quote }}
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-              value: {{ $root.Values.releasability.keycloak.adminPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.releasability.keycloak.adminExistingSecret | default (printf "%s-keycloak-admin" $root.Release.Name) | quote }}
+                  key: {{ $root.Values.releasability.keycloak.adminPasswordKey | quote }}
             # Serve under a sub-path so the IdP shares the app's host, and
             # therefore its site. See the ingress rule and the SameSite note
             # in gateway/oidc.py.

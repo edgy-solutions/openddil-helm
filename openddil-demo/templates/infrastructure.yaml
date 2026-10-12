@@ -713,7 +713,9 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_USER:     {{ .Values.postgresHq.auth.username | quote }}
+  {{- if not .Values.postgresHq.auth.existingSecret }}
   POSTGRES_PASSWORD: {{ .Values.postgresHq.auth.password | quote }}
+  {{- end }}
   POSTGRES_DB:       {{ .Values.postgresHq.auth.database | quote }}
 ---
 apiVersion: apps/v1
@@ -748,6 +750,14 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Release.Name }}-postgres-hq
+          {{- if .Values.postgresHq.auth.existingSecret }}
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresHq.auth.existingSecret | quote }}
+                  key: {{ .Values.postgresHq.auth.passwordKey | quote }}
+          {{- end }}
           ports:
             - name: postgres
               containerPort: {{ .Values.postgresHq.port }}

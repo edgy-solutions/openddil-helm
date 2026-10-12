@@ -244,6 +244,13 @@ postgresHq:
     username: postgres
     password: password
     database: openddil
+    # existingSecret names a Secret the cluster already holds (its key =
+    # passwordKey). When set, the chart renders no password at all for this
+    # store; consumers read it by secretKeyRef.
+    existingSecret: ""
+    passwordKey: POSTGRES_PASSWORD
+  # Connection mode handed to every consumer as PGSSLMODE.
+  sslmode: disable
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 1Gi }
@@ -1358,6 +1365,13 @@ tierNode:
       username: openddil
       password: openddil
       database: openddil
+      # existingSecret names a Secret the cluster already holds (its key =
+      # passwordKey). When set, the chart renders no password at all for the
+      # tier stores; consumers read it by secretKeyRef.
+      existingSecret: ""
+      passwordKey: POSTGRES_PASSWORD
+    # Connection mode handed to every tier consumer as PGSSLMODE.
+    sslmode: disable
     port: 5432
     storageSize: 8Gi
     storageClass: ""
@@ -1807,6 +1821,10 @@ releasability:
     basePath: /idp
     adminUser: admin
     adminPassword: admin
+    # adminExistingSecret names a Secret the cluster already holds (its key =
+    # adminPasswordKey); when set, the chart renders no admin password at all.
+    adminExistingSecret: ""
+    adminPasswordKey: admin-password
     realmVolumeSize: 8Mi
     # AN ABSOLUTE HEAP CAP PLUS HEADROOM, rather than a bigger limit.
     #

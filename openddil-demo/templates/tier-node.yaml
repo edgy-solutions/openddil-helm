@@ -41,6 +41,26 @@
 {{- if .Values.tierNode.enabled }}
 {{- $root := . -}}
 {{- $tn := .Values.tierNode -}}
+{{- if not $tn.postgres.auth.existingSecret }}
+---
+# Tier store password. A hook resource on purpose: the tier schema-init Job is a
+# pre-upgrade hook on an existing backend and reads this Secret before Helm
+# applies ordinary resources, so a normal Secret would not exist yet on the first
+# upgrade. `helm uninstall` leaves it behind (hook resources are not deleted).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-tier-pg
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-120"
+    "helm.sh/hook-delete-policy": before-hook-creation
+type: Opaque
+stringData:
+  {{ $tn.postgres.auth.passwordKey }}: {{ $tn.postgres.auth.password | quote }}
+{{- end }}
 {{- /* RANGES OVER TIERS, NOT EDGES.
 
      This loop read `.Values.edges`, which made a REGION structurally
@@ -77,7 +97,6 @@ on, because without it there is no cookie to lose.
 {{- end }}
 {{- $broker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
 {{- $pgHost := printf "%s-tier-pg-%s%s" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) }}
-{{- $dsn := printf "postgres://%s:%s@%s:%d/%s" $tn.postgres.auth.username $tn.postgres.auth.password $pgHost (int $tn.postgres.port) $tn.postgres.auth.database }}
 ---
 # LOOP-BOUNDARY SEPARATOR — do not remove.
 #
@@ -151,7 +170,10 @@ spec:
             - name: POSTGRES_USER
               value: {{ $tn.postgres.auth.username | quote }}
             - name: POSTGRES_PASSWORD
-              value: {{ $tn.postgres.auth.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $tn.postgres.auth.existingSecret | default (printf "%s-tier-pg" $root.Release.Name) | quote }}
+                  key: {{ $tn.postgres.auth.passwordKey | quote }}
             - name: POSTGRES_DB
               value: {{ $tn.postgres.auth.database | quote }}
             - name: PGDATA
@@ -336,6 +358,8 @@ spec:
           # root-tier Jobs have always had this; the tier Jobs did not.
           resources:
             {{- toYaml $root.Values.jobs.resources | nindent 12 }}
+          env:
+            {{- include "openddil.pgTierEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
           # --tx-mode none: six migrations carry their own BEGIN/COMMIT. Under the
           # default per-file transaction, that COMMIT ends Atlas's transaction early;
           # the file and its revision row commit, then Atlas's own commit finds the
@@ -356,7 +380,7 @@ spec:
             - --tx-mode
             - none
             - --url
-            - "{{ $dsn }}?sslmode=disable"
+            - "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
           volumeMounts:
             - name: bundle-shared
               mountPath: /bundle
@@ -574,7 +598,7 @@ data:
 # ===========================================================================
 # tier-projector-{{ $tier.id }} — reads THIS tier, writes THIS tier
 # ===========================================================================
-# The reachback closed in one object: KAFKA_BROKERS and POSTGRES_DSN both
+# The reachback closed in one object: KAFKA_BROKERS and the PG* store parts both
 # point at this tier. Previously the second pointed at the root, which is why
 # a tier had no queryable surface over its own data.
 {{- $tierProjectorPairs := list }}
@@ -642,8 +666,7 @@ spec:
           env:
             - name: KAFKA_BROKERS
               value: {{ $broker | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $dsn | quote }}
+            {{- include "openddil.pgTierEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
             # PACKAGING NOTE (gate finding): the image's default config path
             # is /app/src/config/projector_config.yaml. A tier-scoped config
             # MUST be pointed at explicitly — running without this silently
@@ -822,8 +845,13 @@ spec:
         - name: electric
           image: {{ include "openddil.thirdPartyImage" $root.Values.electric.image }}
           env:
+            {{- include "openddil.pgTierEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
+            # URL-only image: built by env expansion from the PG* parts above, so the
+            # rendered template carries references, never the password. A password with
+            # URL-reserved characters must be percent-encoded in the Secret (also for
+            # the atlas image in this file).
             - name: DATABASE_URL
-              value: {{ printf "%s?sslmode=disable" $dsn | quote }}
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: ELECTRIC_INSECURE
               value: "true"
           ports:
@@ -1512,8 +1540,7 @@ spec:
               value: "INFO"
             # cm-service reads its own tier's asset_cm_state to restore open
             # faults after a Restate state wipe; read-only.
-            - name: CM_STORE_DSN
-              value: {{ $dsn | quote }}
+            {{- include "openddil.pgTierEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
           ports:
             - containerPort: 9080
           resources:

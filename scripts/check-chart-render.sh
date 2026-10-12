@@ -399,7 +399,7 @@ render --set releasability.enabled=true --set egress.intake.enabled=true | "$PY"
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 want_env = {"OPENDDIL_EGRESS_BROKERS", "OPENDDIL_EGRESS_INTAKE_CONFIG",
-            "OPENDDIL_EGRESS_KINDS_DIR", "POSTGRES_DSN", "OPENDDIL_TOPAZ_URL"}
+            "OPENDDIL_EGRESS_KINDS_DIR", "PGHOST", "PGPASSWORD", "OPENDDIL_TOPAZ_URL"}
 intake = gate = None
 for d in docs:
     if d.get("kind") != "Deployment":
@@ -1863,6 +1863,132 @@ sys.exit(1 if errs else 0)
 G18PY
 rm -f "$G18_DIR/openddil-demo-0.0.1.tgz" "$G18_DIR/openddil-demo-0.0.2.tgz" "$G18_A" "$G18_B" "$G18_C"
 rmdir "$G18_DIR"
+
+# --- guard 19: store passwords reach containers only by secretKeyRef --------
+# THE DEFECT MODELLED: a DSN printf'd from values into a container env or a Job
+# arg, which puts the store password into the rendered Deployment/Job (and so
+# into the release manifest, `helm get manifest`, and every pod spec). Renders
+# with fixed fake sentinels as the passwords, then asserts the sentinel appears
+# only inside Secret objects, no rendered line is a URL with an inline password,
+# and PGPASSWORD secretKeyRefs exist (a guard that found no consumers has proved
+# nothing). A second render names an existing Secret for both stores: no chart
+# Secret may then carry the sentinel at all, and every password reference must
+# name the existing Secret.
+echo
+echo "guard 19: store passwords reach containers only by secretKeyRef"
+G19_S1="guard19-sentinel-hq"
+G19_S2="guard19-sentinel-tier"
+G19_S3="guard19-sentinel-kc"
+G19_DIR="$(mktemp -d)"
+g19_flags=(--set releasability.enabled=true --set releasability.keycloak.enabled=true --set "postgresHq.auth.password=$G19_S1" --set "tierNode.postgres.auth.password=$G19_S2" --set "releasability.keycloak.adminPassword=$G19_S3")
+render "${g19_flags[@]}" > "$G19_DIR/default.yaml"
+render --set tierNode.enabled=true "${g19_flags[@]}" > "$G19_DIR/tier.yaml"
+render --set tierNode.enabled=true "${g19_flags[@]}" --set postgresHq.auth.existingSecret=ext-hq-pg --set tierNode.postgres.auth.existingSecret=ext-tier-pg --set releasability.keycloak.adminExistingSecret=ext-kc-pg > "$G19_DIR/existing.yaml"
+"$PY" - "$G19_S1" "$G19_S2" "$G19_S3" "$G19_DIR/default.yaml" "$G19_DIR/tier.yaml" "$G19_DIR/existing.yaml" <<'G19PY' || fail=1
+import sys, re, json, yaml
+s1, s2, s3, f_def, f_tier, f_ext = sys.argv[1:7]
+sentinels = (s1, s2, s3)
+url_pw = re.compile(r"://[^/:@ ]+:[^@ $]+@")
+errs = []
+def docs_of(p):
+    return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+def containers(d):
+    spec = (((d.get("spec") or {}).get("template") or {}).get("spec") or {})
+    for k in ("initContainers", "containers"):
+        for c in spec.get(k) or []:
+            yield c
+def pw_refs(d):
+    out = []
+    for c in containers(d):
+        for e in c.get("env") or []:
+            if e.get("name") in ("PGPASSWORD", "POSTGRES_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD"):
+                ref = ((e.get("valueFrom") or {}).get("secretKeyRef")) or {}
+                out.append((e["name"], d["metadata"]["name"], c["name"], ref.get("name"), "value" in e))
+    return out
+# (f) NAME RULE ALLOWLIST: name  object  reason. A rendered container env entry whose
+# name looks like a credential and which carries a literal value fails unless it
+# is listed here (or is only $(VAR) references plus URL punctuation).
+G19_ALLOW = [
+]
+name_re = re.compile(r"(PASSWORD|SECRET|TOKEN|_KEY|DSN|DATABASE_URL)$")
+ref_url = re.compile(r"^postgres(ql)?://:@:/[?]sslmode=$")
+def all_containers(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("containers", "initContainers") and isinstance(v, list):
+                for c in v:
+                    yield c
+            else:
+                yield from all_containers(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from all_containers(v)
+def name_rule(label, docs):
+    n = 0
+    for d in docs:
+        for c in all_containers(d):
+            for e in c.get("env") or []:
+                if not name_re.search(e.get("name", "")) or "value" not in e:
+                    continue
+                n += 1
+                v = str(e["value"])
+                if "$(" in v and ref_url.match(re.sub(r"[$][(][A-Z_]+[)]", "", v)):
+                    continue
+                if any(a[0] == e["name"] and a[1] == d["metadata"]["name"] for a in G19_ALLOW):
+                    continue
+                errs.append("%s: %s/%s env %s has a literal value (credential-named; empty counts)" % (label, d["metadata"]["name"], c["name"], e["name"]))
+    return n
+stats = {}
+for label, p in (("default", f_def), ("tierNode", f_tier)):
+    docs = docs_of(p)
+    checked = 0
+    consumers = set()
+    refs = 0
+    for d in docs:
+        if d.get("kind") != "Secret":
+            checked += 1
+            blob = json.dumps(d)
+            for s in sentinels:
+                if s in blob:
+                    errs.append("%s: sentinel password in %s/%s (not a Secret)" % (label, d.get("kind"), d["metadata"]["name"]))
+        for name, obj, cont, sec, plain in pw_refs(d):
+            if plain:
+                errs.append("%s: %s/%s %s is a plain value, not a secretKeyRef" % (label, obj, cont, name))
+            elif name == "PGPASSWORD":
+                refs += 1
+                consumers.add((obj, cont))
+    for i, line in enumerate(open(p, encoding="utf-8").read().splitlines(), 1):
+        if url_pw.search(line):
+            errs.append("%s: line %d is a URL with an inline password" % (label, i))
+    if refs == 0:
+        errs.append("%s: zero PGPASSWORD secretKeyRefs rendered -- the guard found no consumers" % label)
+    nr = name_rule(label, docs)
+    print("  %-8s credential-named literal env entries examined=%d, allowlist size=%d" % (label, nr, len(G19_ALLOW)))
+    stats[label] = (len(consumers), refs, checked)
+    print("  %-8s consumers=%d secretKeyRefs=%d non-Secret objects checked=%d" % (label, len(consumers), refs, checked))
+ext_names = {"ext-hq-pg", "ext-tier-pg", "ext-kc-pg"}
+text = open(f_ext, encoding="utf-8").read()
+for s in sentinels:
+    if s in text:
+        errs.append("existingSecret: a sentinel password is rendered somewhere (a chart Secret still carries it)")
+        break
+refs = 0
+for d in docs_of(f_ext):
+    for name, obj, cont, sec, plain in pw_refs(d):
+        if plain:
+            errs.append("existingSecret: %s/%s %s is a plain value" % (obj, cont, name))
+            continue
+        refs += 1
+        if sec not in ext_names:
+            errs.append("existingSecret: %s/%s %s references %s, not the existing Secret" % (obj, cont, name, sec))
+if refs == 0:
+    errs.append("existingSecret: zero password secretKeyRefs rendered -- vacuous")
+print("  existingSecret render: password secretKeyRefs=%d, all naming the existing Secret" % refs)
+for e in errs:
+    print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G19PY
+rm -rf "$G19_DIR"
 
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"

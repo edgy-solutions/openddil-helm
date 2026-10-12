@@ -16,20 +16,6 @@
 {{- include "openddil.validateEdgeAttachment" . }}
 {{- include "openddil.validateLinkStatus" . }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
-{{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
-    .Values.postgresHq.auth.username
-    .Values.postgresHq.auth.password
-    .Release.Name
-    (include "openddil.svcDomain" .)
-    (int .Values.postgresHq.port)
-    .Values.postgresHq.auth.database }}
-{{- $pgDsnElectric := printf "postgresql://%s:%s@%s-postgres-hq%s:%d/%s"
-    .Values.postgresHq.auth.username
-    .Values.postgresHq.auth.password
-    .Release.Name
-    (include "openddil.svcDomain" .)
-    (int .Values.postgresHq.port)
-    .Values.postgresHq.auth.database }}
 {{/*
 THE DETECTION CUTOVER — UD-10, and ADR-0026's "coupled interim mechanisms
 retire together" applied to the detection reachback.
@@ -111,14 +97,15 @@ spec:
           image: "{{ include "openddil.thirdPartyImage" .Values.electric.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.electric.image.pullPolicy "root" .) }}
           env:
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
+            # Electric takes only a URL: built by env expansion from the PG* parts
+            # above, so the rendered template carries references, never the password.
+            # A password with URL-reserved characters must be percent-encoded in the
+            # Secret for this image (and the atlas image), which only take a URL.
             - name: DATABASE_URL
-              value: {{ $pgDsnElectric | quote }}
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: LOGICAL_PUBLISHER_HOST
               value: {{ printf "%s-electric-sync%s" .Release.Name (include "openddil.svcDomain" .) | quote }}
-            - name: AUTH_JWT_ALG
-              value: "HS256"
-            - name: AUTH_JWT_KEY
-              value: "secret"
             - name: ELECTRIC_INSECURE
               value: "true"
             # ElectricSQL bind port — explicit so it matches the Service.
@@ -448,8 +435,7 @@ spec:
               value: "/proto:/app/src"
             # cm-service reads its own tier's asset_cm_state to restore open
             # faults after a Restate state wipe; read-only.
-            - name: CM_STORE_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.cmService.port }}
@@ -660,8 +646,7 @@ spec:
           image: {{ include "openddil.image" (dict "name" .Values.assetRegistry.image.name "tag" .Values.assetRegistry.image.tag "digest" .Values.assetRegistry.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.assetRegistry.image.pullPolicy "root" .) }}
           env:
-            - name: ASSET_REGISTRY_POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: ASSET_REGISTRY_EDGES
               # Comma-separated edge=broker pairs across ALL edges.
               # Each pair becomes one Faust App in the composed worker.
@@ -1040,8 +1025,7 @@ spec:
           env:
             - name: KAFKA_BROKERS
               value: {{ $hqBroker | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: METRICS_PORT
               value: {{ .Values.projector.port | quote }}
             - name: RATE_LIMIT_PER_SEC

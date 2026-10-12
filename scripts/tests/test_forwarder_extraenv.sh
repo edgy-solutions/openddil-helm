@@ -50,7 +50,12 @@ check() {  # $1 = case, $2 = got, $3 = want
 
 BASE='OPENDDIL_EGRESS_BROKERS=
 OPENDDIL_FORWARD_CONFIG=
-POSTGRES_DSN=
+PGHOST=
+PGPORT=
+PGDATABASE=
+PGUSER=
+PGSSLMODE=
+PGPASSWORD=
 LOG_LEVEL=INFO'
 
 render "$TMP/empty.yaml" || exit 1
@@ -67,7 +72,7 @@ got="$(env_of "$TMP/two.yaml" | "$PY" -c '
 import sys
 for l in sys.stdin:
     n, _, v = l.rstrip("\n").partition("=")
-    print(n if n in ("OPENDDIL_EGRESS_BROKERS","OPENDDIL_FORWARD_CONFIG","POSTGRES_DSN","LOG_LEVEL") else l.rstrip("\n"))
+    print(n if n in ("OPENDDIL_EGRESS_BROKERS","OPENDDIL_FORWARD_CONFIG","PGHOST","PGPORT","PGDATABASE","PGUSER","PGSSLMODE","PGPASSWORD","LOG_LEVEL") else l.rstrip("\n"))
 ' | tr -d '\r')"
 check "B extraEnv two entries: appended in order after the existing" "$got" "$want"
 

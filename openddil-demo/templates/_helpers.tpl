@@ -1982,3 +1982,61 @@ openddil.linkDeclaredIdleIds — ids of edges carrying `declaredIdle`
 {{- range .Values.edges }}{{- if .declaredIdle }}{{- $ids = append $ids .id -}}{{- end }}{{- end -}}
 {{- join "," $ids -}}
 {{- end }}
+
+{{/*
+Store connection parts as libpq environment. Takes a dict: host, port,
+database, user, sslmode, secretName, secretKey. Renders PGHOST, PGPORT,
+PGDATABASE, PGUSER, PGSSLMODE, then PGPASSWORD by secretKeyRef: the password
+never appears as a rendered value. Indent with nindent at the call site.
+*/}}
+{{- define "openddil.pgEnv" -}}
+- name: PGHOST
+  value: {{ .host | quote }}
+- name: PGPORT
+  value: {{ .port | toString | quote }}
+- name: PGDATABASE
+  value: {{ .database | quote }}
+- name: PGUSER
+  value: {{ .user | quote }}
+- name: PGSSLMODE
+  value: {{ .sslmode | quote }}
+- name: PGPASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .secretName | quote }}
+      key: {{ .secretKey | quote }}
+{{- end }}
+
+{{/*
+Env for the root (HQ) store, via openddil.pgEnv. The password
+comes from postgresHq.auth.existingSecret when set, else the chart Secret.
+Use: include "openddil.pgHqEnv" $root | nindent N
+*/}}
+{{- define "openddil.pgHqEnv" -}}
+{{- $a := .Values.postgresHq.auth -}}
+{{- include "openddil.pgEnv" (dict
+    "host" (printf "%s-postgres-hq%s" .Release.Name (include "openddil.svcDomain" .))
+    "port" (int .Values.postgresHq.port)
+    "database" $a.database
+    "user" $a.username
+    "sslmode" .Values.postgresHq.sslmode
+    "secretName" ($a.existingSecret | default (printf "%s-postgres-hq" .Release.Name))
+    "secretKey" $a.passwordKey) -}}
+{{- end }}
+
+{{/*
+Same for one tier store. Takes a dict: root, tier (the tier id string).
+All tiers share tierNode.postgres.auth, so one Secret serves them all.
+*/}}
+{{- define "openddil.pgTierEnv" -}}
+{{- $root := .root -}}
+{{- $p := $root.Values.tierNode.postgres -}}
+{{- include "openddil.pgEnv" (dict
+    "host" (printf "%s-tier-pg-%s%s" $root.Release.Name .tier (include "openddil.svcDomain" $root))
+    "port" (int $p.port)
+    "database" $p.auth.database
+    "user" $p.auth.username
+    "sslmode" $p.sslmode
+    "secretName" ($p.auth.existingSecret | default (printf "%s-tier-pg" $root.Release.Name))
+    "secretKey" $p.auth.passwordKey) -}}
+{{- end }}

@@ -18,13 +18,6 @@ for the recorded reason that a topic on a tier is a topic something on that
 tier can produce to, and the gate's claim is that there is ONE boundary.
 */}}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
-{{- $pgDsn := printf "postgres://%s:%s@%s-postgres-hq%s:%d/%s"
-    .Values.postgresHq.auth.username
-    .Values.postgresHq.auth.password
-    .Release.Name
-    (include "openddil.svcDomain" .)
-    (int .Values.postgresHq.port)
-    .Values.postgresHq.auth.database }}
 {{- $topazUrl := printf "http://%s-topaz-hq%s:8383" .Release.Name (include "openddil.svcDomain" .) }}
 {{- $image := include "openddil.image" (dict "name" .Values.egress.image.name "tag" .Values.egress.image.tag "digest" .Values.egress.image.digest "root" .) }}
 {{- $pullPolicy := include "openddil.pullPolicy" (dict "policy" .Values.egress.image.pullPolicy "root" .) }}
@@ -245,8 +238,7 @@ spec:
               value: {{ .Values.egress.destination | quote }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ $topazUrl | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: LOG_LEVEL
               value: "INFO"
           ports:
@@ -313,8 +305,7 @@ spec:
           env:
             - name: OPENDDIL_EGRESS_BROKERS
               value: {{ $hqBroker | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: OPENDDIL_ASSEMBLER_CONFIG
               value: {{ printf "%s/config.json" $assemblerConfigMountPath | quote }}
             {{- if .Values.egress.kinds }}
@@ -520,8 +511,7 @@ spec:
               value: {{ printf "%s/config.json" $intakeConfigMountPath | quote }}
             - name: OPENDDIL_EGRESS_KINDS_DIR
               value: {{ $kindsMountPath | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: OPENDDIL_TOPAZ_URL
               value: {{ $topazUrl | quote }}
             - name: OPENDDIL_REGISTRY_REFRESH_S
@@ -684,8 +674,7 @@ spec:
               value: {{ $hqBroker | quote }}
             - name: OPENDDIL_FORWARD_CONFIG
               value: {{ printf "%s/config.json" $forwarderConfigMountPath | quote }}
-            - name: POSTGRES_DSN
-              value: {{ $pgDsn | quote }}
+            {{- include "openddil.pgHqEnv" . | nindent 12 }}
             - name: LOG_LEVEL
               value: "INFO"
             {{- if .Values.egress.trust.caConfigMap }}
