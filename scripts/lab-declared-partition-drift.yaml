@@ -1,0 +1,174 @@
+# =============================================================================
+# Declared partition drift -- the lab deployment
+# =============================================================================
+# check-topic-partitions.sh compares each topic's live partition count with the
+# deployed spec. `held` means: a KNOWN drift, deliberately deferred by decision,
+# named so it cannot quietly become "expected". It keeps the check green-with-
+# a-reason (counted separately in the summary), not green.
+#
+# This file is for the LAB deployment. An entry matches only its tier, topic,
+# spec AND live count; one that matches nothing live is stale and fails the
+# run, so remove an entry when its drift is fixed.
+version: 1
+
+drift:
+  - tier: edge-01
+    topic: tactical-events
+    spec: 4
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 4; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-01
+    topic: telemetry-latest-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-02
+    topic: tactical-events
+    spec: 4
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 4; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-02
+    topic: telemetry-latest-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-03
+    topic: asset-telemetry-windows
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-03
+    topic: tactical-events
+    spec: 4
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 4; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: edge-03
+    topic: telemetry-latest-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: hq
+    topic: asset-cm-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: hq
+    topic: asset-logistics-status
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: hq
+    topic: asset-registry-events
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: asset-cm-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: asset-logistics-status
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: asset-registry-events
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: asset-telemetry-windows
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: tactical-events
+    spec: 4
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 4; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.
+  - tier: region-east
+    topic: telemetry-latest-state
+    spec: 8
+    live: 1
+    status: held
+    reason: >-
+      Created before the spec said 8; topic-init never alters partitions.
+      Raising it restarts offsets on a compacted keyed topic, which needs a
+      cold reset that also resets every offset-tracking consumer; held until
+      that procedure exists.

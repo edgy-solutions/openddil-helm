@@ -27,9 +27,9 @@ Pass: one `PY=` line. `$PY` stays unquoted below so `py -3` works.
 ```
 bash scripts/check-advancing.sh openddil 30 && bash scripts/check-derive-stage.sh 60 \
   && $PY scripts/check_tier_feed.py openddil && bash scripts/check-shape-sizes.sh openddil \
-  && bash scripts/check-releasability-completeness.sh -n openddil && echo "PRE-FLIGHT 5/5"
+  && bash scripts/check-releasability-completeness.sh -n openddil && bash scripts/check-topic-partitions.sh openddil --declared scripts/lab-declared-partition-drift.yaml && echo "PRE-FLIGHT 6/6"
 ```
-Pass: `PRE-FLIGHT 5/5`. Each check exits non-zero on a miss, so the chain stops at the first one.
+Pass: `PRE-FLIGHT 6/6`. Each check exits non-zero on a miss, so the chain stops at the first one.
 The gate measures each store's effector-launch consumer itself (about a minute per store whose effector_launch is empty, so the chain can take ~5 minutes right after a reset); do not set OPENDDIL_EFFECTOR_CONSUMER_RESULT here, a caller-set file is read for every store and cannot name each store's group.
 
 **2. Four logins** (the scripted round trip; then sign in the four browser profiles, BEAT 1):
@@ -189,7 +189,11 @@ bash scripts/check-derive-stage.sh 60            # must say COMPLETING
 $PY scripts/check_tier_feed.py openddil          # must exit 0 (PY: see the checklist)
 bash scripts/check-shape-sizes.sh openddil       # read path: shapes under ceiling
 bash scripts/check-releasability-completeness.sh -n openddil   # every store; probes each store's effector consumer itself
+bash scripts/check-topic-partitions.sh openddil --declared scripts/lab-declared-partition-drift.yaml   # topic partitions vs the deployed spec
 ```
+
+**`check-topic-partitions` prints HELD for a drift that is known and declared;** that never blocks a take by itself.
+A `DRIFT` or `MISSING` line is new: understand it before recording. A `stale declaration` means a held drift was fixed; remove its entry.
 
 **If `check-advancing` reports any stage FROZEN, do not record.** That is the
 outage that ran invisible for 3½ hours; it is cheap to fix by restarting the
