@@ -19,9 +19,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 4; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: edge-01
     topic: telemetry-latest-state
     spec: 8
@@ -39,9 +39,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 4; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: edge-02
     topic: telemetry-latest-state
     spec: 8
@@ -59,9 +59,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 8; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: edge-03
     topic: tactical-events
     spec: 4
@@ -69,9 +69,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 4; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: edge-03
     topic: telemetry-latest-state
     spec: 8
@@ -149,9 +149,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 8; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: region-east
     topic: tactical-events
     spec: 4
@@ -159,9 +159,9 @@ drift:
     status: held
     reason: >-
       Created before the spec said 4; topic-init never alters partitions.
-      Raising it restarts offsets on a compacted keyed topic, which needs a
-      cold reset that also resets every offset-tracking consumer; held until
-      that procedure exists.
+      Not compacted, but adding partitions moves keys to other partitions
+      (per-asset order breaks across the change) and cannot be undone; held
+      for the same cold-reset procedure.
   - tier: region-east
     topic: telemetry-latest-state
     spec: 8
