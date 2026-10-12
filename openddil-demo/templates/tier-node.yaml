@@ -1510,6 +1510,10 @@ spec:
               value: "/proto:/app/src"
             - name: LOG_LEVEL
               value: "INFO"
+            # cm-service reads its own tier's asset_cm_state to restore open
+            # faults after a Restate state wipe; read-only.
+            - name: CM_STORE_DSN
+              value: {{ $dsn | quote }}
           ports:
             - containerPort: 9080
           resources:

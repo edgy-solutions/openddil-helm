@@ -446,6 +446,10 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/proto:/app/src"
+            # cm-service reads its own tier's asset_cm_state to restore open
+            # faults after a Restate state wipe; read-only.
+            - name: CM_STORE_DSN
+              value: {{ $pgDsn | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.cmService.port }}
