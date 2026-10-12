@@ -447,15 +447,27 @@ else
   echo "  ok   [7c]: stub-sink checksum/artifacts moves with egress.stubSink.artifacts"
 fi
 
-# 7d: default render has no hub frontend deployment-config ConfigMap at all.
+# 7d: the default render may carry a hub deployment-config for the child-link
+# meter (since 0.1.109); it must stay free of releasability or records-pane
+# content: only childLinks, and no egressPane or released-records panes.
 render | "$PY" -c '
-import sys, yaml
+import sys, yaml, json
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-bad = [ d["metadata"]["name"] for d in docs
-        if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") ]
-if bad:
-    print("  FAIL [7d-default]: default render has a hub deployment-config ConfigMap: " + ", ".join(bad)); sys.exit(1)
-print("  ok   [7d-default]: default render has no hub frontend deployment-config ConfigMap")
+cms = [d for d in docs if d.get("kind") == "ConfigMap"
+       and d["metadata"]["name"].endswith("-frontend-deployment-config")]
+for cm in cms:
+    try:
+        cfg = json.loads((cm.get("data") or {})["deployment.json"])
+    except Exception as e:
+        print("  FAIL [7d-default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
+    if not isinstance(cfg, dict):
+        print("  FAIL [7d-default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
+    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes"))
+    if extra:
+        print("  FAIL [7d-default]: default hub deployment-config carries key: " + ", ".join(extra)); sys.exit(1)
+    if cfg.get("releasedRecordsPanes"):
+        print("  FAIL [7d-default]: default hub deployment-config carries releasedRecordsPanes"); sys.exit(1)
+print("  ok   [7d-default]: default hub deployment-config carries no pane content (child links only)")
 ' || fail=1
 
 # 7e: a non-empty frontend.releasedRecordsPanes appears in the hub frontend's
@@ -935,19 +947,30 @@ g9_fail_check "empty allowedClientCNs" --set releasability.enabled=true --set eg
 # Persists the check that was run once by hand when 6f17554 landed:
 # releasability.enabled=true must put the SAME egress.destination the gate
 # and topaz-hq already use into the hub frontend's deployment.json, as valid
-# JSON, under egressPane.destination -- and a default render must carry no
-# such ConfigMap at all (nothing for a non-releasability deployment to leak).
+# JSON, under egressPane.destination. A default render may carry a
+# deployment-config for the child-link meter (since 0.1.109), but never any
+# egress pane or released-records pane content.
 echo
 echo "guard 10: hub frontend deployment-config carries the egress pane destination"
 
 render | "$PY" -c '
-import sys, yaml
+import sys, yaml, json
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-bad = [d["metadata"]["name"] for d in docs
-       if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
-if bad:
-    print("  FAIL [10 default]: default render has a hub deployment-config ConfigMap: " + ", ".join(bad)); sys.exit(1)
-print("  ok   [10 default]: no hub frontend-deployment-config ConfigMap by default")
+cms = [d for d in docs if d.get("kind") == "ConfigMap"
+       and d["metadata"]["name"].endswith("-frontend-deployment-config")]
+for cm in cms:
+    try:
+        cfg = json.loads((cm.get("data") or {})["deployment.json"])
+    except Exception as e:
+        print("  FAIL [10 default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
+    if not isinstance(cfg, dict):
+        print("  FAIL [10 default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
+    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes"))
+    if extra:
+        print("  FAIL [10 default]: default hub deployment-config carries key: " + ", ".join(extra)); sys.exit(1)
+    if cfg.get("releasedRecordsPanes"):
+        print("  FAIL [10 default]: default hub deployment-config carries releasedRecordsPanes"); sys.exit(1)
+print("  ok   [10 default]: default hub deployment-config carries no pane content (child links only)")
 ' || fail=1
 
 g10_dest() { render --set releasability.enabled=true "$@" | "$PY" -c '
