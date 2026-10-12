@@ -124,14 +124,16 @@ beats below disagree with what was measured, the measurement is here:
   `sever-tier.sh`. Measured times to flip: **region ~10 s, the HQ view of
   the HQ-attached edge ~16 s**; back up in **~9 s and ~15 s**. Leave that
   long before pointing at a screen.
-* **Every link has its own row, in the screen's header.** HQ's header
-  carries its two direct links, edge-03 and region-east (since rev 137 they
-  sit where the old status dots were; the `DIRECT LINKS` card is gone); the
-  region's header carries edge-01 and edge-02; each edge and the region
-  carry their own uplink. Each row has a toggle and `LAT` / `JIT` / `BW`
-  with `SET` and `CLR`. Any signed-in viewer can use them. Nothing
+* **Every link has its own row, in the network popover.** Each screen's
+  top bar shows its link state and buffer on the network pill; open the pill
+  for the rows. HQ's popover carries its two direct links, region-east
+  (under `REGIONAL HUBS → HQ`) and edge-03 (under `DIRECT · EDGE → HQ`); the
+  region's popover carries edge-01 and edge-02; each edge and the region
+  carry their own uplink. Each row has a toggle and opens to
+  `BANDWIDTH LIMITER`, `LATENCY & JITTER` and `JITTER`, with `APPLY` and
+  `CLEAR`. Any signed-in viewer can use them. Nothing
   restarts; every screen stays reachable. **The reset does not restore the
-  rows or clear the toxics**: set every row back on and `CLR` every toxic by
+  rows or clear the toxics**: set every row back on and `CLEAR` every toxic by
   hand before the next beat.
 * **The region's link card counts every link it watches**, its uplink plus
   edge-01 and edge-02: `3 UP · 0 IDLE · 0 DOWN` at rest (measured
@@ -434,7 +436,7 @@ Then:
   2026-10-10 (rev 136): the open edge-01 screen still read 0 assets 3.5 min
   after the reset finished; a reloaded one read 12 at once. Run the
   four-profile login check anyway (4/4 on the dry run).
-* **Links:** set every link row back on and `CLR` every
+* **Links:** set every link row back on and `CLEAR` every
   toxic; the reset leaves them as they were.
 * **Wait 5 minutes** before BEAT 3 for the reasons in the pre-flight notes.
 
@@ -449,8 +451,9 @@ of the HQ-attached edge; wait that long before pointing at a screen.
 
 ## BEAT 3 — dimension 1, region cut from HQ (~4 min)
 
-On the HQ screen as `liaison.coalition`, turn off **region-east's row** in
-the header strip. Measured 2026-10-10 (rev 133): HQ's row reads down by +20 s
+On the HQ screen as `liaison.coalition`, open the network pill in the top bar
+and turn off **region-east's row** in its popover. Measured 2026-10-10
+(rev 133): HQ's row reads down by +20 s
 (rev 137: +15 s; rev 142: +20 s),
 HQ's summary `1 UP · 0 IDLE · 2 DOWN` (edge-01 and edge-02 ride
 region-east), the region screen `REGIONAL↔HQ: SEVERED`.
@@ -577,8 +580,9 @@ Placeholders (do not record over one that is still open):
 
 ## BEAT 5 — dimension 2, edge-01 cut (~4 min)
 
-On the region screen (as `operator.regioneast`), turn off **edge-01's row**
-in the header. Nothing restarts. Measured 2026-10-10 (rev 137): at +30 s the
+On the region screen (as `operator.regioneast`), open the network pill and
+turn off **edge-01's row** in its popover. Nothing restarts. Measured
+2026-10-10 (rev 137): at +30 s the
 region's link card reads `2 UP · 0 IDLE · 1 DOWN`, and edge-01's own screen
 reads `DDIL: LINK SEVERED` over `UPLINK BUFFER → region-east`, the buffer
 that holds what edge-01 cannot send. Measured 2026-10-10 (rev 133): edge-01
@@ -608,13 +612,15 @@ show that version from the region and HQ screens.
 2. **HQ — the two-hop read.** Edge-01 stale by minutes, **while the region's
    own rollup is seconds old**.
 3. **Optional, before the cut — a slow link is not a cut.** On the same row,
-   set `LAT` 2000 and `SET`. edge-01's data age rises while edge-02's holds:
+   set `LATENCY & JITTER` to `2.0 s` and `APPLY`. edge-01's data age rises
+   while edge-02's holds:
    region store 0.8 → 2.8 s, HQ 0.4 → 2.5 s, edge-02 1.0 / 0.7 s; the row
-   stays up and its `LAT` field shows 2000 (measured 2026-10-10, rev 133;
+   stays up and its `LATENCY & JITTER` reads `2.0 s` (measured 2026-10-10,
+   rev 133;
    dry run rev 136: region store 0.6 → 2.6 s, edge-02 0.5 s). On the
    2026-10-12 dry run (rev 142) the region store's edge-01 age stepped
    between ~2.3 and ~4.3 s rather than holding near 2.6 (HQ 1.4 → 3.1–3.4 s;
-   edge-02 0.2–0.4 s): say "two to four seconds", not one number. `CLR`
+   edge-02 0.2–0.4 s): say "two to four seconds", not one number. `CLEAR`
    before you cut.
 
 *The beat, and say it plainly:* HQ can tell **a quiet edge from a downed
