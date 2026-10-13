@@ -186,6 +186,10 @@ redpandaEdge:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }
+  # The broker's Seastar memory is limits.memory minus this, rendered as
+  # --memory; the headroom is for allocations outside Seastar's allocator.
+  # Raise the limit, not the headroom, to give the broker more.
+  memoryHeadroomMi: 384
   # Kafka listener on 9092, OUTSIDE listener (host-debug) on 9093.
   internalPort: 9092
   outsidePort: 9093
@@ -204,6 +208,10 @@ redpandaHq:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }
+  # The broker's Seastar memory is limits.memory minus this, rendered as
+  # --memory; the headroom is for allocations outside Seastar's allocator.
+  # Raise the limit, not the headroom, to give the broker more.
+  memoryHeadroomMi: 384
   kafkaPort: 19092
   outsidePort: 19093
   adminPort: 19644

@@ -2112,6 +2112,85 @@ sys.exit(1 if errs else 0)
 G19PY
 rm -rf "$G19_DIR"
 
+# --- guard 20: redpanda --memory leaves headroom below the container limit ---
+# THE DEFECT MODELLED: a broker started with no --memory sizes Seastar to the
+# whole cgroup limit (--reserve-memory is 0), leaving nothing for allocations
+# outside its allocator; it ran at ~85% of the limit and was OOMKilled after a
+# reset. Every broker container must carry --memory, with --memory + the
+# headroom equal to limits.memory, and at least 256Mi left. Variants cover both
+# limit forms (Gi, Mi). A control render with zero headroom must be refused by
+# the chart, and the checker is self-tested on a copy with --memory removed.
+echo
+echo "guard 20: redpanda --memory leaves headroom below the container limit"
+G20_DIR="$(mktemp -d)"
+render > "$G20_DIR/default.yaml"
+render --set tierNode.enabled=true > "$G20_DIR/tier.yaml"
+render --set redpandaHq.resources.limits.memory=1536Mi --set redpandaEdge.resources.limits.memory=2Gi > "$G20_DIR/forms.yaml"
+cat > "$G20_DIR/check.py" <<'G20PY'
+import sys, yaml
+def mi(v):
+    v = str(v)
+    return int(v[:-2]) * (1024 if v.endswith("Gi") else 1)
+def check(path, label, headroom):
+    errs, n = [], 0
+    for d in yaml.safe_load_all(open(path, encoding="utf-8")):
+        if not d or d.get("kind") not in ("Deployment", "StatefulSet"):
+            continue
+        for c in (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []:
+            a = [str(x) for x in (c.get("args") or [])]
+            if "redpanda" not in a or "start" not in a:
+                continue
+            n += 1
+            who = "%s/%s" % (d["metadata"]["name"], c["name"])
+            if "--memory" not in a:
+                errs.append("%s: no --memory" % who)
+                continue
+            m = int(a[a.index("--memory") + 1].rstrip("M"))
+            lim = mi(c["resources"]["limits"]["memory"])
+            if m + headroom != lim:
+                errs.append("%s: --memory %dM + headroom %d != limit %dMi" % (who, m, headroom, lim))
+            elif lim - m < 256:
+                errs.append("%s: only %dMi left below the limit" % (who, lim - m))
+            else:
+                print("  ok   : %s %s --memory %dM, limit %dMi" % (label, who, m, lim))
+    if n == 0:
+        errs.append("%s: zero brokers checked -- vacuous" % label)
+    return errs
+errs = []
+if sys.argv[1] == "selftest":
+    e = check(sys.argv[2], "selftest", 384)
+    print("  selftest checker reported %d problem(s)" % len(e))
+    sys.exit(0 if e else 1)
+for p, l in zip(sys.argv[1:], ("default", "tierNode", "limit-forms")):
+    errs += check(p, l, 384)
+for e in errs:
+    print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G20PY
+"$PY" "$G20_DIR/check.py" "$G20_DIR/default.yaml" "$G20_DIR/tier.yaml" "$G20_DIR/forms.yaml" || fail=1
+# SELF-TEST: drop --memory and its value from one broker; the checker must object.
+"$PY" - "$G20_DIR/default.yaml" "$G20_DIR/mutant.yaml" <<'G20MUT'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+i = t.index("            - --memory\n")
+j = t.index("            - --reserve-memory\n", i)
+open(sys.argv[2], "w", encoding="utf-8").write(t[:i] + t[j:])
+G20MUT
+if "$PY" "$G20_DIR/check.py" selftest "$G20_DIR/mutant.yaml"; then
+  echo "  ok   : self-test: the checker fails a broker with --memory removed"
+else
+  echo "  FAIL: the checker passed a broker with --memory removed -- guard 20 cannot fail"; fail=1
+fi
+# CONTROL: zero headroom must be refused at render time, naming the value.
+if helm template t "$CHART" --set redpandaEdge.memoryHeadroomMi=0 >"$G20_DIR/ctl.out" 2>&1; then
+  echo "  FAIL: control render with memoryHeadroomMi=0 succeeded -- the chart does not enforce a headroom floor"; fail=1
+elif grep -q memoryHeadroomMi "$G20_DIR/ctl.out"; then
+  echo "  ok   : control: memoryHeadroomMi=0 is refused, naming memoryHeadroomMi"
+else
+  echo "  FAIL: control render failed but the error does not name memoryHeadroomMi"; fail=1
+fi
+rm -rf "$G20_DIR"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

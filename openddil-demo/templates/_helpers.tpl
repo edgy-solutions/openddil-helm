@@ -2059,3 +2059,29 @@ All tiers share tierNode.postgres.auth, so one Secret serves them all.
     "secretName" ($p.auth.existingSecret | default (printf "%s-tier-pg" $root.Release.Name))
     "secretKey" $p.auth.passwordKey) -}}
 {{- end }}
+
+{{/*
+Redpanda --memory value, e.g. "640M": limits.memory (Mi) minus headroomMi.
+Called with (dict "resources" <resources> "headroomMi" <int> "who" "<values path>").
+Accepts <n>Gi and <n>Mi only; anything else, or no limit, fails the render.
+*/}}
+{{- define "openddil.redpandaMemory" -}}
+{{- $lim := dig "limits" "memory" "" (.resources | default dict) | toString -}}
+{{- $mi := 0 -}}
+{{- if regexMatch "^[0-9]+Gi$" $lim -}}
+{{- $mi = mul (trimSuffix "Gi" $lim | int) 1024 -}}
+{{- else if regexMatch "^[0-9]+Mi$" $lim -}}
+{{- $mi = trimSuffix "Mi" $lim | int -}}
+{{- else -}}
+{{- fail (printf "%s.resources.limits.memory=%q: set it as <n>Gi or <n>Mi (the broker's --memory is derived from it)" .who $lim) -}}
+{{- end -}}
+{{- $h := int .headroomMi -}}
+{{- if lt $h 256 -}}
+{{- fail (printf "%s.memoryHeadroomMi=%d: must be at least 256" .who $h) -}}
+{{- end -}}
+{{- $m := sub $mi $h -}}
+{{- if lt $m 512 -}}
+{{- fail (printf "%s: limits.memory %dMi minus memoryHeadroomMi %d leaves %dMi; the broker needs at least 512Mi (raise the limit)" .who $mi $h $m) -}}
+{{- end -}}
+{{- printf "%dM" $m -}}
+{{- end }}
