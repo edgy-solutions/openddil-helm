@@ -135,8 +135,9 @@ electric:
   image:
     repository: <ARTIFACTORY>/electricsql/electric
 
-# OpenDDIL-owned, but the chart renders it through the thirdPartyImage
-# helper with a full repository, so it needs the redirect like a third party.
+# OpenDDIL-owned: with an empty repository (the default) the reset runner
+# follows global.imageRegistry like the other OpenDDIL images; this full
+# repository override is kept for compatibility and is used verbatim.
 exerciseControl:
   resetJob:
     image:

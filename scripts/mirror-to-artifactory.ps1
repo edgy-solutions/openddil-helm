@@ -495,7 +495,7 @@ $SrcShortNameToValuesPaths = @{
     'postgres'                 = @('postgresHq.image.digest', 'tierNode.postgres.image.digest')
     'restate'                  = @('restate.image.digest')
     'toxiproxy'                = @('toxiproxy.image.digest')
-    # OpenDDIL-owned, but rendered through the thirdPartyImage helper.
+    # OpenDDIL-owned; follows global.imageRegistry unless a repository override is set.
     'reset-runner'             = @('exerciseControl.resetJob.image.digest')
     # The kubectl image the restate-wipe hook runs (docker.io/alpine/k8s).
     # Short name is the last path segment, so 'k8s'.

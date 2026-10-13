@@ -2006,7 +2006,10 @@ exerciseControl:
   # it by digest together with the chart.
   resetJob:
     enabled: false
-    image: {repository: ghcr.io/edgy-solutions/openddil/reset-runner, tag: latest, digest: "", pullPolicy: IfNotPresent}
+    # Follows global.imageRegistry / global.imagePrefix like the other OpenDDIL
+    # images. A non-empty `repository` is a full override, kept for
+    # compatibility and used verbatim.
+    image: {name: reset-runner, repository: "", tag: latest, digest: "", pullPolicy: IfNotPresent}
     declareUnmeasured: []      # each -> "--declare-unmeasured <name>"
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)

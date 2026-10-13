@@ -129,6 +129,23 @@ Pass the .image block directly (NOT wrapped in a dict) — the helper reads
 {{- end }}
 
 {{/*
+Image reference for the exercise reset runner (exerciseControl.resetJob.image).
+Follows global.imageRegistry/imagePrefix like every other OpenDDIL image, so
+a deployment that mirrors images overrides the registry once. A non-empty
+.repository is a full override and is used verbatim (thirdPartyImage).
+
+Usage: include "openddil.resetRunnerImage" $   (the root context)
+*/}}
+{{- define "openddil.resetRunnerImage" -}}
+{{- $i := .Values.exerciseControl.resetJob.image -}}
+{{- if $i.repository -}}
+{{ include "openddil.thirdPartyImage" (dict "repository" $i.repository "tag" $i.tag "digest" $i.digest) }}
+{{- else -}}
+{{ include "openddil.image" (dict "name" $i.name "tag" $i.tag "digest" $i.digest "root" .) }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Bundle-image initContainer. Copies subtrees out of the runtime-bundle
 image into a shared emptyDir, with explicit src→dst path mapping so
 hardcoded paths in connect yaml (/proto, /ontology) can be honored via
@@ -2160,7 +2177,7 @@ hook probes are not the same set.
 {{- $o = append $o (include "openddil.thirdPartyImage" $v.releasability.keycloak.image) -}}
 {{- end -}}
 {{- if and $v.exerciseControl.enabled $v.exerciseControl.resetJob.enabled -}}
-{{- $o = append $o (include "openddil.thirdPartyImage" $v.exerciseControl.resetJob.image) -}}
+{{- $o = append $o (include "openddil.resetRunnerImage" $root) -}}
 {{- end -}}
 {{- if $v.egress.tak.enabled -}}
 {{- $t := $v.egress.tak.image -}}

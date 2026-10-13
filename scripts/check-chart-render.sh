@@ -2650,5 +2650,86 @@ fi
 [ "$g27_fail" -eq 0 ] || fail=1
 rm -rf "$G27_DIR"
 echo
+# --- guard 28: every OpenDDIL image follows global.imageRegistry --------------
+# THE DEFECT MODELLED: an OpenDDIL-built image that renders its repository
+# verbatim (thirdPartyImage) instead of through openddil.image. A deployment
+# that mirrors images overrides global.imageRegistry and is done -- except for
+# that one image, which keeps pulling from the default registry: the
+# images-pullable hook sits in ImagePullBackOff and the upgrade is refused.
+# Render with global.imageRegistry=registry.invalid and every image-adding
+# feature on (guard 21's set, plus the reset Job). Refs come from every
+# `image:` field in the manifests and from the reset Job's pod spec inside the
+# exercise-reset-job ConfigMap's job.json (parsed, not grepped). FAIL on any
+# ref under the default image prefix that does not start with
+# registry.invalid/. Scope control: FAIL unless a reset-runner ref was seen
+# (the check must see the image it exists for) and at least 5 own refs were.
+# Compatibility: a non-empty resetJob.image.repository is used verbatim, in
+# BOTH the job.json pod spec and the images-pullable hook.
+echo "guard 28: every OpenDDIL image follows global.imageRegistry"
+G28_DIR="$(mktemp -d)"
+G28_ARGS=(--set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true
+  --set releasability.enabled=true --set releasability.keycloak.enabled=true
+  --set egress.tak.enabled=true --set egress.tak.tls.enabled=true
+  --set egress.tak.tls.secretName=guard28-secret --set-json 'egress.tak.tls.allowedClientCNs=["guard28-cn"]'
+  --set tierNode.enabled=true --set tierNode.topaz.enabled=true --set cmReports.enabled=true
+  --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api
+  --set exerciseControl.resetJob.enabled=true)
+render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid > "$G28_DIR/reg.yaml"
+render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid \
+  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner > "$G28_DIR/compat.yaml"
+cat > "$G28_DIR/check.py" <<'G28PY'
+import sys, json, yaml
+PREFIX = "edgy-solutions/openddil/"
+def podspec(d):
+    k, s = d.get("kind"), d.get("spec") or {}
+    if k == "Pod": return s
+    if k == "CronJob": return (((s.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec") or {}
+    return (s.get("template") or {}).get("spec") or {}
+def images(ps):
+    return [c["image"] for k in ("containers", "initContainers") for c in ps.get(k) or [] if c.get("image")]
+def collect(path):
+    """-> (manifest refs, job.json refs, hook refs)"""
+    man, job, hook = [], [], []
+    def walk(d):
+        if not isinstance(d, dict): return
+        if d.get("kind") == "List":
+            for i in d.get("items") or []: walk(i)
+            return
+        name = (d.get("metadata") or {}).get("name") or ""
+        if d.get("kind") == "ConfigMap" and name.endswith("-exercise-reset-job"):
+            job.extend(images(podspec(json.loads((d.get("data") or {})["job.json"]))))
+            return
+        ps = podspec(d)
+        refs = images(ps)
+        man.extend(refs)
+        if d.get("kind") == "Job" and "-images-pullable-" in name: hook.extend(refs)
+    for d in yaml.safe_load_all(open(path, encoding="utf-8")): walk(d)
+    return man, job, hook
+errs = []
+man, job, hook = collect(sys.argv[1])
+allrefs = set(man) | set(job)
+own = sorted(r for r in allrefs if "/" + PREFIX in r or r.startswith(PREFIX))
+for r in own:
+    if not r.startswith("registry.invalid/"):
+        errs.append("does not follow global.imageRegistry: " + r)
+if not any("reset-runner" in r for r in own): errs.append("no reset-runner ref seen -- the check cannot see the image it exists for")
+if not any("reset-runner" in r for r in job): errs.append("no reset-runner ref in the exercise-reset-job job.json pod spec")
+if len(own) < 5: errs.append("only %d own image ref(s) found (need >= 5)" % len(own))
+print("  %d image ref(s), %d own, %d from job.json" % (len(allrefs), len(own), len(job)))
+man, job, hook = collect(sys.argv[2])
+want = [r for r in sys.argv[3:]]
+for w in want:
+    if w not in job: errs.append("compat: %s missing from the job.json pod spec" % w)
+    if w not in hook: errs.append("compat: %s missing from the images-pullable hook" % w)
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G28PY
+if ! command -v helm >/dev/null 2>&1 || ! command -v "$PY" >/dev/null 2>&1; then
+  echo "  FAIL: helm or python is missing; guard 28 cannot run (a skip would be a silent pass)"; fail=1
+else
+  "$PY" "$G28_DIR/check.py" "$G28_DIR/reg.yaml" "$G28_DIR/compat.yaml" example.invalid/x/reset-runner:latest || fail=1
+fi
+rm -rf "$G28_DIR"
+echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
