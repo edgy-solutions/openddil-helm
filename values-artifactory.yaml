@@ -135,6 +135,13 @@ electric:
   image:
     repository: <ARTIFACTORY>/electricsql/electric
 
+# OpenDDIL-owned, but the chart renders it through the thirdPartyImage
+# helper with a full repository, so it needs the redirect like a third party.
+exerciseControl:
+  resetJob:
+    image:
+      repository: <ARTIFACTORY>/edgy-solutions/openddil/reset-runner
+
 restate:
   image:
     repository: <ARTIFACTORY>/restatedev/restate

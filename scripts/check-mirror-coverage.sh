@@ -156,6 +156,19 @@ restate:
 egress:
   tak:
     enabled: true
+# Off by default. The template refuses to render without an adapter, so a
+# stub is given (never contacted, render only). The reset Job is the one
+# image the chart renders inside a ConfigMap payload instead of a pod spec,
+# which is why images() also reads embedded JSON.
+exerciseControl:
+  enabled: true
+  adapter:
+    name: ci
+    endpoint: "http://ci-adapter:8096"
+    operations:
+      restart: { method: POST, path: /restart, body: {} }
+  resetJob:
+    enabled: true
 YAML
 
 # Parse the PowerShell inventory and values-path mapping. Both are plain
@@ -279,6 +292,9 @@ def images(path):
         m = re.match(r"\s*image:\s*[\"']?([^\"'\s]+)[\"']?\s*$", line)
         if m:
             out.append(m.group(1))
+        # Job manifests embedded as a JSON string in a ConfigMap carry
+        # \"image\":\"...\" rather than a YAML image: line.
+        out += re.findall(r'\\"image\\"\s*:\s*\\"([^\\"]+)\\"', line)
     return sorted(set(out))
 
 findings = []

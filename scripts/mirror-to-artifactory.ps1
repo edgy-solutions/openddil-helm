@@ -141,6 +141,9 @@ $Images = @(
     @{ src='ghcr.io/edgy-solutions/openddil/runtime-bundle:latest';           dst='edgy-solutions/openddil/runtime-bundle:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/egress:latest';                   dst='edgy-solutions/openddil/egress:latest' },
     @{ src='ghcr.io/edgy-solutions/openddil/tak-server:latest';               dst='edgy-solutions/openddil/tak-server:latest' },
+    # The exercise-control reset Job's image. The chart renders it inside a
+    # ConfigMap; it only runs when exerciseControl.resetJob.enabled.
+    @{ src='ghcr.io/edgy-solutions/openddil/reset-runner:latest';            dst='edgy-solutions/openddil/reset-runner:latest' },
     #
     # dis-sim is the ONE entry here the chart does not render. It is the DIS
     # PDU generator that feeds the pipeline's front door, deployed by
@@ -492,6 +495,8 @@ $SrcShortNameToValuesPaths = @{
     'postgres'                 = @('postgresHq.image.digest', 'tierNode.postgres.image.digest')
     'restate'                  = @('restate.image.digest')
     'toxiproxy'                = @('toxiproxy.image.digest')
+    # OpenDDIL-owned, but rendered through the thirdPartyImage helper.
+    'reset-runner'             = @('exerciseControl.resetJob.image.digest')
     # The kubectl image the restate-wipe hook runs (docker.io/alpine/k8s).
     # Short name is the last path segment, so 'k8s'.
     'k8s'                      = @('restate.wipe.image.digest')
