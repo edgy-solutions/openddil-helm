@@ -1919,6 +1919,26 @@ exerciseControl:
   # list of {to: [...], ports: [...]}, same shape kubernetes NetworkPolicy
   # egress rules take.
   adapterEgress: []
+  # Named sequences the control service can run: {name: {label, description?,
+  # steps: [...]}}, carried to the pod as sequences.json and checked at render
+  # time (a bad map fails `helm template`). A name is [a-z]{1,32}, is not an
+  # adapter op (pause, restart, resume, run, stop) and is not "reset"; a label
+  # is required. A step is EITHER {wait_s: n} with 0 < n <= 900 OR
+  # {method, url, body?, name?} (body is a map). A url starts http:// and has
+  # no "@": credentials never go in a URL. Limits: 1..32 steps per sequence,
+  # total wait_s <= 1800. The gateway lets only the supervisor login press a
+  # sequence. A halted run undoes nothing: the steps already made stay made.
+  # Example:
+  #   sequences:
+  #     example:
+  #       label: Example
+  #       steps:
+  #         - {method: POST, url: "http://svc.ns.svc:8080/start", body: {}}
+  #         - {wait_s: 30}
+  sequences: {}
+  # NetworkPolicy egress peers+ports for the hosts the sequence steps call,
+  # verbatim -- list of {to: [...], ports: [...]}, same shape as adapterEgress.
+  sequenceEgress: []
   # The reset as an in-cluster Job. Off by default. When on, the control
   # service gains a "reset" op (not an adapter op) that creates a Job from a
   # template this chart renders into a ConfigMap. When the adapter has a

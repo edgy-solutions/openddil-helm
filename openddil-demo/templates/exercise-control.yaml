@@ -45,6 +45,64 @@ adapter block with no consequence.
 {{- end }}
 {{- end }}
 {{- /*
+SEQUENCES (exerciseControl.sequences), checked here with the rules of
+control.py's load_sequences, so a bad map fails `helm template` instead of
+crash-looping the pod. Every failure names the sequence and, for a step, its
+index.
+*/}}
+{{- range $sname, $seq := ($root.Values.exerciseControl.sequences | default dict) }}
+{{- if not (regexMatch "^[a-z]{1,32}$" $sname) }}
+{{- fail (printf "exerciseControl.sequences: name %q must match [a-z]{1,32}" $sname) }}
+{{- end }}
+{{- if or (has $sname $allowedOps) (eq $sname "reset") }}
+{{- fail (printf "exerciseControl.sequences: name %q collides with a built-in op" $sname) }}
+{{- end }}
+{{- if not (kindIs "map" $seq) }}
+{{- fail (printf "exerciseControl.sequences.%s must be an object" $sname) }}
+{{- end }}
+{{- if or (not (kindIs "string" $seq.label)) (not (trim $seq.label)) }}
+{{- fail (printf "exerciseControl.sequences.%s: 'label' must be a non-empty string" $sname) }}
+{{- end }}
+{{- if and (hasKey $seq "description") (not (kindIs "string" $seq.description)) }}
+{{- fail (printf "exerciseControl.sequences.%s: 'description' must be a string" $sname) }}
+{{- end }}
+{{- if or (not (kindIs "slice" $seq.steps)) (lt (len $seq.steps) 1) (gt (len $seq.steps) 32) }}
+{{- fail (printf "exerciseControl.sequences.%s: 'steps' must be a list of 1..32 entries" $sname) }}
+{{- end }}
+{{- $totalWait := 0.0 }}
+{{- range $i, $step := $seq.steps }}
+{{- if not (kindIs "map" $step) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: must be an object" $sname $i) }}
+{{- end }}
+{{- if hasKey $step "wait_s" }}
+{{- if or (not (has (kindOf $step.wait_s) (list "float64" "float32" "int" "int64" "int32"))) (le (float64 $step.wait_s) 0.0) (gt (float64 $step.wait_s) 900.0) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: wait_s must be a number > 0 and <= 900" $sname $i) }}
+{{- end }}
+{{- $totalWait = addf $totalWait $step.wait_s }}
+{{- else }}
+{{- if or (not (kindIs "string" $step.method)) (not (trim $step.method)) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: missing 'method'" $sname $i) }}
+{{- end }}
+{{- if or (not (kindIs "string" $step.url)) (not (hasPrefix "http://" $step.url)) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: 'url' must be a string starting http://" $sname $i) }}
+{{- end }}
+{{- $netloc := regexReplaceAll "[/?#].*$" (trimPrefix "http://" $step.url) "" }}
+{{- if or (not $netloc) (hasPrefix ":" $netloc) (contains "@" $netloc) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: 'url' needs a host and must not carry credentials" $sname $i) }}
+{{- end }}
+{{- if and (hasKey $step "body") (not (kindIs "map" $step.body)) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: 'body' must be an object" $sname $i) }}
+{{- end }}
+{{- if and (hasKey $step "name") (not (kindIs "invalid" $step.name)) (not (kindIs "string" $step.name)) }}
+{{- fail (printf "exerciseControl.sequences.%s step %d: 'name' must be a string" $sname $i) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if gt $totalWait 1800.0 }}
+{{- fail (printf "exerciseControl.sequences.%s: total wait_s %v exceeds 1800" $sname $totalWait) }}
+{{- end }}
+{{- end }}
+{{- /*
 RESET JOB (exerciseControl.resetJob.enabled). The Job template the control
 service's reset op instantiates, built once here so the ConfigMap and the
 Deployment's checksum annotation are over nearly the same bytes. The
@@ -123,6 +181,7 @@ metadata:
     {{- include "openddil.labels" $root | nindent 4 }}
 data:
   adapter.json: {{ toJson $adapter | quote }}
+  sequences.json: {{ toJson $root.Values.exerciseControl.sequences | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -158,7 +217,13 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "exercise-control" "root" $root) | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson $adapter | sha256sum | quote }}
+        {{- /*
+        The checksum covers the adapter AND the sequences, so a sequence change
+        rolls the pod. Declared consequence: this moves the checksum, so the
+        exercise-control pod rolls once on the upgrade that first ships this
+        form of it, even with no sequences.
+        */}}
+        checksum/config: {{ toJson (dict "adapter" $adapter "sequences" $root.Values.exerciseControl.sequences) | sha256sum | quote }}
         {{- if $rjOn }}
         checksum/reset-job: {{ toJson $jobSum | sha256sum | quote }}
         {{- end }}
@@ -184,6 +249,8 @@ spec:
           env:
             - name: EXERCISE_ADAPTER_FILE
               value: /etc/exercise/adapter.json
+            - name: EXERCISE_SEQUENCES_FILE
+              value: /etc/exercise/sequences.json
             - name: EXERCISE_RATE_SOURCES
               value: {{ join "," $rateSources | quote }}
             - name: EXERCISE_RATE_WINDOW_S
@@ -305,6 +372,12 @@ spec:
       ports:
         - port: {{ $root.Values.sensorIngest.httpPort }}
     {{- range $root.Values.exerciseControl.adapterEgress }}
+    - to:
+        {{- toYaml .to | nindent 8 }}
+      ports:
+        {{- toYaml .ports | nindent 8 }}
+    {{- end }}
+    {{- range $root.Values.exerciseControl.sequenceEgress }}
     - to:
         {{- toYaml .to | nindent 8 }}
       ports:

@@ -1572,6 +1572,103 @@ g14_reset_check on --set exerciseControl.resetJob.enabled=true
 g14_reset_check halt --set exerciseControl.resetJob.enabled=true --set-string exerciseControl.resetJob.haltBeforePhase=2
 g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}'
 
+# 14h: exercise sequences (exerciseControl.sequences, sequenceEgress).
+G14_BASE=(--set releasability.enabled=true --set exerciseControl.enabled=true
+          --set exerciseControl.adapter.endpoint=https://example.invalid/api)
+G14_SEQ='{"demo":{"label":"Demo","description":"d","steps":[{"method":"post","url":"http://svc.ns.svc:8080/go?x=1","body":{"k":1},"name":"go"},{"wait_s":30}]}}'
+
+# 14h-a: enabled with no sequences -- sequences.json is "{}", the env var is
+# set, and the egress is the two fixed rules only.
+render "${G14_BASE[@]}" | "$PY" -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+def get(kind, name):
+    return [d for d in docs if d.get("kind") == kind and (d.get("metadata") or {}).get("name") == name]
+fail = False
+cm = get("ConfigMap", "t-exercise-control-adapter")
+sj = cm[0]["data"].get("sequences.json") if cm else None
+if sj != "{}":
+    print("  FAIL [14h-a]: sequences.json is " + repr(sj) + ", want \"{}\"")
+    fail = True
+dep = get("Deployment", "t-exercise-control")
+env = {e["name"]: e.get("value") for c in dep[0]["spec"]["template"]["spec"]["containers"] for e in c.get("env") or []} if dep else {}
+if env.get("EXERCISE_SEQUENCES_FILE") != "/etc/exercise/sequences.json":
+    print("  FAIL [14h-a]: EXERCISE_SEQUENCES_FILE is " + repr(env.get("EXERCISE_SEQUENCES_FILE")))
+    fail = True
+np = get("NetworkPolicy", "t-exercise-control-only")
+n = len(np[0]["spec"]["egress"]) if np else -1
+if n != 2:
+    print("  FAIL [14h-a]: egress has " + str(n) + " rule(s), want 2 (DNS + sensor-ingest)")
+    fail = True
+if fail:
+    sys.exit(1)
+print("  ok   [14h-a]: no sequences -> sequences.json \"{}\", EXERCISE_SEQUENCES_FILE set, 2 egress rules")
+' || fail=1
+
+# 14h-b: a valid sequence renders and the ConfigMap JSON round-trips; the
+# sequenceEgress rule is added after the fixed ones.
+render "${G14_BASE[@]}" --set-json "exerciseControl.sequences=$G14_SEQ" \
+       --set-json 'exerciseControl.sequenceEgress=[{"to":[{"ipBlock":{"cidr":"10.9.9.9/32"}}],"ports":[{"port":8080}]}]' \
+  | G14_WANT="$G14_SEQ" "$PY" -c '
+import json, os, sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+cm = [d for d in docs if d.get("kind") == "ConfigMap" and (d.get("metadata") or {}).get("name") == "t-exercise-control-adapter"]
+got = json.loads(cm[0]["data"]["sequences.json"]) if cm else None
+want = json.loads(os.environ["G14_WANT"])
+fail = False
+if got != want:
+    print("  FAIL [14h-b]: sequences.json did not round-trip: " + str(got))
+    fail = True
+np = [d for d in docs if d.get("kind") == "NetworkPolicy" and (d.get("metadata") or {}).get("name") == "t-exercise-control-only"]
+eg = np[0]["spec"]["egress"] if np else []
+if len(eg) != 3 or eg[-1]["to"][0].get("ipBlock", {}).get("cidr") != "10.9.9.9/32":
+    print("  FAIL [14h-b]: sequenceEgress did not render as the third egress rule: " + str(eg))
+    fail = True
+if fail:
+    sys.exit(1)
+print("  ok   [14h-b]: valid sequence round-trips through sequences.json; sequenceEgress rendered")
+' || fail=1
+
+# 14h-c: each rejection fails the render and names the reason.
+g14_seq_fail() {  # $1 = description, $2 = needle, $3 = sequences JSON
+  g14_fail_check "$1" "$2" "${G14_BASE[@]}" --set-json "exerciseControl.sequences=$3"
+}
+G14_CALL='{"method":"POST","url":"http://h/x"}'
+g14_seq_fail "sequence name with a capital" 'name "Bad" must match' "{\"Bad\":{\"label\":\"L\",\"steps\":[$G14_CALL]}}"
+g14_seq_fail "sequence named pause" 'name "pause" collides with a built-in op' "{\"pause\":{\"label\":\"L\",\"steps\":[$G14_CALL]}}"
+g14_seq_fail "sequence named reset" 'name "reset" collides with a built-in op' "{\"reset\":{\"label\":\"L\",\"steps\":[$G14_CALL]}}"
+g14_seq_fail "sequence with no label" "sequences.demo: 'label' must be a non-empty string" "{\"demo\":{\"steps\":[$G14_CALL]}}"
+g14_seq_fail "sequence with empty steps" "sequences.demo: 'steps' must be a list of 1..32" '{"demo":{"label":"L","steps":[]}}'
+G14_33=$(printf '{"wait_s":1},%.0s' $(seq 33)); G14_33="[${G14_33%,}]"
+g14_seq_fail "sequence with 33 steps" "sequences.demo: 'steps' must be a list of 1..32" "{\"demo\":{\"label\":\"L\",\"steps\":$G14_33}}"
+g14_seq_fail "a step that is a string" 'sequences.demo step 0: must be an object' '{"demo":{"label":"L","steps":["x"]}}'
+g14_seq_fail "wait_s 0" 'sequences.demo step 1: wait_s must be a number > 0 and <= 900' "{\"demo\":{\"label\":\"L\",\"steps\":[$G14_CALL,{\"wait_s\":0}]}}"
+g14_seq_fail "wait_s 901" 'sequences.demo step 0: wait_s must be a number > 0 and <= 900' '{"demo":{"label":"L","steps":[{"wait_s":901}]}}'
+g14_seq_fail "wait_s a string" 'sequences.demo step 0: wait_s must be a number' '{"demo":{"label":"L","steps":[{"wait_s":"5"}]}}'
+g14_seq_fail "total wait 1801" 'sequences.demo: total wait_s 1801 exceeds 1800' '{"demo":{"label":"L","steps":[{"wait_s":900},{"wait_s":900},{"wait_s":1}]}}'
+g14_seq_fail "call with no method" "sequences.demo step 0: missing 'method'" '{"demo":{"label":"L","steps":[{"url":"http://h/x"}]}}'
+g14_seq_fail "call with no url" "sequences.demo step 0: 'url' must be a string starting http://" '{"demo":{"label":"L","steps":[{"method":"POST"}]}}'
+g14_seq_fail "https url" "sequences.demo step 0: 'url' must be a string starting http://" '{"demo":{"label":"L","steps":[{"method":"POST","url":"https://h/x"}]}}'
+g14_seq_fail "url with credentials" "sequences.demo step 0: 'url' needs a host and must not carry credentials" '{"demo":{"label":"L","steps":[{"method":"POST","url":"http://u:p@h/x"}]}}'
+g14_seq_fail "url with no host" "sequences.demo step 0: 'url' needs a host" '{"demo":{"label":"L","steps":[{"method":"POST","url":"http:///x"}]}}'
+g14_seq_fail "body a string" "sequences.demo step 0: 'body' must be an object" '{"demo":{"label":"L","steps":[{"method":"POST","url":"http://h/x","body":"s"}]}}'
+g14_seq_fail "description not a string" "sequences.demo: 'description' must be a string" "{\"demo\":{\"label\":\"L\",\"description\":5,\"steps\":[$G14_CALL]}}"
+g14_seq_fail "step name not a string" "sequences.demo step 0: 'name' must be a string" '{"demo":{"label":"L","steps":[{"method":"POST","url":"http://h/x","name":5}]}}'
+
+# 14h-d: the checksum differs between the empty and the valid sequences render.
+g14_sum() { render "${G14_BASE[@]}" "$@" | grep -m1 'checksum/config:' | tr -d ' '; }
+G14_SUM_A=$(g14_sum)
+G14_SUM_B=$(g14_sum --set-json "exerciseControl.sequences=$G14_SEQ")
+if [ -z "$G14_SUM_A" ] || [ -z "$G14_SUM_B" ]; then
+  echo "  FAIL [14h-d]: no checksum/config annotation rendered"
+  fail=1
+elif [ "$G14_SUM_A" = "$G14_SUM_B" ]; then
+  echo "  FAIL [14h-d]: checksum/config did not change with the sequences"
+  fail=1
+else
+  echo "  ok   [14h-d]: checksum/config differs between no sequences and a sequence"
+fi
+
 # --- guard 15: per-link heartbeat wiring ------------------------------------
 # THE DEFECTS MODELLED:
 #  (a) a buffer monitor's BRIDGE_TOPICS differing from the topic list its own
