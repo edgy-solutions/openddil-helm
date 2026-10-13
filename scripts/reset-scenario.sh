@@ -61,12 +61,14 @@
 #
 # QUICK MODE (--quick)
 #
-# The full reset spends most of its time on proof, not on clearing: the phase 1
-# baseline, the phase 3b writer census (a 70 s window), the phase 8 zero
-# assertion and the phase 10 subscription liveness wait. --quick runs the
-# pre-flight and then phases 2, 3, 4, 5, 6, 7 and 9, in that order, with the
-# same safety machinery (halts, the scale-restore trap, phase 3's re-read until
-# two reads agree), and skips phases 1, 3b, 8 and 10. It is for an operator at
+# The full reset spends much of its time on proof, not on clearing: the phase 1
+# baseline, the phase 8 zero assertion and the phase 10 subscription liveness
+# wait. --quick runs the pre-flight and then phases 2, 3, 3b, 4, 5, 6, 7 and 9,
+# in that order, with the same safety machinery (halts, the scale-restore trap,
+# phase 3's re-read until two reads agree), and skips phases 1, 8 and 10.
+# Phase 3b is NOT a proof and stays: it finds the writers still live on the
+# target topics and quiesces them, and without it phase 4's post-trim read
+# sees those writes and halts. It is for an operator at
 # a shell who wants fresh data for debugging. It proves nothing, so it writes
 # NO exercise reset record, prints a NOT MEASURED banner at start and end, and
 # can never precede an exercise restart (restart-exercise.sh refuses it).
@@ -120,7 +122,7 @@ SKIP_PRODUCERS=false
 # which phases are skipped (phase_skipped_by_quick) AND it is what both
 # banners print, so what is skipped and what is announced cannot drift.
 QUICK=false
-QUICK_SKIP_PHASES=("1 baseline" "3b writer census" "8 zero assertion" "10 subscription liveness")
+QUICK_SKIP_PHASES=("1 baseline" "8 zero assertion" "10 subscription liveness")
 # Simulators are found by this declared label, not by a name pattern, so a
 # simulator deployed under any name is stopped and restarted by the reset.
 SIMULATOR_SELECTOR="${SIMULATOR_SELECTOR:-openddil.io/role=simulator}"
@@ -196,10 +198,10 @@ FLAGS
                       "predicted 0" lines, so this MUST exit non-zero. If it
                       passes against a live cluster, the check is broken, not
                       the cluster.
-  --quick             Run the clearing phases (2, 3, 4, 5, 6, 7, 9) with the same
-                      pre-flight and safety machinery, and skip the proofs:
-                      phase 1 baseline, 3b writer census, 8 zero assertion,
-                      10 subscription liveness. For an operator at a shell who
+  --quick             Run the clearing phases (2, 3, 3b, 4, 5, 6, 7, 9) with the
+                      same pre-flight and safety machinery, and skip the
+                      proofs: phase 1 baseline, 8 zero assertion, 10
+                      subscription liveness. For an operator at a shell who
                       wants fresh data, not a measured reset: it writes NO
                       exercise reset record and so cannot precede an exercise
                       restart. Prints a NOT MEASURED banner at start and end.

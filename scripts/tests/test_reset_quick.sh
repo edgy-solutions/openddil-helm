@@ -9,8 +9,8 @@
 # log, so the test compares the SEQUENCE of calls, not a count.
 #
 # Cases:
-#   A. --quick sequence is exactly pre-flight, 2, 3, 4, 5, 6, 7, 9
-#   B. phases 1, 3b, 8, 10 and write_exercise_reset_record are not called
+#   A. --quick sequence is exactly pre-flight, 2, 3, 3b, 4, 5, 6, 7, 9
+#   B. phases 1, 8, 10 and write_exercise_reset_record are not called
 #   C. start and end banners appear and name the skipped phases
 #   D. every refused flag combination exits 1 and runs nothing
 #   E. --quick --dry-run runs the same sequence, nothing executed
@@ -61,7 +61,7 @@ write_exercise_reset_record()   { echo "record" >> "$LOG"; }
 
 seq_of() { tr '\n' ' ' < "$LOG" | sed 's/ $//'; }
 
-QUICK_SEQ="preflight 2 3 4 5 6 7 9"
+QUICK_SEQ="preflight 2 3 3b 4 5 6 7 9"
 FULL_SEQ="1 preflight 2 3 3b 4 5 6 7 8 9 10 record"
 
 # run_main QUICK DRY -> runs the real sequence in a subshell; out in $T/out
@@ -76,10 +76,10 @@ run_main true false
 [ "$RC" -eq 0 ] && pass "A: quick exits 0" || fail "A: quick rc=$RC"
 [ "$(seq_of)" = "$QUICK_SEQ" ] && pass "A: sequence is exactly '$QUICK_SEQ'" \
   || fail "A: sequence was '$(seq_of)', expected '$QUICK_SEQ'"
-for p in 1 3b 8 10 record; do
+for p in 1 8 10 record; do
   grep -qx "$p" "$LOG" && fail "B: '$p' was called in quick mode" || pass "B: '$p' not called"
 done
-BANNER="QUICK RESET: state cleared, NOT MEASURED. Skipped: phase 1 baseline, phase 3b writer census, phase 8 zero assertion, phase 10 subscription liveness. No exercise reset record was written."
+BANNER="QUICK RESET: state cleared, NOT MEASURED. Skipped: phase 1 baseline, phase 8 zero assertion, phase 10 subscription liveness. No exercise reset record was written."
 [ "$(grep -cxF "$BANNER" "$T/out")" -eq 2 ] && pass "C: banner printed exactly twice, naming the skipped phases" \
   || fail "C: banner count $(grep -cxF "$BANNER" "$T/out"), expected 2"
 [ "$(head -1 "$T/out")" = "$BANNER" ] && pass "C: banner is the first line (start)" || fail "C: banner not first"
