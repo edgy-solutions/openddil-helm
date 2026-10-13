@@ -4384,6 +4384,10 @@ quick_quiesce_all() {
   local e t p owner
   for p in "${PRODUCER_DEPLOYS[@]}"; do seen["Deployment/$p"]=1; done
   for e in "${QSTATE_QUIESCED[@]:-}"; do [ -n "$e" ] && seen["$e"]=1; done
+  # Never the Restate servers, though they are declared writers: Q3 clears
+  # them in place and needs them up. Once cleared they hold no timers, so
+  # they write nothing. (The full run's census only sees them after phase 3.)
+  for p in "${RESTATE_PODS[@]:-}"; do [ -n "$p" ] && seen["StatefulSet/${p%-*}"]=1; done
 
   # Phase 3's derived set (consumers of a target topic, Restate subscribers,
   # the declared floor) ...

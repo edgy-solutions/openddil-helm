@@ -352,10 +352,15 @@ build_declared_producer_map() { :; }
 derive_quiesce_set()      { printf 'Deployment/proj-a\nDeployment/faust-x\nDeployment/prod1\n'; }
 quiesce_workload_set()    { echo "QSET $*" >> "$CALLS"; }
 declare -A PRODUCER_OWNER=()
-PRODUCER_OWNER["${REDPANDA_PODS[0]}|feed-1"]="Deployment/faust-r Deployment/proj-a"
+PRODUCER_OWNER["${REDPANDA_PODS[0]}|feed-1"]="Deployment/faust-r StatefulSet/rs-hub Deployment/proj-a"
 CENSUS_QUIESCED=()
 : > "$CALLS"; : > "$KLOG"
+SAVED_RESTATE_PODS=(${RESTATE_PODS[@]+"${RESTATE_PODS[@]}"})
+RESTATE_PODS=(rs-hub-0)
 DRY_RUN=true quick_quiesce_all > "$T/q2.out" 2>&1
+RESTATE_PODS=(${SAVED_RESTATE_PODS[@]+"${SAVED_RESTATE_PODS[@]}"})
+grep -q 'StatefulSet/rs-hub' "$CALLS" && fail "9: Q2 scaled down a Restate server (Q3 needs it up)" \
+  || pass "9: Q2 never quiesces a Restate server, even a declared writer"
 grep -qx 'QSET Deployment/proj-a Deployment/faust-x Deployment/faust-r' "$CALLS" \
   && pass "9: Q2 quiesces derived set + declared owners, deduped, without re-scaling a producer" || fail "9: Q2 set: $(grep QSET "$CALLS")"
 [ "${CENSUS_QUIESCED[*]}" = "Deployment/proj-a Deployment/faust-x Deployment/faust-r" ] \
