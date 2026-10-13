@@ -103,6 +103,13 @@ except Exception:
 ' "$@" | tr -d '\r'
 }
 
+for a in ${PASS[@]+"${PASS[@]}"}; do
+  if [ "$a" = "--quick" ]; then
+    echo "restart-exercise: --quick refused: a quick reset measures no zero and writes no record, so no restart can follow it" >&2
+    exit 1
+  fi
+done
+
 # --- 1. the reset -----------------------------------------------------------
 NS="$NSP" RELEASE="$REL" bash "$RESET_SCRIPT" ${PASS[@]+"${PASS[@]}"}
 rc=$?

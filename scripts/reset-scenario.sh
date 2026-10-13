@@ -59,6 +59,21 @@
 #                     mechanism; clients rebuild shapes against a new handle
 #                     on their next request.
 #
+# QUICK MODE (--quick)
+#
+# The full reset spends most of its time on proof, not on clearing: the phase 1
+# baseline, the phase 3b writer census (a 70 s window), the phase 8 zero
+# assertion and the phase 10 subscription liveness wait. --quick runs the
+# pre-flight and then phases 2, 3, 4, 5, 6, 7 and 9, in that order, with the
+# same safety machinery (halts, the scale-restore trap, phase 3's re-read until
+# two reads agree), and skips phases 1, 3b, 8 and 10. It is for an operator at
+# a shell who wants fresh data for debugging. It proves nothing, so it writes
+# NO exercise reset record, prints a NOT MEASURED banner at start and end, and
+# can never precede an exercise restart (restart-exercise.sh refuses it).
+# It cannot be combined with --baseline-only, --verify-only, --census-only,
+# --writer-census-only, any --red-check-* or --declare-unmeasured. Run:
+#   bash scripts/reset-scenario.sh --quick
+#
 # ORDER IS THE MECHANISM, NOT A CONVENTION. See the numbered phase comments
 # below for why each step has to precede the next; getting two of them
 # backwards produces a reset that looks complete on inspection and is not.
@@ -100,6 +115,12 @@ SKIP_AGGREGATOR=false
 SKIP_STORES=false
 SKIP_ELECTRIC=false
 SKIP_PRODUCERS=false
+# --quick: the clearing phases only, no proofs (see QUICK MODE in the header).
+# QUICK_SKIP_PHASES is the ONE list of what quick mode leaves out: it decides
+# which phases are skipped (phase_skipped_by_quick) AND it is what both
+# banners print, so what is skipped and what is announced cannot drift.
+QUICK=false
+QUICK_SKIP_PHASES=("1 baseline" "3b writer census" "8 zero assertion" "10 subscription liveness")
 # Simulators are found by this declared label, not by a name pattern, so a
 # simulator deployed under any name is stopped and restarted by the reset.
 SIMULATOR_SELECTOR="${SIMULATOR_SELECTOR:-openddil.io/role=simulator}"
@@ -175,6 +196,17 @@ FLAGS
                       "predicted 0" lines, so this MUST exit non-zero. If it
                       passes against a live cluster, the check is broken, not
                       the cluster.
+  --quick             Run the clearing phases (2, 3, 4, 5, 6, 7, 9) with the same
+                      pre-flight and safety machinery, and skip the proofs:
+                      phase 1 baseline, 3b writer census, 8 zero assertion,
+                      10 subscription liveness. For an operator at a shell who
+                      wants fresh data, not a measured reset: it writes NO
+                      exercise reset record and so cannot precede an exercise
+                      restart. Prints a NOT MEASURED banner at start and end.
+                      Allowed with --dry-run and every --skip-* flag. Refused
+                      (exit 1) with --baseline-only, --verify-only,
+                      --census-only, --writer-census-only, any --red-check-*,
+                      or --declare-unmeasured.
   --skip-restate      Do not cancel invocations or clear Restate state.
   --skip-topics       Do not trim any topic partition.
   --skip-aggregator   Do not restart the Faust deployments. THIS IS THE
@@ -248,6 +280,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=true ;;
     --baseline-only) BASELINE_ONLY=true ;;
     --verify-only) VERIFY_ONLY=true ;;
+    --quick) QUICK=true ;;
     --skip-restate) SKIP_RESTATE=true ;;
     --skip-topics) SKIP_TOPICS=true ;;
     --skip-aggregator) SKIP_AGGREGATOR=true ;;
@@ -278,6 +311,25 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# --quick proves nothing, so it cannot be combined with a mode whose whole job
+# is to measure, or with a declaration about a measurement. Refused here,
+# before anything else runs.
+if $QUICK; then
+  _quick_bad=()
+  $BASELINE_ONLY && _quick_bad+=(--baseline-only)
+  $VERIFY_ONLY && _quick_bad+=(--verify-only)
+  $CENSUS_ONLY && _quick_bad+=(--census-only)
+  $WRITER_CENSUS_ONLY && _quick_bad+=(--writer-census-only)
+  $RED_CHECK_TOPIC_CONFIG && _quick_bad+=(--red-check-topic-config)
+  $RED_CHECK_QUIESCE && _quick_bad+=(--red-check-quiesce)
+  $RED_CHECK_ELECTRIC && _quick_bad+=(--red-check-electric)
+  [ "${#DECLARED_UNMEASURED[@]}" -gt 0 ] && _quick_bad+=(--declare-unmeasured)
+  if [ "${#_quick_bad[@]}" -gt 0 ]; then
+    echo "usage error: --quick cannot be combined with ${_quick_bad[*]} (--quick measures nothing, so a measuring mode or a declaration about a measurement has no meaning with it)" >&2
+    exit 1
+  fi
+fi
+
 # Stamped once, before anything mutates. The aggregator verify needs a
 # before-this-run boundary to tell a FRESH rollup from a leftover row, and it
 # has to be the same boundary for every phase, so it is taken here and never
@@ -294,7 +346,7 @@ RUN_STARTED_AT_SOURCE="workstation clock (fallback)"
 
 OVERALL_FAIL=0
 
-echo "reset-scenario: namespace=$NS release=$RELEASE dry-run=$DRY_RUN"
+echo "reset-scenario: namespace=$NS release=$RELEASE dry-run=$DRY_RUN quick=$QUICK"
 _decl_hdr=""
 for _a in ${DECLARED_UNMEASURED[@]+"${DECLARED_UNMEASURED[@]}"}; do _decl_hdr="${_decl_hdr:+$_decl_hdr, }$_a"; done
 echo "reset-scenario: declared unmeasured: ${_decl_hdr:-none}"
@@ -4220,6 +4272,136 @@ on_reset_exit() {
   exit "$rc"
 }
 
+# ---------------------------------------------------------------------------
+# QUICK MODE helpers. QUICK_SKIP_PHASES (defined with the flags) is the one
+# list: phase_skipped_by_quick reads it to decide what is skipped, and
+# quick_skipped_list reads it to name what the banners print.
+# ---------------------------------------------------------------------------
+phase_skipped_by_quick() {
+  $QUICK || return 1
+  local p
+  for p in "${QUICK_SKIP_PHASES[@]}"; do
+    [ "$p" = "$1" ] && return 0
+  done
+  return 1
+}
+
+quick_skipped_list() {
+  local out="" p
+  for p in "${QUICK_SKIP_PHASES[@]}"; do out="${out:+$out, }phase $p"; done
+  printf '%s' "$out"
+}
+
+quick_banner() {
+  echo "QUICK RESET: state cleared, NOT MEASURED. Skipped: $(quick_skipped_list). No exercise reset record was written."
+}
+
+# run_reset_sequence — the whole mutating run, in order: phase 1, pre-flight,
+# phases 2 through 10, the exercise reset record. Quick mode runs this same
+# sequence; the only difference is that the phases named in QUICK_SKIP_PHASES
+# are not run and the record is never written. Kept as a function (called
+# once, from main) so a test can stub the phases and compare the sequence.
+run_reset_sequence() {
+  RESET_RUN=true
+  trap 'on_reset_exit' EXIT
+  if $QUICK; then quick_banner; fi
+  if phase_skipped_by_quick "1 baseline"; then
+    echo "(--quick: skipping phase 1 baseline)"
+  else
+    run_phase "1 baseline" phase1_baseline
+  fi
+
+  # --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
+  # consumer group on a target topic must have a declared owner BEFORE
+  # anything below scales a single workload down. Runs the real capture pass
+  # early (phase4_topics' own capture, at line ~2113, re-runs it — cheap and
+  # idempotent, not worth threading a "already captured" flag through for)
+  # so CAPTURED_TOPICS reflects this run's actual topic set, not a stale or
+  # guessed one. Unconditional in dry-run too: a dry run that "passes" over an
+  # undeclared consumer would print a plan nobody should trust. Also
+  # unconditional in quick mode: it mutates nothing and is safety, not proof.
+  CURRENT_PHASE="pre-flight"
+  phase4_capture_pass
+  if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
+    echo "PRE-FLIGHT ABORTED: an undeclared live consumer exists on a target" >&2
+    echo "topic (see UNDECLARED CONSUMER lines above). Nothing has been" >&2
+    echo "mutated — no workload scaled, no topic touched. Add the missing" >&2
+    echo "openddil.io/consumer-groups declaration and re-run." >&2
+    halt_reset "pre-flight: an undeclared live consumer on a target topic" \
+      "nothing mutated: no workload scaled, no topic touched"
+  fi
+  PHASES_DONE+=("pre-flight")
+
+  run_phase "2 quiesce" phase2_quiesce
+  run_phase "3 restate" phase3_restate
+  if phase_skipped_by_quick "3b writer census"; then
+    echo "(--quick: skipping phase 3b writer census)"
+  else
+    run_phase "3b writer census" phase3b_writer_census
+  fi
+  run_phase "4 topics" phase4_topics
+  run_phase "5 aggregator" phase5_aggregator
+  run_phase "6 stores" phase6_stores
+  run_phase "7 electric" phase7_electric
+  # phase 8 runs BEFORE producers come back (that ordering is the whole point
+  # of this reorder — see phase 8's header). Guarded with `|| true` so a FAIL
+  # here (OVERALL_FAIL=1, a non-zero return) does not let `set -e` skip straight
+  # to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
+  # get its producers back, exactly like a passing one does.
+  if phase_skipped_by_quick "8 zero assertion"; then
+    echo "(--quick: skipping phase 8 zero assertion)"
+  else
+    CURRENT_PHASE="8 zero assertion"
+    halt_if_injected "8 zero assertion"
+    phase8_zero || true
+    PHASES_DONE+=("8 zero assertion")
+  fi
+  run_phase "9 restore" phase9_restore_producers
+  # Recorded here, right after phase 9 returns, RFC3339 UTC second precision —
+  # this is "when producers came back", the T phase 10 measures liveness since.
+  PHASE9_DONE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if $QUICK; then
+    echo "reset-scenario: producers restored."
+  else
+    echo "reset-scenario: producers restored. This script asserts zero at rest" \
+         "only — confirming the reset holds under a live refill is" \
+         "check-advancing.sh's job, not this script's; run it separately."
+  fi
+  # Runs even if phase 8 failed — phase 8 is already `|| true` before phase 9
+  # for the same reason (see its header); a failed zero assertion is still not
+  # a reason to skip the one check that can see Restate's own dedup silently
+  # dropping records. phase10_subscription_liveness never returns non-zero
+  # itself (failures map into OVERALL_FAIL instead), so this stays a bare
+  # run_phase call like every other phase.
+  if phase_skipped_by_quick "10 subscription liveness"; then
+    echo "(--quick: skipping phase 10 subscription liveness)"
+  else
+    run_phase "10 subscription liveness" phase10_subscription_liveness
+  fi
+  RUN_COMPLETED=true
+  if $QUICK; then
+    # Quick mode proves nothing and never writes the record. If a run phase
+    # (phase 9) reported a failure, say so instead of claiming cleared state.
+    if [ "$OVERALL_FAIL" -ne 0 ]; then
+      echo "QUICK RESET: a run phase reported a failure (OVERALL_FAIL=$OVERALL_FAIL); see above."
+    fi
+    quick_banner
+    exit "$OVERALL_FAIL"
+  fi
+  # A failed/halted reset never writes the record -- a halt never reaches this
+  # line (halt_reset exits directly, above), and a completed-but-failing run
+  # is refused explicitly here rather than inside the write function, so the
+  # gate is visible at the one call site instead of buried in it.
+  if [ "$OVERALL_FAIL" -eq 0 ]; then
+    write_exercise_reset_record
+  else
+    echo "exercise-reset-record: not written -- this run completed but did" \
+         "not pass (OVERALL_FAIL=$OVERALL_FAIL); a failed reset never writes" \
+         "the record"
+  fi
+  exit "$OVERALL_FAIL"
+}
+
 # Test-only escape hatch (scripts/tests/test_reset_ownership.sh sources this
 # file to reuse its function definitions against stubbed kubectl/census_groups/
 # restate_subscriptions output). RESET_SCENARIO_SOURCE_ONLY is never set by
@@ -4301,70 +4483,4 @@ if $RED_CHECK_ELECTRIC; then
   exit 1
 fi
 
-RESET_RUN=true
-trap 'on_reset_exit' EXIT
-run_phase "1 baseline" phase1_baseline
-
-# --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
-# consumer group on a target topic must have a declared owner BEFORE
-# anything below scales a single workload down. Runs the real capture pass
-# early (phase4_topics' own capture, at line ~2113, re-runs it — cheap and
-# idempotent, not worth threading a "already captured" flag through for)
-# so CAPTURED_TOPICS reflects this run's actual topic set, not a stale or
-# guessed one. Unconditional in dry-run too: a dry run that "passes" over an
-# undeclared consumer would print a plan nobody should trust.
-CURRENT_PHASE="pre-flight"
-phase4_capture_pass
-if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
-  echo "PRE-FLIGHT ABORTED: an undeclared live consumer exists on a target" >&2
-  echo "topic (see UNDECLARED CONSUMER lines above). Nothing has been" >&2
-  echo "mutated — no workload scaled, no topic touched. Add the missing" >&2
-  echo "openddil.io/consumer-groups declaration and re-run." >&2
-  halt_reset "pre-flight: an undeclared live consumer on a target topic" \
-    "nothing mutated: no workload scaled, no topic touched"
-fi
-PHASES_DONE+=("pre-flight")
-
-run_phase "2 quiesce" phase2_quiesce
-run_phase "3 restate" phase3_restate
-run_phase "3b writer census" phase3b_writer_census
-run_phase "4 topics" phase4_topics
-run_phase "5 aggregator" phase5_aggregator
-run_phase "6 stores" phase6_stores
-run_phase "7 electric" phase7_electric
-# phase 8 runs BEFORE producers come back (that ordering is the whole point
-# of this reorder — see phase 8's header). Guarded with `|| true` so a FAIL
-# here (OVERALL_FAIL=1, a non-zero return) does not let `set -e` skip straight
-# to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
-# get its producers back, exactly like a passing one does.
-CURRENT_PHASE="8 zero assertion"
-halt_if_injected "8 zero assertion"
-phase8_zero || true
-PHASES_DONE+=("8 zero assertion")
-run_phase "9 restore" phase9_restore_producers
-# Recorded here, right after phase 9 returns, RFC3339 UTC second precision —
-# this is "when producers came back", the T phase 10 measures liveness since.
-PHASE9_DONE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "reset-scenario: producers restored. This script asserts zero at rest" \
-     "only — confirming the reset holds under a live refill is" \
-     "check-advancing.sh's job, not this script's; run it separately."
-# Runs even if phase 8 failed — phase 8 is already `|| true` before phase 9
-# for the same reason (see its header); a failed zero assertion is still not
-# a reason to skip the one check that can see Restate's own dedup silently
-# dropping records. phase10_subscription_liveness never returns non-zero
-# itself (failures map into OVERALL_FAIL instead), so this stays a bare
-# run_phase call like every other phase.
-run_phase "10 subscription liveness" phase10_subscription_liveness
-RUN_COMPLETED=true
-# A failed/halted reset never writes the record -- a halt never reaches this
-# line (halt_reset exits directly, above), and a completed-but-failing run
-# is refused explicitly here rather than inside the write function, so the
-# gate is visible at the one call site instead of buried in it.
-if [ "$OVERALL_FAIL" -eq 0 ]; then
-  write_exercise_reset_record
-else
-  echo "exercise-reset-record: not written -- this run completed but did" \
-       "not pass (OVERALL_FAIL=$OVERALL_FAIL); a failed reset never writes" \
-       "the record"
-fi
-exit "$OVERALL_FAIL"
+run_reset_sequence
