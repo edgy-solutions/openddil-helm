@@ -1112,9 +1112,12 @@ egress:
   # row) and `dedupe_field` (string, optional: the top-level key of the
   # decoded record holding its event identity; when set, the route
   # consults the durable egress_delivered_events table before every send
-  # so a re-emitted event_id is not sent twice). Both are opt-in per
-  # route; this chart's defaults set neither, so rendered behaviour is
-  # unchanged (no route held, no dedupe).
+  # so a re-emitted event_id is not sent twice), and `case_field` (string,
+  # optional: the top-level key holding the case id the destination should
+  # return, one case per episode shared by all its events; unset = the
+  # record's `dedupe_field` value). All three are opt-in per route; this
+  # chart's defaults set none, so rendered behaviour is unchanged (no
+  # route held, no dedupe, the case id is the event id).
   forwarder:
     enabled: false
     config: []
