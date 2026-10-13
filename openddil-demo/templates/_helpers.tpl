@@ -2085,3 +2085,96 @@ Accepts <n>Gi and <n>Mi only; anything else, or no limit, fails the render.
 {{- end -}}
 {{- printf "%dM" $m -}}
 {{- end }}
+
+{{/*
+openddil.renderedImages -- every image reference this release's workloads
+run, newline-separated (duplicates possible; the caller de-duplicates).
+
+Consumed only by templates/hook-images-pullable.yaml, which turns each into
+a container that must pull and start before any other pre-* hook runs.
+
+Built from the SAME values and the SAME enable conditions the workload
+templates use, one block per condition:
+  - always on: the bundle, hub, and database images, the utilities
+    (atlas, alpine, curl for the helm test pods);
+  - per edge / per region: sensor ingest, edge faust, edge-HQ bridge,
+    regional faust;
+  - linkControl.enabled: toxiproxy;
+  - logisticsSim.enabled: the element simulator;
+  - restate.ephemeralOnUpgrade: the restate-wipe hook's runner;
+  - releasability.enabled: pep, topaz, the egress gate; keycloak when
+    releasability.keycloak.enabled; the TAK server and adapter when
+    egress.tak.enabled, its TLS proxy when egress.tak.tls.enabled;
+  - exerciseControl.enabled with resetJob.enabled (under releasability): the
+    reset runner, which only becomes a pod when a reset is pressed;
+  - tierNode.enabled: the tier store, and the tier topaz when
+    tierNode.topaz.enabled.
+
+
+THIS LIST MUST CHANGE WHENEVER A TEMPLATE GAINS AN IMAGE. Guard 21 in
+scripts/check-chart-render.sh renders the chart in several variants and
+refuses the render when the images the workloads use and the images this
+hook probes are not the same set.
+*/}}
+{{- define "openddil.renderedImages" -}}
+{{- $root := . -}}
+{{- $v := .Values -}}
+{{- $o := list -}}
+{{- range $k := (list "bundle" "restateHub" "cmService" "assetRegistry" "logisticsFusion" "projector" "frontend") -}}
+{{- $i := (get $v $k).image -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $i.name "tag" $i.tag "digest" $i.digest "root" $root)) -}}
+{{- end -}}
+{{- range $i := (list $v.redpandaEdge.image $v.redpandaHq.image $v.postgresHq.image $v.electric.image $v.restate.image $v.utilities.atlas $v.utilities.alpine $v.utilities.curl) -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $i) -}}
+{{- end -}}
+{{- if $v.edges -}}
+{{- range $k := (list "sensorIngest" "faustEdge") -}}
+{{- $i := (get $v $k).image -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $i.name "tag" $i.tag "digest" $i.digest "root" $root)) -}}
+{{- end -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.edgeHqBridge.image) -}}
+{{- end -}}
+{{- if or $v.edges $v.cmReports.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.redpandaConnect.image) -}}
+{{- end -}}
+{{- if $v.regions -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $v.faustRegional.image.name "tag" $v.faustRegional.image.tag "digest" $v.faustRegional.image.digest "root" $root)) -}}
+{{- end -}}
+{{- if include "openddil.linkControlEnabled" $root -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.toxiproxy.image) -}}
+{{- end -}}
+{{- if $v.logisticsSim.enabled -}}
+{{- $i := $v.logisticsSim.image -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $i.name "tag" $i.tag "digest" $i.digest "root" $root)) -}}
+{{- end -}}
+{{- if $v.restate.ephemeralOnUpgrade -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.restate.wipe.image) -}}
+{{- end -}}
+{{- if $v.releasability.enabled -}}
+{{- $i := $v.egress.image -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $i.name "tag" $i.tag "digest" $i.digest "root" $root)) -}}
+{{- range $img := (list $v.releasability.pep.image $v.releasability.topaz.image) -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $img) -}}
+{{- end -}}
+{{- if $v.releasability.keycloak.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.releasability.keycloak.image) -}}
+{{- end -}}
+{{- if and $v.exerciseControl.enabled $v.exerciseControl.resetJob.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.exerciseControl.resetJob.image) -}}
+{{- end -}}
+{{- if $v.egress.tak.enabled -}}
+{{- $t := $v.egress.tak.image -}}
+{{- $o = append $o (include "openddil.image" (dict "name" $t.name "tag" $t.tag "digest" $t.digest "root" $root)) -}}
+{{- if $v.egress.tak.tls.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.egress.tak.tls.proxy.image) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $v.tierNode.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.tierNode.postgres.image) -}}
+{{- if $v.tierNode.topaz.enabled -}}
+{{- $o = append $o (include "openddil.thirdPartyImage" $v.tierNode.topaz.image) -}}
+{{- end -}}
+{{- end -}}
+{{- join "\n" $o -}}
+{{- end }}

@@ -1,0 +1,93 @@
+{{- if .Values.imagesPullable.enabled }}
+{{- /*
+A pre-upgrade hook that proves every image this release uses can be pulled,
+before anything else runs.
+
+WHY. An upgrade pinned one image to a digest that did not exist in that
+repository. A pre-upgrade hook Job then sat in ImagePullBackOff, and helm
+reported only "timed out waiting for the condition". Meanwhile an earlier
+pre-upgrade hook had already scaled the Restate StatefulSets to zero, so a
+bad pin became an outage of every tier for the length of the helm timeout.
+The cheapest place to refuse a bad pin is a hook that runs FIRST, touches
+nothing, and fails naming the image.
+
+WHAT IT PROVES. The registry serves every reference with this release's pull
+credentials, from ONE node. It does not prove every node has the image
+cached, and it does not need to.
+
+HOW. One container per distinct image (openddil.renderedImages). Each runs a
+copy of busybox, made by the init container, through the copied musl loader,
+so it starts in ANY image, scratch and distroless ones included. The image's
+own contents do not matter; only that it pulls and starts.
+
+WHY IT IS FIRST. The weight is the minimum of every pre-* hook, so nothing
+has been changed when it fails. The failed pod's container statuses name the
+image:
+  kubectl get pod -l job-name=<job> -o jsonpath='{range .status.containerStatuses[*]}{.name} {.image} {.state.waiting.reason}{"\n"}{end}'
+A failed Job stays for diagnosis; a succeeded one is deleted.
+
+KEEP THE LIST TRUE. openddil.renderedImages must change whenever a template
+gains an image. Guard 21 in scripts/check-chart-render.sh refuses the render
+otherwise.
+*/}}
+{{- $images := include "openddil.renderedImages" . | splitList "\n" | compact | uniq | sortAlpha }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-images-pullable-{{ .Release.Revision | default 0 }}
+  labels:
+    {{- include "openddil.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-130"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.imagesPullable.deadlineSeconds }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: copy
+          image: "{{ include "openddil.thirdPartyImage" .Values.utilities.alpine }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cp /bin/busybox /probe/busybox && cp /lib/ld-musl-*.so.1 /probe/ld-musl.so.1 && chmod 0755 /probe/*
+          volumeMounts:
+            - name: probe
+              mountPath: /probe
+      containers:
+        {{- range $n, $img := $images }}
+        {{- $repo := regexReplaceAll "[@:][^/]*$" $img "" | base | lower }}
+        {{- $base := regexReplaceAll "[^a-z0-9-]" $repo "-" }}
+        {{- $name := printf "i%02d-%s" $n $base | trunc 63 | trimSuffix "-" }}
+        - name: {{ $name }}
+          image: "{{ $img }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/probe/ld-musl.so.1", "/probe/busybox", "true"]
+          volumeMounts:
+            - name: probe
+              mountPath: /probe
+              readOnly: true
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+        {{- end }}
+      volumes:
+        - name: probe
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}

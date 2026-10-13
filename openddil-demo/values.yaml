@@ -1198,6 +1198,14 @@ utilities:
     digest: ""
     pullPolicy: IfNotPresent
 
+# --- Image pull pre-flight ----------------------------------------------------
+# A pre-install/pre-upgrade/pre-rollback hook, first of all hooks, that pulls and
+# starts every image the release uses and fails naming the one that cannot be
+# pulled, before any other hook has changed anything. deadlineSeconds bounds it.
+imagesPullable:
+  enabled: true
+  deadlineSeconds: 600
+
 # --- Ingress ----------------------------------------------------------------
 # Two routes on one host:
 #   /            -> frontend (nginx-served static SPA)

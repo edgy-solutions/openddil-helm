@@ -2191,6 +2191,158 @@ else
 fi
 rm -rf "$G20_DIR"
 
+# --- guard 21: the images-pullable hook probes exactly the images the render runs
+# THE DEFECT MODELLED: a template gains (or changes) an image and
+# openddil.renderedImages is not told. The pre-flight hook then proves a
+# stale set, and the bad pin it exists to refuse goes through. A hook that
+# probes too MUCH is also wrong: it fails an upgrade over an image nothing runs.
+#
+# R = images of containers and initContainers of every pod template (Pod,
+# Deployment, StatefulSet, DaemonSet, Job, CronJob) EXCEPT the images-pullable
+# Job, PLUS the same pod kinds embedded as data in any ConfigMap (a value that
+# parses as YAML/JSON and is, or contains, such a manifest): the exercise reset
+# runner is a Job manifest in a ConfigMap, a pod only when a reset is pressed.
+# H = images of the probe Job containers (not its initContainer). FAIL unless
+# H == R; FAIL if R is empty.
+#
+# Variants: default; tierNode; releasability; ephemeralOnUpgrade; and one
+# "everything on" variant that turns on every flag that gates an image in the
+# renderedImages inventory: linkControl.enabled (toxiproxy),
+# restate.ephemeralOnUpgrade (wipe runner), releasability.enabled (pep, topaz,
+# egress gate), releasability.keycloak.enabled (keycloak),
+# egress.tak.enabled (TAK server + adapter), egress.tak.tls.enabled (TLS
+# proxy), tierNode.enabled (tier store), tierNode.topaz.enabled (tier topaz),
+# cmReports.enabled (connect on the hub). exerciseControl.enabled (+ adapter
+# endpoint) and resetJob.enabled are also on (reset runner).
+echo "guard 21: images-pullable hook probes exactly the rendered image set"
+G21_DIR="$(mktemp -d)"
+render > "$G21_DIR/v1.yaml"
+render --set tierNode.enabled=true > "$G21_DIR/v2.yaml"
+render --set releasability.enabled=true > "$G21_DIR/v3.yaml"
+render --set restate.ephemeralOnUpgrade=true > "$G21_DIR/v4.yaml"
+render --set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true \
+  --set releasability.enabled=true --set releasability.keycloak.enabled=true \
+  --set egress.tak.enabled=true --set egress.tak.tls.enabled=true \
+  --set egress.tak.tls.secretName=guard21-secret --set-json 'egress.tak.tls.allowedClientCNs=["guard21-cn"]' \
+  --set tierNode.enabled=true --set tierNode.topaz.enabled=true --set cmReports.enabled=true \
+  --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api \
+  --set exerciseControl.resetJob.enabled=true > "$G21_DIR/v5.yaml"
+cat > "$G21_DIR/check.py" <<'G21PY'
+import sys, yaml
+PODS = ("Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+def podspec(d):
+    k, s = d.get("kind"), d.get("spec") or {}
+    if k == "Pod": return s
+    if k == "CronJob": return (((s.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec") or {}
+    return (s.get("template") or {}).get("spec") or {}
+def is_probe(d):
+    return d.get("kind") == "Job" and "-images-pullable-" in (d["metadata"].get("name") or "")
+def walk(d, R, H):
+    if not isinstance(d, dict): return
+    if d.get("kind") == "List":
+        for i in d.get("items") or []: walk(i, R, H)
+        return
+    if d.get("kind") == "ConfigMap":
+        for v in (d.get("data") or {}).values():
+            try: docs = list(yaml.safe_load_all(v))
+            except Exception: continue
+            for x in docs:
+                if isinstance(x, dict) and x.get("kind") in PODS: walk(x, R, H)
+        return
+    if d.get("kind") not in PODS: return
+    ps = podspec(d)
+    if is_probe(d):
+        H |= {c["image"] for c in ps.get("containers") or []}
+    else:
+        R |= {c["image"] for k in ("containers", "initContainers") for c in ps.get(k) or []}
+def sets(path):
+    R, H = set(), set()
+    for d in yaml.safe_load_all(open(path, encoding="utf-8")):
+        walk(d, R, H)
+    return R, H
+def compare(R, H, label):
+    errs = []
+    if not R: errs.append("%s: no images in the render -- vacuous" % label)
+    for i in sorted(R - H): errs.append("%s: run by a workload but NOT probed by the hook: %s" % (label, i))
+    for i in sorted(H - R): errs.append("%s: probed by the hook but run by NO workload: %s" % (label, i))
+    return errs
+if sys.argv[1] == "selftest":
+    R, H = sets(sys.argv[2])
+    a = compare(R, set(sorted(H)[1:]), "selftest-missing")
+    b = compare(R, H | {"example.invalid/bogus:1"}, "selftest-extra")
+    print("  selftest: missing-image copy -> %d problem(s); bogus-image copy -> %d problem(s)" % (len(a), len(b)))
+    sys.exit(0 if a and b else 1)
+errs = []
+for p, l in zip(sys.argv[1:], ("default", "tierNode", "releasability", "ephemeralOnUpgrade", "everything-on")):
+    R, H = sets(p)
+    e = compare(R, H, l)
+    print("  %s %-18s: %d workload image(s), %d probed" % ("FAIL" if e else "ok  ", l, len(R), len(H)))
+    errs += e
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G21PY
+"$PY" "$G21_DIR/check.py" "$G21_DIR/v1.yaml" "$G21_DIR/v2.yaml" "$G21_DIR/v3.yaml" "$G21_DIR/v4.yaml" "$G21_DIR/v5.yaml" || fail=1
+if "$PY" "$G21_DIR/check.py" selftest "$G21_DIR/v5.yaml"; then
+  echo "  ok   : self-test: the comparison fails a hook missing one image and a hook with a bogus one"
+else
+  echo "  FAIL: the comparison passed a mutated hook image set -- guard 21 cannot fail"; fail=1
+fi
+
+# --- guard 22: the images-pullable hook runs first among the pre-* hooks ------
+# THE DEFECT MODELLED: another hook (or a later edit to this one) gets a weight
+# at or below the pre-flight weight, and something is changed before the pull
+# is proven. In every variant, for each of pre-install, pre-upgrade and
+# pre-rollback: the Job is present in the phase and its weight is STRICTLY
+# less than every other hook weight in that phase.
+echo "guard 22: images-pullable hook is first among pre-install/pre-upgrade/pre-rollback hooks"
+cat > "$G21_DIR/order.py" <<'G22PY'
+import sys, yaml
+PHASES = ("pre-install", "pre-upgrade", "pre-rollback")
+def hooks(docs):
+    out = []
+    for d in docs:
+        a = (d.get("metadata") or {}).get("annotations") or {}
+        if "helm.sh/hook" not in a: continue
+        ph = [x.strip() for x in str(a["helm.sh/hook"]).split(",")]
+        out.append((d.get("kind"), d["metadata"].get("name"), ph, int(str(a.get("helm.sh/hook-weight", "0")))))
+    return out
+def check(docs, label):
+    errs, hs = [], hooks(docs)
+    for ph in PHASES:
+        mine = [h for h in hs if "-images-pullable-" in h[1] and h[0] == "Job" and ph in h[2]]
+        if not mine:
+            errs.append("%s/%s: images-pullable Job is not a %s hook" % (label, ph, ph)); continue
+        w = mine[0][3]
+        for k, n, p, wt in hs:
+            if ph in p and n != mine[0][1] and wt <= w:
+                errs.append("%s/%s: %s/%s weight %d is not above the pre-flight weight %d" % (label, ph, k, n, wt, w))
+    return errs
+def load(p): return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+if sys.argv[1] == "selftest":
+    docs = load(sys.argv[2])
+    for d in docs:
+        a = (d.get("metadata") or {}).get("annotations") or {}
+        if "pre-upgrade" in str(a.get("helm.sh/hook", "")) and "-images-pullable-" not in d["metadata"]["name"]:
+            a["helm.sh/hook-weight"] = "-200"; break
+    e = check(docs, "selftest")
+    print("  selftest: a pre-upgrade hook at weight -200 -> %d problem(s)" % len(e))
+    sys.exit(0 if e else 1)
+errs = []
+for p, l in zip(sys.argv[1:], ("default", "tierNode", "releasability", "ephemeralOnUpgrade", "everything-on")):
+    e = check(load(p), l)
+    print("  %s %-18s" % ("FAIL" if e else "ok  ", l))
+    errs += e
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G22PY
+"$PY" "$G21_DIR/order.py" "$G21_DIR/v1.yaml" "$G21_DIR/v2.yaml" "$G21_DIR/v3.yaml" "$G21_DIR/v4.yaml" "$G21_DIR/v5.yaml" || fail=1
+if "$PY" "$G21_DIR/order.py" selftest "$G21_DIR/v5.yaml"; then
+  echo "  ok   : self-test: the ordering check fails when another pre-upgrade hook is at weight -200"
+else
+  echo "  FAIL: the ordering check passed a hook at weight -200 -- guard 22 cannot fail"; fail=1
+fi
+rm -rf "$G21_DIR"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
