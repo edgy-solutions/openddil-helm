@@ -462,7 +462,9 @@ for cm in cms:
         print("  FAIL [7d-default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
     if not isinstance(cfg, dict):
         print("  FAIL [7d-default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
-    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes"))
+    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes", "effectors", "movement"))
+    if cfg.get("effectors") != {"declaredLoad": {"asset": {}, "variant": {}}} or cfg.get("movement") != {"standards": {}, "units": []}:
+        print("  FAIL [7d-default]: default effectors/movement are not the empty declared inputs: " + json.dumps({k: cfg.get(k) for k in ("effectors", "movement")})); sys.exit(1)
     if extra:
         print("  FAIL [7d-default]: default hub deployment-config carries key: " + ", ".join(extra)); sys.exit(1)
     if cfg.get("releasedRecordsPanes"):
@@ -493,7 +495,7 @@ got = json.loads(hub["data"]["deployment.json"])
 gotPanes = got.get("releasedRecordsPanes")
 if gotPanes != want:
     print("  FAIL [7e]: hub deployment.json releasedRecordsPanes = " + repr(gotPanes) + ", want " + repr(want)); sys.exit(1)
-if set(got.keys()) != {"releasedRecordsPanes"}:
+if set(got.keys()) - {"effectors", "movement"} != {"releasedRecordsPanes"}:
     print(f"  FAIL [7e]: hub deployment.json has extra keys: {sorted(got.keys())}"); sys.exit(1)
 if not tiers:
     print("  FAIL [7e]: no tier-frontend-config ConfigMaps rendered with tierNode.enabled=true -- cannot check absence"); sys.exit(1)
@@ -501,6 +503,27 @@ leaked = [d["metadata"]["name"] for d in tiers if "releasedRecordsPanes" in (d["
 if leaked:
     print("  FAIL [7e]: releasedRecordsPanes leaked into tier config(s): " + ", ".join(leaked)); sys.exit(1)
 print(f"  ok   [7e]: hub carries releasedRecordsPanes; {len(tiers)} tier-frontend-config(s) do not")
+' || fail=1
+
+# 7f: the move panel's declared inputs (effectors.declaredLoad, movement) reach
+# the hub's and every tier's deployment.json unchanged, from one helper. The
+# default render carries them empty (7d); here a declared value must arrive
+# identically everywhere, or a tier's panel would show other numbers.
+render --set tierNode.enabled=true   --set-json 'movement={"standards":{"V1":{"marchOrderS":60,"emplaceS":45,"fuelTank":{"value":300,"unit":"L"},"fuelBurnPerKm":{"value":2,"unit":"L/km"}}},"units":[{"id":"u1","label":"U1","members":["a1","a2"],"plannedMoveKm":0.9}]}'   --set-json 'effectors.declaredLoad={"asset":{"a2":{"1.2.3.4.5.6.7":5}},"variant":{}}'   | "$PY" -c '
+import sys, yaml, json
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+want_m = {"standards": {"V1": {"marchOrderS": 60, "emplaceS": 45, "fuelTank": {"value": 300, "unit": "L"}, "fuelBurnPerKm": {"value": 2, "unit": "L/km"}}}, "units": [{"id": "u1", "label": "U1", "members": ["a1", "a2"], "plannedMoveKm": 0.9}]}
+want_e = {"declaredLoad": {"asset": {"a2": {"1.2.3.4.5.6.7": 5}}, "variant": {}}}
+cms = [d for d in docs if d.get("kind") == "ConfigMap" and (d["metadata"]["name"].endswith("-frontend-deployment-config") or "-tier-frontend-config-" in d["metadata"]["name"])]
+hub = [d for d in cms if d["metadata"]["name"].endswith("-frontend-deployment-config")]
+tiers = [d for d in cms if "-tier-frontend-config-" in d["metadata"]["name"]]
+if len(hub) != 1 or not tiers:
+    print(f"  FAIL [7f]: want 1 hub and >=1 tier deployment config, got {len(hub)} and {len(tiers)}"); sys.exit(1)
+for cm in cms:
+    cfg = json.loads(cm["data"]["deployment.json"])
+    if cfg.get("movement") != want_m or cfg.get("effectors") != want_e:
+        print("  FAIL [7f]: " + cm["metadata"]["name"] + " carries " + json.dumps({k: cfg.get(k) for k in ("effectors", "movement")})); sys.exit(1)
+print(f"  ok   [7f]: declared effectors and movement reach the hub and {len(tiers)} tier config(s) unchanged")
 ' || fail=1
 
 # --- guard 8: schema-init / topic-init choose their hook phase correctly ---
@@ -965,7 +988,9 @@ for cm in cms:
         print("  FAIL [10 default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
     if not isinstance(cfg, dict):
         print("  FAIL [10 default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
-    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes"))
+    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes", "effectors", "movement"))
+    if cfg.get("effectors") != {"declaredLoad": {"asset": {}, "variant": {}}} or cfg.get("movement") != {"standards": {}, "units": []}:
+        print("  FAIL [10 default]: default effectors/movement are not the empty declared inputs: " + json.dumps({k: cfg.get(k) for k in ("effectors", "movement")})); sys.exit(1)
     if extra:
         print("  FAIL [10 default]: default hub deployment-config carries key: " + ", ".join(extra)); sys.exit(1)
     if cfg.get("releasedRecordsPanes"):
