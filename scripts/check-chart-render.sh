@@ -2343,6 +2343,76 @@ else
 fi
 rm -rf "$G21_DIR"
 
+# --- guard 23: the Restate wipe is the LAST pre-* hook -------------------------
+# THE DEFECT MODELLED: the wipe scales every Restate StatefulSet to zero and
+# deletes its PVC. Run first, a later pre-* hook that hung left the upgrade
+# unapplied and Restate down at every tier until a rollback. In each variant
+# (rendered with restate.ephemeralOnUpgrade=true, else the wipe does not render
+# and this check is vacuous), for each of pre-install, pre-upgrade and
+# pre-rollback in which the wipe Job appears: its weight is STRICTLY greater
+# than every other hook's weight in the phase (its own RBAC excepted), and its
+# RBAC objects' weights are strictly less than the Job's. FAIL if no wipe Job
+# is found at all.
+echo
+echo "guard 23: the Restate wipe is the last pre-install/pre-upgrade/pre-rollback hook"
+G23_DIR="$(mktemp -d)"
+render --set restate.ephemeralOnUpgrade=true > "$G23_DIR/w1.yaml"
+render --set tierNode.enabled=true --set restate.ephemeralOnUpgrade=true > "$G23_DIR/w2.yaml"
+render --set releasability.enabled=true --set restate.ephemeralOnUpgrade=true > "$G23_DIR/w3.yaml"
+cat > "$G23_DIR/last.py" <<'G23PY'
+import sys, yaml
+PHASES = ("pre-install", "pre-upgrade", "pre-rollback")
+def hooks(docs):
+    out = []
+    for d in docs:
+        a = (d.get("metadata") or {}).get("annotations") or {}
+        if "helm.sh/hook" not in a: continue
+        ph = [x.strip() for x in str(a["helm.sh/hook"]).split(",")]
+        out.append((d.get("kind"), d["metadata"].get("name"), ph, int(str(a.get("helm.sh/hook-weight", "0")))))
+    return out
+def is_wipe(h): return "-restate-wipe" in h[1]
+def check(docs, label, show=False):
+    errs, hs, found = [], hooks(docs), False
+    for ph in PHASES:
+        jobs = [h for h in hs if h[0] == "Job" and is_wipe(h) and ph in h[2]]
+        if not jobs: continue
+        found = True
+        w = jobs[0][3]
+        if show:
+            print("  %s order: %s" % (ph, ", ".join("%d %s" % (x[3], x[1]) for x in sorted((x for x in hs if ph in x[2]), key=lambda x: (x[3], x[1])))))
+        for k, n, p, wt in hs:
+            if ph not in p or n == jobs[0][1]: continue
+            if is_wipe((k, n, p, wt)):
+                if wt >= w: errs.append("%s/%s: wipe RBAC %s/%s weight %d is not below the Job weight %d" % (label, ph, k, n, wt, w))
+            elif wt >= w:
+                errs.append("%s/%s: %s/%s weight %d is not below the wipe Job weight %d" % (label, ph, k, n, wt, w))
+    if not found: errs.append("%s: no restate-wipe Job found in any pre-* phase (vacuous)" % label)
+    return errs
+def load(p): return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+if sys.argv[1] == "selftest":
+    docs = load(sys.argv[2]); hit = False
+    for d in docs:
+        if "postgres-schema-init" in d["metadata"]["name"] and "helm.sh/hook" in (d["metadata"].get("annotations") or {}):
+            d["metadata"]["annotations"]["helm.sh/hook-weight"] = "60"; hit = True
+    e = check(docs, "selftest") if hit else []
+    print("  selftest: postgres-schema-init at weight 60 -> %d problem(s)" % len(e))
+    sys.exit(0 if hit and e else 1)
+errs = []
+for i, (p, l) in enumerate(zip(sys.argv[1:], ("default", "tierNode", "releasability"))):
+    e = check(load(p), l, show=(i == 0))
+    print("  %s %-18s" % ("FAIL" if e else "ok  ", l))
+    errs += e
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G23PY
+"$PY" "$G23_DIR/last.py" "$G23_DIR/w1.yaml" "$G23_DIR/w2.yaml" "$G23_DIR/w3.yaml" || fail=1
+if "$PY" "$G23_DIR/last.py" selftest "$G23_DIR/w1.yaml"; then
+  echo "  ok   : self-test: the check fails when postgres-schema-init is at weight 60"
+else
+  echo "  FAIL: the check passed postgres-schema-init at weight 60 -- guard 23 cannot fail"; fail=1
+fi
+rm -rf "$G23_DIR"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

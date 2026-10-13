@@ -17,7 +17,7 @@ bootstrap) re-register services against the fresh Restate state on the
 way back up.
 
 Behavior is gated by `.Values.restate.ephemeralOnUpgrade`:
-  * true  (default for the demo chart) — wipe Restate state on every
+  * true  (off by default; a deployment turns it on) — wipe Restate state on every
           install/upgrade. Trade-off: discards CM history + logistics
           state from the previous deploy. Right for demos; iteration
           velocity over state durability.
@@ -27,9 +27,18 @@ Behavior is gated by `.Values.restate.ephemeralOnUpgrade`:
           accept that handler-code changes require an explicit
           `flush-assets.sh --deep` to clean state.
 
-Hook weight = -100 (very early) so the wipe runs BEFORE the StatefulSet
-re-applies its updated spec, BEFORE bundle-init re-pulls, BEFORE any
-post-install bootstrap Job that depends on Restate being clean.
+Hook order: the wipe is the LAST pre-* hook. Its RBAC sits at weight 49 and
+the Job at 50, above every other pre-install, pre-upgrade and pre-rollback
+hook. Why: the wipe scales every Restate StatefulSet to zero and deletes its
+PVC, so it is the one step that cannot be undone by a failed upgrade. If it
+ran first and a later pre-* hook hung, the upgrade would never apply and
+Restate would stay down at every tier until a rollback. Running last, any
+earlier hook failure aborts the upgrade before Restate is touched. It still
+precedes the apply (all pre-* hooks finish before helm applies the new
+manifests) and every post-* bootstrap Job that depends on Restate being
+clean. The RBAC sits one below the Job only so the account exists when the
+Job starts. A new pre-* hook must take a weight below 49; guard 23 in
+scripts/check-chart-render.sh enforces it.
 
 Hook PVC delete: the PVC is created by volumeClaimTemplates on the
 StatefulSet; its deterministic name is data-<sts>-0. Helm doesn't manage
@@ -102,7 +111,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
-    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-weight": "49"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -113,7 +122,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
-    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-weight": "49"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
   - apiGroups: ["apps"]
@@ -134,7 +143,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
-    "helm.sh/hook-weight": "-100"
+    "helm.sh/hook-weight": "49"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
   - kind: ServiceAccount
@@ -153,7 +162,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
-    "helm.sh/hook-weight": "-99"
+    "helm.sh/hook-weight": "50"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 1
