@@ -2592,5 +2592,63 @@ G26PY
 "$PY" "$G26_DIR/stall.py" "$G26_DIR/d.yaml" "$G26_DIR/t.yaml" "$G26_DIR/off.yaml" || fail=1
 rm -rf "$G26_DIR"
 echo
+echo "guard 27: relay-stall-probe.sh judges correctly on single- and multi-series Connect metrics"
+G27_DIR="$(mktemp -d)"
+PROBE="$(cd "$(dirname "$0")/.." && pwd)/openddil-demo/files/relay-stall-probe.sh"
+g27_fail=0
+if ! command -v sh >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then
+  echo "  FAIL: sh or awk is missing; the probe cannot be exercised (a skip would be a silent pass)"
+  g27_fail=1
+else
+  mkdir -p "$G27_DIR/bin"
+  printf '#!/bin/sh\ncat "$FAKE_METRICS"\n' > "$G27_DIR/bin/wget"
+  chmod +x "$G27_DIR/bin/wget"
+  g27_mapper() {  # g27_mapper <inputs.0> <cases.2>
+    printf '%s\n' \
+      "input_received{label=\"\",path=\"root.input.broker.inputs.0\"} $1" \
+      'input_received{label="",path="root.input.broker.inputs.1"} 0' \
+      'output_sent{label="",path="root.output.switch.cases.0.output"} 0' \
+      'output_sent{label="",path="root.output.switch.cases.1.output"} 0' \
+      "output_sent{label=\"\",path=\"root.output.switch.cases.2.output\"} $2"
+  }
+  g27_bridge() {  # g27_bridge <input> <output>
+    printf '%s\n' \
+      "input_received{label=\"\",path=\"root.input\"} $1" \
+      "output_sent{label=\"\",path=\"root.output\"} $2"
+  }
+  g27_mapper 633 632 > "$G27_DIR/m-a"
+  g27_mapper 700 699 > "$G27_DIR/m-flow"
+  g27_mapper 700 632 > "$G27_DIR/m-stall"
+  g27_bridge 4.059462e+06 4.053927e+06 > "$G27_DIR/s-a"
+  g27_bridge 4.0596e+06 4.053927e+06 > "$G27_DIR/s-stall"
+  g27_bridge 4.0596e+06 4.0545e+06 > "$G27_DIR/s-flow"
+  : > "$G27_DIR/empty"
+  # g27_run <name> <fixtureA|-> <fixtureB> <want-exit> <want-substring>
+  g27_run() {
+    local name="$1" fa="$2" fb="$3" wantrc="$4" wantsub="$5" out rc
+    rm -f "$G27_DIR/state"
+    if [ "$fa" != "-" ]; then
+      FAKE_METRICS="$G27_DIR/$fa" PATH="$G27_DIR/bin:$PATH" STATE_FILE="$G27_DIR/state" DEST_HOST= \
+        METRICS_URL=http://x/metrics sh "$PROBE" >/dev/null 2>&1
+    fi
+    out="$(FAKE_METRICS="$G27_DIR/$fb" PATH="$G27_DIR/bin:$PATH" STATE_FILE="$G27_DIR/state" DEST_HOST= \
+      METRICS_URL=http://x/metrics sh "$PROBE" 2>&1)"; rc=$?
+    if [ "$rc" = "$wantrc" ] && case "$out" in *"$wantsub"*) true;; *) false;; esac; then
+      echo "  ok   $name: exit $rc, \"$out\""
+    else
+      echo "  FAIL $name: wanted exit $wantrc / \"$wantsub\", got exit $rc, \"$out\""
+      g27_fail=1
+    fi
+  }
+  g27_run "multi-series flowing"  m-a m-flow  0 "flowing"
+  g27_run "multi-series stalled"  m-a m-stall 1 "STALLED"
+  g27_run "multi-series idle"     m-a m-a     0 "input idle"
+  g27_run "single-series stalled" s-a s-stall 1 "STALLED"
+  g27_run "single-series flowing" s-a s-flow  0 "flowing"
+  g27_run "unreadable"            -   empty   0 "not judging"
+fi
+[ "$g27_fail" -eq 0 ] || fail=1
+rm -rf "$G27_DIR"
+echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

@@ -59,15 +59,21 @@ DEST_PORT="${DEST_PORT:-9092}"
 
 now="$(date +%s)"
 
+# Connect emits one series per component path. A relay with a broker input or a
+# switch output therefore has several input_received / output_sent lines, one
+# per child. Summing is the meaning this probe needs: "any input advanced" and
+# "any confirmed output advanced". Keeping one line would silently read one
+# child (an idle one, for the mapper) and judge the whole relay by it. %.0f, not
+# %d, so a large or e-notation counter is not truncated by a 32-bit awk %d.
 sample="$(wget -qO- "$METRICS_URL" 2>/dev/null \
-  | awk '/^input_received/{i=$2} /^output_sent/{o=$2} END{printf "%d %d", i, o}')"
+  | awk '/^input_received/{i+=$2} /^output_sent/{o+=$2} END{printf "%.0f %.0f", i, o}')"
 in_now="${sample% *}"
 out_now="${sample#* }"
 
 # A relay whose metrics cannot be read has not been shown to be stalled. It
 # may be very sick, but this probe answers one question and must not answer a
 # different one by accident.
-if [ -z "$sample" ] || [ "$in_now" = "0" ] && [ "$out_now" = "0" ]; then
+if [ -z "$sample" ] || { [ "$in_now" = "0" ] && [ "$out_now" = "0" ]; }; then
   echo "metrics unreadable or zero — not judging"
   exit 0
 fi
