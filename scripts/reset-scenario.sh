@@ -1191,6 +1191,8 @@ TABLES=(
   inventory_items
   intake_records
   effector_launch
+  effector_resupply
+  parts_availability
 )
 # effector_declared_load is deliberately NOT in TABLES. It is the declared
 # munitions-per-launcher-variant config, not run data — the projector

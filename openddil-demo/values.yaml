@@ -581,6 +581,20 @@ effectors:
     asset: {}
     variant: {}
 
+# Declared inputs for the frontend move panel. DECLARED and overlay-supplied:
+# doctrinal timings and fuel figures are deployment values, never code
+# defaults. OSS default is empty, so the panel shows each input's absence by
+# name. Served to every tier's browser through /deployment/deployment.json
+# (see openddil.frontendMoveInputsJson in _helpers.tpl), together with
+# effectors.declaredLoad above.
+movement:
+  # per variant: marchOrderS, emplaceS (seconds), fuelTank {value, unit},
+  # fuelBurnPerKm {value, unit}; any key may be omitted (the panel then
+  # names it as missing)
+  standards: {}
+  # [{id, label, members: [asset_id, ...], plannedMoveKm}]
+  units: []
+
 edgeHqBridge:
   image:
     repository: docker.redpanda.com/redpandadata/connect
@@ -1709,6 +1723,9 @@ releasability:
     # table and the per-launcher counts view are NOT listed: neither carries
     # labels, and this list controls what the PEP will serve.
     - effector_launch
+    # One row per Resupply Received supply line, labelled from the launcher
+    # exactly as effector_launch.
+    - effector_resupply
     # Joined 2026-09-08. The rollups, labelled by COMPOSITION: the aggregator
     # intersects its contributors' releasable_to over the same snapshot the
     # counts come from, so an aggregate is no more visible than its least
@@ -1733,6 +1750,9 @@ releasability:
     # hides them. That is the safe direction, and the gate counts them.
     - asset_registry
     - inventory_items
+    # The spare-parts stand-in, labelled by the site's nation at the
+    # publisher. HQ only; the table is empty at tiers.
+    - parts_availability
 
   # --- CLASS 2: role-served. Nothing to partition BY. ---
   #

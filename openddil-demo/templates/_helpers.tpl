@@ -1333,7 +1333,7 @@ it with more steps.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-12-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+13-topic consumer-group set (SPEC-consumer-declarations.md Part A).
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1341,16 +1341,20 @@ non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
 back to the image's baked-in root config at
 /app/src/config/projector_config.yaml in the openddil-projector repo. That
 file is this list's source of truth; this is a mirror of it, written once so
-every caller shares one list instead of re-typing 12 names.
+every caller shares one list instead of re-typing 13 names.
 
 Values measured from the live lab census (expected-declared.tsv), since the
-source file lives in a different repo this chart does not vendor. The 12th
-(projector-effector-launch) was added the same way the
-other 11 were: by reading the handler list that file actually carries, not
-by re-deriving it from this chart.
+source file lives in a different repo this chart does not vendor. The 13th
+(projector-parts-availability) was added the same way the other 12 were: by
+reading the handler list that file actually carries, not by re-deriving it
+from this chart.
+
+Per-edge projectors also carry the parts-availability mapping (the root
+config is shared), but their broker has no such topic, so that group sits
+idle there, same as the regional rollups.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1599,12 +1603,23 @@ decides whether that file is rendered at all, so the two cannot disagree.
 {{- end }}
 
 {{/*
+openddil.frontendMoveInputsJson -- the move panel's declared inputs as a JSON
+object with the two keys `effectors` and `movement`. Always both keys, empty
+maps/list when undeclared. One definition for the hub and every tier.
+*/}}
+{{- define "openddil.frontendMoveInputsJson" -}}
+{{- $dl := .Values.effectors.declaredLoad | default dict -}}
+{{- toJson (dict "effectors" (dict "declaredLoad" (dict "asset" ($dl.asset | default dict) "variant" ($dl.variant | default dict))) "movement" (dict "standards" (.Values.movement.standards | default dict) "units" (.Values.movement.units | default list))) -}}
+{{- end }}
+
+{{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
-deployment.json: any configured pane or FOB, releasability, or any HQ child
-link (whose shape places its header row). Empty otherwise.
+deployment.json: any configured pane or FOB, releasability, any HQ child
+link (whose shape places its header row), or any declared move-panel input
+(movement units/standards, effector declared load). Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -1614,9 +1629,13 @@ through the hub PEP), plus the declared edge attachments (DECLARED ONLY,
 never inferred — an edge that says nothing about `attachment` is simply
 omitted from the list, same as the OSS default). One definition, so the
 ConfigMap and the pod's checksum annotation cannot disagree.
+
+Always carries `effectors` and `movement` (empty when undeclared), so the
+browser can tell "declared empty" from "an older chart".
 */}}
 {{- define "openddil.frontendDeploymentJson" -}}
 {{- $d := dict "releasedRecordsPanes" (.Values.frontend.releasedRecordsPanes | default list) -}}
+{{- $_ := merge $d (include "openddil.frontendMoveInputsJson" . | fromJson) -}}
 {{- if .Values.releasability.enabled -}}
 {{- $_ := set $d "egressPane" (dict "destination" .Values.egress.destination) -}}
 {{- end -}}

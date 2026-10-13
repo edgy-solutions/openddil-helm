@@ -664,7 +664,7 @@ metadata:
     {{- include "openddil.labels" $root | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" (printf "projector-%s" $edge.id) "root" $root) | nindent 4 }}
   annotations:
-    # 12-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # 13-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
     # DEFAULT (projector_config.yaml in openddil-projector), not visible in
     # this chart. This Deployment is the ROOT projector reading an
     # untier-managed edge's own broker (see NOT DEPLOYED FOR A TIER-MANAGED

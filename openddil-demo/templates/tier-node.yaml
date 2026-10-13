@@ -1023,7 +1023,10 @@ data:
                reading. A self-parent is the same violation wearing a
                different value. */}}
         "parent": {{ with $tier.parent }}{{ . | quote }}{{ else }}null{{ end }}
-      }
+      },
+      {{- /* Same two keys as the hub's deployment.json, one definition. */}}
+      "effectors": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).effectors | toJson }},
+      "movement": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).movement | toJson }}
     }
 {{- if $root.Values.releasability.enabled }}
 ---

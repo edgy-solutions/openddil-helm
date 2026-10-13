@@ -986,7 +986,7 @@ metadata:
     {{- include "openddil.labels" . | nindent 4 }}
     {{- include "openddil.selectorLabels" (dict "component" "projector-hq" "root" .) | nindent 4 }}
   annotations:
-    # 12-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
+    # 13-group set from openddil.projectorGroupIds (_helpers.tpl) -- a CODE
     # DEFAULT (projector_config.yaml in openddil-projector), not visible in
     # this chart. Same set as the per-edge projector Deployments in
     # edge.yaml, here on the hq broker.
