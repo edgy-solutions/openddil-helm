@@ -444,6 +444,21 @@ relayStallProbe:
   failureThreshold: 3
 
 sensorIngest:
+  # Spool: sensor-ingest writes each one-shot DIS PDU (Fire, Detonation,
+  # Event Report, Remove Entity, Resupply Received) to a directory before
+  # producing it, deletes it on confirmed delivery, and replays leftovers.
+  # An emptyDir survives a CONTAINER restart, which is what the exit-70 path
+  # does (fatal producer error, or the oldest record stays undelivered while
+  # the broker answers): the pod stays, the kubelet restarts the container,
+  # and undelivered records are replayed.
+  # It does NOT survive a pod replacement (a rollout, an eviction, a node
+  # loss); records still undelivered at that moment are lost, as before.
+  # enabled: false restores the previous behaviour exactly.
+  spool:
+    enabled: true
+    sizeLimit: 64Mi
+    maxEntries: 10000
+    stallSeconds: 90
   # Stall detection -> LIVENESS. The endpoint reports 503 only when input
   # advanced over its window and output did not; see openddil-sensor-ingest's
   # stall.py for why both terms are required and why this is liveness rather

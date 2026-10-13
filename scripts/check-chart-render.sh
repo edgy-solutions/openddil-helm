@@ -2413,6 +2413,62 @@ else
 fi
 rm -rf "$G23_DIR"
 
+
+echo "guard 24: sensor-ingest containers get a bounded spool directory"
+G24_DIR="$(mktemp -d)"
+render > "$G24_DIR/d.yaml"
+render --set tierNode.enabled=true > "$G24_DIR/t.yaml"
+render --set sensorIngest.spool.enabled=false > "$G24_DIR/off.yaml"
+cat > "$G24_DIR/spool.py" <<'G24PY'
+import sys, re, yaml
+IMG = re.compile(r"(^|/)sensor-ingest[:@]")
+def ingest(docs):
+    for d in docs:
+        # Hook Jobs (images-pullable) name the image only to probe a pull; they do not run it.
+        if "helm.sh/hook" in ((d.get("metadata") or {}).get("annotations") or {}): continue
+        spec = (((d.get("spec") or {}).get("template") or {}).get("spec")) or {}
+        for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            if IMG.search(str(c.get("image", ""))):
+                yield d, spec, c
+def load(p): return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+def env(c, k):
+    for e in c.get("env") or []:
+        if e.get("name") == k: return e.get("value")
+def check(docs, label):
+    errs, n = [], 0
+    for d, spec, c in ingest(docs):
+        n += 1
+        who = "%s/%s" % (label, d["metadata"]["name"])
+        path = env(c, "INGEST_SPOOL_DIR")
+        if not path: errs.append("%s: no INGEST_SPOOL_DIR" % who); continue
+        mounts = [m for m in c.get("volumeMounts") or [] if m.get("mountPath") == path]
+        if not mounts: errs.append("%s: no volumeMount at %s" % (who, path)); continue
+        vol = [v for v in spec.get("volumes") or [] if v.get("name") == mounts[0]["name"]]
+        ed = vol[0].get("emptyDir") if vol else None
+        if not (ed and ed.get("sizeLimit")): errs.append("%s: mount %s is not an emptyDir with a sizeLimit" % (who, path))
+    if n == 0: errs.append("%s: 0 sensor-ingest containers found (vacuous)" % label)
+    return errs, n
+def control(docs):
+    errs, n = [], 0
+    for d, spec, c in ingest(docs):
+        n += 1
+        who = d["metadata"]["name"]
+        if env(c, "INGEST_SPOOL_DIR") is not None: errs.append("control: %s still has INGEST_SPOOL_DIR" % who)
+        if any(m.get("mountPath") == "/var/spool/ingest" for m in c.get("volumeMounts") or []): errs.append("control: %s still mounts the spool" % who)
+        if any(v.get("name") == "ingest-spool" for v in spec.get("volumes") or []): errs.append("control: %s still has the ingest-spool volume" % who)
+    if n == 0: errs.append("control: 0 sensor-ingest containers found (vacuous)")
+    return errs, n
+errs = []
+for p, l in zip(sys.argv[1:3], ("default", "tierNode")):
+    e, n = check(load(p), l)
+    print("  %s %-10s %d sensor-ingest container(s)" % ("FAIL" if e else "ok  ", l, n)); errs += e
+e, n = control(load(sys.argv[3]))
+print("  %s control spool.enabled=false: %d container(s) carry no spool" % ("FAIL" if e else "ok  ", n)); errs += e
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G24PY
+"$PY" "$G24_DIR/spool.py" "$G24_DIR/d.yaml" "$G24_DIR/t.yaml" "$G24_DIR/off.yaml" || fail=1
+rm -rf "$G24_DIR"
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

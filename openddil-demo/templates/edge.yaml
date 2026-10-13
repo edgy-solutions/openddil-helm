@@ -135,6 +135,14 @@ spec:
               value: "INFO"
             - name: PYTHONPATH
               value: "/proto:/app"
+            {{- if $root.Values.sensorIngest.spool.enabled }}
+            - name: INGEST_SPOOL_DIR
+              value: "/var/spool/ingest"
+            - name: INGEST_SPOOL_MAX
+              value: {{ $root.Values.sensorIngest.spool.maxEntries | quote }}
+            - name: INGEST_SPOOL_STALL_S
+              value: {{ $root.Values.sensorIngest.spool.stallSeconds | quote }}
+            {{- end }}
             {{- if hasKey $entityIdsByEdge $edge.id }}
             # Per-edge DIS entity allow-list (sensorIngest.entityAssignment,
             # values.yaml). Comma-joined, sorted ids; the sidecar image
@@ -189,11 +197,20 @@ spec:
             - name: bundle-shared
               mountPath: /ontology
               subPath: ontology
+            {{- if $root.Values.sensorIngest.spool.enabled }}
+            - name: ingest-spool
+              mountPath: /var/spool/ingest
+            {{- end }}
           resources:
             {{- toYaml $root.Values.sensorIngest.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- if $root.Values.sensorIngest.spool.enabled }}
+        - name: ingest-spool
+          emptyDir:
+            sizeLimit: {{ $root.Values.sensorIngest.spool.sizeLimit | quote }}
+        {{- end }}
         {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
