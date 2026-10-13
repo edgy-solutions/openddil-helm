@@ -61,17 +61,29 @@
 #
 # QUICK MODE (--quick)
 #
-# The full reset spends much of its time on proof, not on clearing: the phase 1
-# baseline, the phase 8 zero assertion and the phase 10 subscription liveness
-# wait. --quick runs the pre-flight and then phases 2, 3, 3b, 4, 5, 6, 7 and 9,
-# in that order, with the same safety machinery (halts, the scale-restore trap,
-# phase 3's re-read until two reads agree), and skips phases 1, 8 and 10.
-# Phase 3b is NOT a proof and stays: it finds the writers still live on the
-# target topics and quiesces them, and without it phase 4's post-trim read
-# sees those writes and halts. It is for an operator at
-# a shell who wants fresh data for debugging. It proves nothing, so it writes
-# NO exercise reset record, prints a NOT MEASURED banner at start and end, and
-# can never precede an exercise restart (restart-exercise.sh refuses it).
+# For an operator at a shell who wants fresh data for debugging in about a
+# minute. It clears state and proves nothing: it skips the phase 1 baseline,
+# the pre-flight consumer assertion, the phase 3b writer census windows, the
+# phase 4 capture and double read, the phase 8 zero assertion and the phase 10
+# subscription liveness wait. It writes NO exercise reset record, prints a
+# NOT MEASURED banner at start and end, and can never precede an exercise
+# restart (restart-exercise.sh refuses it).
+#
+# The time goes on round trips and deliberate waits, so quick mode removes
+# both. It quiesces every producer, every derived consumer and every declared
+# writer of a target topic up front (no observation window), clears Restate
+# with the waits shared across runtimes, trims every topic with ONE exec per
+# broker (the pod runs a generated script: a pure-compact topic's policy is
+# widened, the topic trimmed and the policy restored, always), and clears the
+# stores with ONE psql call per Postgres pod. The halts, the scale-restore
+# trap and the refusals are the same as a full run.
+#
+# RESIDUE WARNING. Without the double read, a topic that took a write after its
+# trim is not caught by a halt. The end banner lists any partition left with
+# data (pod/topic/pN (n left)) and the exit status stays 0; a config left
+# changed (a cleanup.policy not restored) is a halt. Use the full reset when
+# the result has to be proven.
+#
 # It cannot be combined with --baseline-only, --verify-only, --census-only,
 # --writer-census-only, any --red-check-* or --declare-unmeasured. Run:
 #   bash scripts/reset-scenario.sh --quick
@@ -119,10 +131,10 @@ SKIP_ELECTRIC=false
 SKIP_PRODUCERS=false
 # --quick: the clearing phases only, no proofs (see QUICK MODE in the header).
 # QUICK_SKIP_PHASES is the ONE list of what quick mode leaves out: it decides
-# which phases are skipped (phase_skipped_by_quick) AND it is what both
+# what quick mode reports as skipped (phase_skipped_by_quick) AND it is what both
 # banners print, so what is skipped and what is announced cannot drift.
 QUICK=false
-QUICK_SKIP_PHASES=("1 baseline" "8 zero assertion" "10 subscription liveness")
+QUICK_SKIP_PHASES=("1 baseline" "pre-flight consumer assertion" "3b writer census windows" "4 capture and double read" "8 zero assertion" "10 subscription liveness")
 # Simulators are found by this declared label, not by a name pattern, so a
 # simulator deployed under any name is stopped and restarted by the reset.
 SIMULATOR_SELECTOR="${SIMULATOR_SELECTOR:-openddil.io/role=simulator}"
@@ -198,13 +210,18 @@ FLAGS
                       "predicted 0" lines, so this MUST exit non-zero. If it
                       passes against a live cluster, the check is broken, not
                       the cluster.
-  --quick             Run the clearing phases (2, 3, 3b, 4, 5, 6, 7, 9) with the
-                      same pre-flight and safety machinery, and skip the
-                      proofs: phase 1 baseline, 8 zero assertion, 10
-                      subscription liveness. For an operator at a shell who
-                      wants fresh data, not a measured reset: it writes NO
-                      exercise reset record and so cannot precede an exercise
-                      restart. Prints a NOT MEASURED banner at start and end.
+  --quick             Clear state in about a minute, for an operator at a shell
+                      who wants fresh data for debugging. Skips the proofs:
+                      1 baseline, the pre-flight consumer assertion, the 3b
+                      writer census windows, the 4 capture and double read,
+                      8 zero assertion, 10 subscription liveness. Topics are
+                      trimmed with one exec per broker and stores cleared with
+                      one psql per pod. RESIDUE WARNING: with no double read,
+                      data written after a trim is not caught; it is listed in
+                      the end banner (exit stays 0). A config left changed
+                      halts. Writes NO exercise reset record and so cannot
+                      precede an exercise restart. Prints a NOT MEASURED
+                      banner at start and end.
                       Allowed with --dry-run and every --skip-* flag. Refused
                       (exit 1) with --baseline-only, --verify-only,
                       --census-only, --writer-census-only, any --red-check-*,
@@ -4275,43 +4292,423 @@ on_reset_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# QUICK MODE helpers. QUICK_SKIP_PHASES (defined with the flags) is the one
-# list: phase_skipped_by_quick reads it to decide what is skipped, and
-# quick_skipped_list reads it to name what the banners print.
+# QUICK MODE. QUICK_SKIP_PHASES (defined with the flags) is the one list of
+# what quick mode leaves out: quick_skipped_list reads it to name what the
+# banners print.
 # ---------------------------------------------------------------------------
-phase_skipped_by_quick() {
-  $QUICK || return 1
-  local p
-  for p in "${QUICK_SKIP_PHASES[@]}"; do
-    [ "$p" = "$1" ] && return 0
-  done
-  return 1
-}
-
 quick_skipped_list() {
   local out="" p
-  for p in "${QUICK_SKIP_PHASES[@]}"; do out="${out:+$out, }phase $p"; done
+  for p in "${QUICK_SKIP_PHASES[@]}"; do out="${out:+$out, }$p"; done
   printf '%s' "$out"
 }
+
+# Partitions (or steps) a quick run could not prove clear. Printed in the end
+# banner; never a halt.
+QUICK_RESIDUE=()
+QUICK_T0=0
 
 quick_banner() {
   echo "QUICK RESET: state cleared, NOT MEASURED. Skipped: $(quick_skipped_list). No exercise reset record was written."
 }
 
+quick_end_banner() {
+  local residue="none" r
+  if [ "${#QUICK_RESIDUE[@]}" -gt 0 ]; then
+    residue=""
+    for r in "${QUICK_RESIDUE[@]}"; do residue="${residue:+$residue; }$r"; done
+  fi
+  echo "QUICK RESET: state cleared in $((SECONDS - QUICK_T0)) s, NOT MEASURED. Skipped: $(quick_skipped_list). Residue: ${residue}. No exercise reset record was written."
+}
+
+# quick_step "<phase label>" <step name> FUNCTION -- run_phase plus the
+# per-step wall time the operator reads to see where a minute went.
+quick_step() {
+  local t0=$SECONDS
+  run_phase "$1" "$3"
+  echo "(quick step $2: $((SECONDS - t0)) s)"
+}
+
+# ---- Q2: quiesce everything up front, no observation window -----------------
+QUICK_TARGETS=()                  # "pod|topic", the capture pass's filter
+declare -A QUICK_BROKER_TOPICS=() # pod -> space-separated target topics
+
+# One `rpk topic list` exec per broker (broker_topics), filtered by the same
+# is_internal_topic the capture pass uses. The capture pass also drops a topic
+# whose cleanup.policy it cannot read; quick mode cannot know that without a
+# per-topic read, so the pod script reports such a topic instead.
+quick_list_targets() {
+  local pod topic
+  QUICK_TARGETS=()
+  QUICK_BROKER_TOPICS=()
+  for pod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic; do
+      [ -z "$topic" ] && continue
+      is_internal_topic "$topic" && continue
+      QUICK_TARGETS+=("$pod|$topic")
+      QUICK_BROKER_TOPICS["$pod"]="${QUICK_BROKER_TOPICS[$pod]:-} $topic"
+    done < <(broker_topics "$pod")
+  done
+}
+
+quick_wait_producers_zero() {
+  $DRY_RUN && return 0
+  $SKIP_PRODUCERS && return 0
+  local d i cur
+  for d in "${PRODUCER_DEPLOYS[@]}"; do
+    i=0
+    while [ "$i" -lt 60 ]; do
+      cur="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
+      if [ -z "$cur" ] || [ "$cur" = "0" ]; then break; fi
+      sleep 2
+      i=$((i + 1))
+    done
+    if [ "$i" -ge 60 ]; then
+      echo "WARNING: $d still reports status.replicas=$cur after 120s of polling; proceeding." >&2
+    fi
+  done
+}
+
+quick_quiesce_all() {
+  echo
+  echo "=== QUICK Q2: quiesce producers, derived consumers and declared writers (no observation window) ==="
+  # Phase 2's set, through phase 2's own code (arms the trap, records
+  # ORIG_REPLICAS, honours --skip-producers).
+  phase2_quiesce
+
+  quick_list_targets
+  echo "quick: ${#QUICK_TARGETS[@]} target topic(s) on ${#REDPANDA_PODS[@]} broker(s)"
+  build_declared_producer_map
+
+  local -A seen=()
+  local -a set=()
+  local e t p owner
+  for p in "${PRODUCER_DEPLOYS[@]}"; do seen["Deployment/$p"]=1; done
+  for e in "${QSTATE_QUIESCED[@]:-}"; do [ -n "$e" ] && seen["$e"]=1; done
+
+  # Phase 3's derived set (consumers of a target topic, Restate subscribers,
+  # the declared floor) ...
+  mapfile -t DERIVED_QUIESCE_SET < <(derive_quiesce_set "${QUICK_TARGETS[@]:-}")
+  for e in "${DERIVED_QUIESCE_SET[@]}"; do
+    [ -z "$e" ] && continue
+    [ -n "${seen[$e]:-}" ] && continue
+    seen["$e"]=1; set+=("$e")
+  done
+  # ... plus every declared writer of a target topic (phase 3b's owners,
+  # without the observation windows).
+  for t in "${QUICK_TARGETS[@]:-}"; do
+    [ -z "$t" ] && continue
+    for owner in ${PRODUCER_OWNER[$t]:-}; do
+      [ -n "${seen[$owner]:-}" ] && continue
+      seen["$owner"]=1; set+=("$owner")
+    done
+  done
+
+  if [ "${#set[@]}" -gt 0 ]; then
+    quiesce_workload_set "${set[@]}"
+    # Same bookkeeping as phase 3b, so phase 5 scales a Faust entry back fresh
+    # and phase 9 restores the rest.
+    CENSUS_QUIESCED+=("${set[@]}")
+  fi
+  quick_wait_producers_zero
+  echo "quick: scaled down ${#PRODUCER_DEPLOYS[@]} producer(s) and ${#set[@]} other workload(s): ${set[*]:-none}"
+}
+
+# ---- Q3: Restate, the waits shared across runtimes ---------------------------
+# Same semantics as phase3_restate (cancel, clear, two consecutive zero reads
+# RESTATE_ZERO_GAP_S apart), but each round reads every runtime, sleeps the gap
+# ONCE, then reads them all again. phase3_restate sleeps the gap per runtime.
+quick_restate() {
+  echo
+  echo "=== QUICK Q3: restate (cancel, clear, shared two-read zero check) ==="
+  if $SKIP_RESTATE; then
+    skip_warning "RESTATE" \
+      "Scheduled invocations are not cancelled and Virtual Object state is not\n    cleared; Restate's own next tick will repopulate what is emptied below."
+    return 0
+  fi
+  local pod pass=0
+  if $DRY_RUN; then
+    for pod in "${RESTATE_PODS[@]}"; do
+      echo "-- $pod --"
+      echo "   residue now (keys rows scheduled open): $(restate_residue "$pod")"
+      maybe_run "cancel (kill on a second sighting) every open invocation, clear every service, re-read until two zero reads ${RESTATE_ZERO_GAP_S}s apart on $pod" true
+    done
+    return 0
+  fi
+  local -a pending=("${RESTATE_PODS[@]}") cand next cleared=()
+  local -A last=()
+  local r
+  RESTATE_CANCELLED_IDS=()
+  RESTATE_KILLED_IDS=()
+  while [ "${#pending[@]}" -gt 0 ]; do
+    pass=$((pass + 1))
+    if [ "$pass" -gt "$RESTATE_CLEAR_MAX_PASSES" ]; then
+      local -a detail=()
+      for pod in "${pending[@]}"; do detail+=("$pod residue (keys rows scheduled open): ${last[$pod]:-?}"); done
+      halt_reset "Restate is not clear after ${RESTATE_CLEAR_MAX_PASSES} cancel-clear-reread passes on: ${pending[*]}" \
+        "${detail[@]}" \
+        "Invocations killed: ${RESTATE_KILLED_IDS[*]:-none}" \
+        "Restate instances cleared to a double zero read: ${cleared[*]:-none}"
+    fi
+    echo "   pass $pass: ${pending[*]}"
+    cand=(); next=()
+    for pod in "${pending[@]}"; do
+      restate_clear_pass "$pod" "$pass"
+      r="$(restate_residue "$pod")"
+      last["$pod"]="$r"
+      echo "   $pod read 1 (keys rows scheduled open): $r"
+      if [ "$r" = "0 0 0 0" ]; then cand+=("$pod"); else next+=("$pod"); fi
+    done
+    if [ "${#cand[@]}" -gt 0 ]; then
+      sleep "$RESTATE_ZERO_GAP_S"
+      for pod in "${cand[@]}"; do
+        r="$(restate_residue "$pod")"
+        last["$pod"]="$r"
+        echo "   $pod read 2 after ${RESTATE_ZERO_GAP_S}s (keys rows scheduled open): $r"
+        if [ "$r" = "0 0 0 0" ]; then cleared+=("$pod"); else next+=("$pod"); fi
+      done
+    fi
+    pending=(${next[@]+"${next[@]}"})
+  done
+  echo "   clear after $pass pass(es), two zero reads: ${cleared[*]:-none}"
+}
+
+# ---- Q4: topics, one exec per broker -----------------------------------------
+# quick_trim_script TOPIC... -> a POSIX sh script on stdout, run inside the
+# broker pod. No `set -e`: every step's rc is recorded. For each topic it reads
+# cleanup.policy, widens a pure `compact` to `compact,delete`, trims every
+# partition to the end, ALWAYS attempts to restore what it read, and prints
+#   POLICY <topic> <before> <after>
+#   PART <topic> <partition> <logstart> <hw>     (read after the trim)
+#   FAIL <topic> <step> <rc>                     (step: policy-read|alter|trim|restore)
+# and a final DONE line, so a truncated run is never mistaken for a clean one.
+quick_trim_script() {
+  local t list=""
+  for t in "$@"; do list="${list:+$list }$t"; done
+  printf 'TOPICS="%s"\n' "$list"
+  cat <<'PODSCRIPT'
+T=""
+command -v timeout >/dev/null 2>&1 && T="timeout 60"
+pol() { rpk topic describe "$1" -c 2>/dev/null | awk '$1=="cleanup.policy"{print $2}'; }
+for t in $TOPICS; do
+  before=$(pol "$t")
+  widened=0
+  alter_ok=1
+  [ -z "$before" ] && echo "FAIL $t policy-read 1"
+  if [ "$before" = "compact" ]; then
+    widened=1
+    $T rpk topic alter-config "$t" --set cleanup.policy=compact,delete --no-confirm >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo "FAIL $t alter $rc"; alter_ok=0; fi
+  fi
+  if [ "$alter_ok" = 1 ]; then
+    $T rpk topic trim-prefix "$t" -o end --no-confirm >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo "FAIL $t trim $rc"; fi
+  fi
+  if [ "$widened" = 1 ]; then
+    $T rpk topic alter-config "$t" --set cleanup.policy="$before" --no-confirm >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo "FAIL $t restore $rc"; fi
+  fi
+  after=$(pol "$t")
+  echo "POLICY $t ${before:-?} ${after:-?}"
+  rpk topic describe "$t" -p 2>/dev/null | awk -v t="$t" 'NR > 1 && $1 ~ /^[0-9]+$/ { print "PART", t, $1, $(NF - 1), $NF }'
+done
+echo DONE
+PODSCRIPT
+}
+
+# quick_parse_trim_output POD FILE -- HALT on a config left changed (any
+# alter/restore FAIL, any POLICY before != after) or on output that never
+# reached DONE; everything else is residue, collected for the end banner.
+quick_parse_trim_output() {
+  local pod="$1" file="$2" kind a b c d done_seen=false
+  local -a halts=() residue=()
+  local -A part_residue=() trim_rc=()
+  while read -r kind a b c d; do
+    case "$kind" in
+      POLICY)
+        [ "$b" != "$c" ] && halts+=("$pod/$a: cleanup.policy was '$b', is now '$c'")
+        ;;
+      FAIL)
+        case "$b" in
+          alter|restore) halts+=("$pod/$a: $b step failed (rc=$c)") ;;
+          trim)          trim_rc["$a"]="$c" ;;
+          *)             residue+=("$pod/$a ($b failed, rc=$c)") ;;
+        esac
+        ;;
+      PART)
+        if ! [[ "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]]; then
+          residue+=("$pod/$a/p$b (offsets unreadable)"); part_residue["$a"]=1
+        elif [ "$c" != "$d" ]; then
+          residue+=("$pod/$a/p$b ($((d - c)) left)"); part_residue["$a"]=1
+        fi
+        ;;
+      DONE) done_seen=true ;;
+    esac
+  done < "$file"
+  local t
+  for t in "${!trim_rc[@]}"; do
+    [ -n "${part_residue[$t]:-}" ] || residue+=("$pod/$t (trim failed, rc=${trim_rc[$t]})")
+  done
+  $done_seen || halts+=("$pod: the trim script output ended before DONE (truncated; see $file)")
+  if [ "${#halts[@]}" -gt 0 ]; then
+    halt_reset "quick topics: a topic config was left changed or the trim script did not finish on $pod" \
+      "${halts[@]}" "raw broker output kept at: $file"
+  fi
+  if [ "${#residue[@]}" -gt 0 ]; then QUICK_RESIDUE+=("${residue[@]}"); fi
+  return 0
+}
+
+quick_topics() {
+  echo
+  echo "=== QUICK Q4: topics (one exec per broker: widen if compact, trim to end, restore) ==="
+  if $SKIP_TOPICS; then
+    skip_warning "TOPICS" \
+      "No partition is trimmed; every topic keeps its contents, and phase 5 would\n    republish the pre-reset fleet from the untrimmed changelogs."
+    return 0
+  fi
+  # Source-first, same as phase 4: a destination trimmed before its source
+  # takes the source's forwarded writes on offsets the trim already passed.
+  bridge_graph
+  topo_sort_redpanda_pods
+  mkdir -p "$TOPIC_CAPTURE_DIR"
+  echo "raw broker output kept (evidence, not scratch): $TOPIC_CAPTURE_DIR"
+
+  local pod topic script out rc n
+  local -a topics safe
+  for pod in "${REDPANDA_PODS[@]}"; do
+    # shellcheck disable=SC2206
+    topics=(${QUICK_BROKER_TOPICS[$pod]:-})
+    safe=()
+    for topic in ${topics[@]+"${topics[@]}"}; do
+      if [[ "$topic" =~ ^[A-Za-z0-9._-]+$ ]]; then safe+=("$topic")
+      else QUICK_RESIDUE+=("$pod/$topic (name not script-safe, not trimmed)"); fi
+    done
+    n="${#safe[@]}"
+    if [ "$n" -eq 0 ]; then echo "  $pod: no target topics"; continue; fi
+    script="$(quick_trim_script "${safe[@]}")"
+    echo "-> quick trim on $pod: $n topic(s), ONE exec"
+    if $DRY_RUN; then
+      echo "   [dry-run] would run: kubectl exec -n $NS $pod -c redpanda -- sh -c <script>"
+      echo "   --- generated script for $pod ---"
+      printf '%s\n' "$script"
+      echo "   --- end script ---"
+      continue
+    fi
+    out="$TOPIC_CAPTURE_DIR/$pod.quick-trim.out"
+    rc=0
+    kubectl exec -n "$NS" "$pod" -c redpanda -- sh -c "$script" > "$out" 2> "$out.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "   exec exit $rc (stderr in $out.err); judging by what was printed" >&2
+    fi
+    quick_parse_trim_output "$pod" "$out"
+    echo "  $pod: $(grep -c '^POLICY ' "$out" || true) topic(s) processed"
+  done
+}
+
+# ---- Q6: stores, one psql per Postgres pod ------------------------------------
+# quick_refuse_excluded POD runs in the main shell (a halt inside $(...) would
+# only end the subshell). quick_stores_sql -> one DO block: for every table in
+# TABLES, a DELETE
+# guarded by to_regclass (a table the instance lacks is skipped in SQL, not
+# probed with another exec). Same rules as delete_table / phase6_stores: DELETE
+# never TRUNCATE; a table in EXCLUDED_TABLES (audit_log, the delivery ledger)
+# is refused and halts. Heartbeat tables (HEARTBEAT_TABLES) are deleted like
+# the rest; phase 8, which quick skips, is where their special reading lives.
+quick_refuse_excluded() {
+  local pod="$1" table excl
+  for table in "${TABLES[@]}"; do
+    for excl in "${EXCLUDED_TABLES[@]}"; do
+      if [ "$table" = "$excl" ]; then
+        halt_reset "refused to delete from $table on $pod: it is in EXCLUDED_TABLES (ADR-0029)"           "$table on $pod untouched"
+      fi
+    done
+  done
+}
+
+quick_stores_sql() {
+  local table
+  echo 'DO $q$'
+  echo 'DECLARE n bigint; total bigint := 0; tables_n int := 0;'
+  echo 'BEGIN'
+  for table in "${TABLES[@]}"; do
+    echo "  IF to_regclass('public.${table}') IS NOT NULL THEN DELETE FROM ${table}; GET DIAGNOSTICS n = ROW_COUNT; total := total + n; tables_n := tables_n + 1; RAISE NOTICE 'RESET_TABLE ${table} %', n; END IF;"
+  done
+  echo "  RAISE NOTICE 'RESET_TOTAL % %', total, tables_n;"
+  echo 'END'
+  echo '$q$;'
+}
+
+quick_stores() {
+  echo
+  echo "=== QUICK Q6: stores (one psql per pod; DELETE FROM, never TRUNCATE, never audit_log) ==="
+  if $SKIP_STORES; then
+    skip_warning "STORES" \
+      "No table is touched; every projector table keeps its pre-reset rows."
+    return 0
+  fi
+  local pod sql out rc line total tables_n
+  for pod in "${POSTGRES_PODS[@]}"; do
+    quick_refuse_excluded "$pod"
+    sql="$(quick_stores_sql "$pod")"
+    echo "-> DELETE FROM ${#TABLES[@]} candidate table(s) on $pod, ONE psql"
+    if $DRY_RUN; then
+      echo "   [dry-run] would run: kubectl exec -i -n $NS $pod -c postgres -- sh -c 'psql ...' with this SQL on stdin:"
+      printf '%s\n' "$sql"
+      continue
+    fi
+    mkdir -p "$TOPIC_CAPTURE_DIR"
+    out="$TOPIC_CAPTURE_DIR/$pod.quick-stores.out"
+    rc=0
+    printf '%s\n' "$sql" | kubectl exec -i -n "$NS" "$pod" -c postgres -- sh -c \
+      'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q' > "$out" 2>&1 || rc=$?
+    line="$(grep 'RESET_TOTAL' "$out" | tail -1 || true)"
+    if [ "$rc" -ne 0 ] || [ -z "$line" ]; then
+      halt_reset "quick stores: the single psql call on $pod did not complete (exit $rc)" \
+        "no count line was read; output kept at: $out" \
+        "the DELETEs run in one transaction, so $pod is unchanged unless it printed a count"
+    fi
+    total="$(printf '%s\n' "$line" | awk '{print $(NF - 1)}')"
+    tables_n="$(printf '%s\n' "$line" | awk '{print $NF}')"
+    printf '  %-28s deleted %s row(s) from %s table(s)\n' "$pod" "$total" "$tables_n"
+  done
+}
+
+# run_quick_sequence -- the whole quick run. Q1 (discovery) is the top-level
+# discovery this file already did at load. The step order is the point: every
+# writer down first, then Restate, then topics, then the aggregator restart
+# (after the trim, as in a full run), stores, electric, restore.
+run_quick_sequence() {
+  QUICK_T0=$SECONDS
+  quick_banner
+  quick_step "2 quiesce"    quiesce    quick_quiesce_all
+  quick_step "3 restate"    restate    quick_restate
+  quick_step "4 topics"     topics     quick_topics
+  quick_step "5 aggregator" aggregator phase5_aggregator
+  quick_step "6 stores"     stores     quick_stores
+  quick_step "7 electric"   electric   phase7_electric
+  quick_step "9 restore"    restore    phase9_restore_producers
+  PHASE9_DONE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "reset-scenario: producers restored."
+  RUN_COMPLETED=true
+  if [ "$OVERALL_FAIL" -ne 0 ]; then
+    echo "QUICK RESET: a run phase reported a failure (OVERALL_FAIL=$OVERALL_FAIL); see above."
+  fi
+  quick_end_banner
+  exit "$OVERALL_FAIL"
+}
+
 # run_reset_sequence — the whole mutating run, in order: phase 1, pre-flight,
-# phases 2 through 10, the exercise reset record. Quick mode runs this same
-# sequence; the only difference is that the phases named in QUICK_SKIP_PHASES
-# are not run and the record is never written. Kept as a function (called
-# once, from main) so a test can stub the phases and compare the sequence.
+# phases 2 through 10, the exercise reset record. Quick mode hands over to
+# run_quick_sequence (its own, faster steps; no record). Kept as a function
+# (called once, from main) so a test can stub the phases and compare the
+# sequence.
 run_reset_sequence() {
   RESET_RUN=true
   trap 'on_reset_exit' EXIT
-  if $QUICK; then quick_banner; fi
-  if phase_skipped_by_quick "1 baseline"; then
-    echo "(--quick: skipping phase 1 baseline)"
-  else
-    run_phase "1 baseline" phase1_baseline
-  fi
+  if $QUICK; then run_quick_sequence; fi   # exits; never reaches the full sequence
+  run_phase "1 baseline" phase1_baseline
 
   # --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
   # consumer group on a target topic must have a declared owner BEFORE
@@ -4321,7 +4718,7 @@ run_reset_sequence() {
   # so CAPTURED_TOPICS reflects this run's actual topic set, not a stale or
   # guessed one. Unconditional in dry-run too: a dry run that "passes" over an
   # undeclared consumer would print a plan nobody should trust. Also
-  # unconditional in quick mode: it mutates nothing and is safety, not proof.
+  # full-run only: quick mode skips it (see QUICK MODE).
   CURRENT_PHASE="pre-flight"
   phase4_capture_pass
   if ! assert_consumers_declared "${CAPTURED_TOPICS[@]}"; then
@@ -4336,11 +4733,7 @@ run_reset_sequence() {
 
   run_phase "2 quiesce" phase2_quiesce
   run_phase "3 restate" phase3_restate
-  if phase_skipped_by_quick "3b writer census"; then
-    echo "(--quick: skipping phase 3b writer census)"
-  else
-    run_phase "3b writer census" phase3b_writer_census
-  fi
+  run_phase "3b writer census" phase3b_writer_census
   run_phase "4 topics" phase4_topics
   run_phase "5 aggregator" phase5_aggregator
   run_phase "6 stores" phase6_stores
@@ -4350,14 +4743,10 @@ run_reset_sequence() {
   # here (OVERALL_FAIL=1, a non-zero return) does not let `set -e` skip straight
   # to the EXIT trap and leave phase 9 unrun: a failed zero assertion must still
   # get its producers back, exactly like a passing one does.
-  if phase_skipped_by_quick "8 zero assertion"; then
-    echo "(--quick: skipping phase 8 zero assertion)"
-  else
-    CURRENT_PHASE="8 zero assertion"
-    halt_if_injected "8 zero assertion"
-    phase8_zero || true
-    PHASES_DONE+=("8 zero assertion")
-  fi
+  CURRENT_PHASE="8 zero assertion"
+  halt_if_injected "8 zero assertion"
+  phase8_zero || true
+  PHASES_DONE+=("8 zero assertion")
   run_phase "9 restore" phase9_restore_producers
   # Recorded here, right after phase 9 returns, RFC3339 UTC second precision —
   # this is "when producers came back", the T phase 10 measures liveness since.
@@ -4375,21 +4764,8 @@ run_reset_sequence() {
   # dropping records. phase10_subscription_liveness never returns non-zero
   # itself (failures map into OVERALL_FAIL instead), so this stays a bare
   # run_phase call like every other phase.
-  if phase_skipped_by_quick "10 subscription liveness"; then
-    echo "(--quick: skipping phase 10 subscription liveness)"
-  else
-    run_phase "10 subscription liveness" phase10_subscription_liveness
-  fi
+  run_phase "10 subscription liveness" phase10_subscription_liveness
   RUN_COMPLETED=true
-  if $QUICK; then
-    # Quick mode proves nothing and never writes the record. If a run phase
-    # (phase 9) reported a failure, say so instead of claiming cleared state.
-    if [ "$OVERALL_FAIL" -ne 0 ]; then
-      echo "QUICK RESET: a run phase reported a failure (OVERALL_FAIL=$OVERALL_FAIL); see above."
-    fi
-    quick_banner
-    exit "$OVERALL_FAIL"
-  fi
   # A failed/halted reset never writes the record -- a halt never reaches this
   # line (halt_reset exits directly, above), and a completed-but-failing run
   # is refused explicitly here rather than inside the write function, so the
