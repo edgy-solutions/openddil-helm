@@ -42,7 +42,8 @@
 #                         probe.
 #
 # The DIS mapper publishes to its own local broker, so it runs two-term:
-# leave DEST_HOST empty and the reachability term is skipped.
+# leave DEST_HOST empty and the reachability term is skipped. Its metrics
+# port is not the default, so the chart sets METRICS_URL for it.
 #
 # STATE lives in a file because a probe is a fresh process each time and
 # "advanced since last time" needs a last time. Losing the file (pod restart)

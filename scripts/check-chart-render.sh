@@ -2517,6 +2517,80 @@ sys.exit(1 if errs else 0)
 G25PY
 "$PY" "$G25_DIR/live.py" "$G25_DIR/d.yaml" "$G25_DIR/t.yaml" "$G25_DIR/off.yaml" || fail=1
 rm -rf "$G25_DIR"
+echo "guard 26: every Connect relay and the DIS mapper carry the relay-stall liveness probe, reading their own metrics port"
+G26_DIR="$(mktemp -d)"
+render > "$G26_DIR/d.yaml"
+render --set tierNode.enabled=true > "$G26_DIR/t.yaml"
+render --set relayStallProbe.enabled=false --set tierNode.enabled=true > "$G26_DIR/off.yaml"
+cat > "$G26_DIR/stall.py" <<'G26PY'
+import sys, re, yaml
+IMG = re.compile(r"(^|/)redpandadata/connect[:@]")
+def load(p): return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+def hook(d): return "helm.sh/hook" in ((d.get("metadata") or {}).get("annotations") or {})
+def selected(docs):
+    for d in docs:
+        if d.get("kind") != "Deployment" or hook(d): continue
+        spec = (((d.get("spec") or {}).get("template") or {}).get("spec")) or {}
+        for c in spec.get("containers") or []:
+            if IMG.search(str(c.get("image", ""))): yield d, spec, c, docs
+def env(c): return {e["name"]: e.get("value", "") for e in c.get("env") or []}
+def declared_http(cm_name, docs):
+    # True when a mounted connect.yaml sets http.address (so 4195 would NOT be the port).
+    for d in docs:
+        if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == cm_name:
+            for v in (d.get("data") or {}).values():
+                try: y = yaml.safe_load(v)
+                except Exception: continue
+                if isinstance(y, dict) and (y.get("http") or {}).get("address"): return True
+    return False
+def check(l, d, spec, c, docs):
+    n = "Deployment/%s container %s" % (d["metadata"]["name"], c.get("name")); e = []
+    cmd = " ".join((c.get("livenessProbe") or {}).get("exec", {}).get("command") or [])
+    if "/probe/relay-stall-probe.sh" not in cmd: e.append("%s: %s: no exec livenessProbe running /probe/relay-stall-probe.sh" % (l, n))
+    vm = [m for m in c.get("volumeMounts") or [] if m.get("mountPath") == "/probe"]
+    vols = {v["name"]: v for v in spec.get("volumes") or []}
+    cm = ((vols.get(vm[0]["name"], {}) if vm else {}).get("configMap") or {}).get("name", "")
+    if not cm.endswith("-relay-stall-probe"): e.append("%s: %s: no /probe mount from a *-relay-stall-probe configMap (got %r)" % (l, n, cm))
+    ev = env(c); url = ev.get("METRICS_URL")
+    m = re.match(r"https?://[^/:]+:(\d+)/", url) if url else None
+    port = int(m.group(1)) if m else (4195 if not url else None)
+    declared = [p.get("containerPort") for p in c.get("ports") or []]
+    how = ""
+    if port is None: e.append("%s: %s: METRICS_URL %r has no readable port" % (l, n, url))
+    elif declared:
+        how = "metrics port %d, declared %s" % (port, declared)
+        if port not in declared: e.append("%s: %s: METRICS_URL port %d is not a declared containerPort %s (the probe would read nothing and never fire)" % (l, n, port, declared))
+    else:
+        # No containerPort: provable only if the port is Connect's default 4195 and no mounted config moves it.
+        cfgs = [v["configMap"]["name"] for v in vols.values() if v.get("configMap") and "relay-stall" not in v["configMap"]["name"]]
+        if port == 4195 and cfgs and not any(declared_http(x, docs) for x in cfgs):
+            how = "metrics port 4195 (Connect default; no http.address in %s; no containerPort declared)" % ",".join(cfgs)
+        else: e.append("%s: %s: metrics port unproven (port %s, no containerPort declared)" % (l, n, port))
+    dh = ev.get("DEST_HOST", "")
+    if "-redpanda-connect-" in d["metadata"]["name"]:
+        if dh: e.append("%s: %s: the mapper must run two-term, but DEST_HOST=%r" % (l, n, dh))
+        how += "; two-term"
+    elif not dh: e.append("%s: %s: relay has an empty DEST_HOST" % (l, n))
+    else: how += "; DEST_HOST=%s" % dh
+    print("  %s %-9s %s: %s" % ("FAIL" if e else "ok  ", l, n, how)); return e
+errs = []
+for p, l in zip(sys.argv[1:3], ("default", "tierNode")):
+    docs = load(p); items = list(selected(docs)); e = []
+    for d, spec, c, _ in items: e += check(l, d, spec, c, docs)
+    maps = [d for d, _, _, _ in items if "-redpanda-connect-" in d["metadata"]["name"]]
+    if not items: e.append("%s: 0 Connect containers found (vacuous)" % l)
+    if l == "default" and len(maps) != 3: e.append("default: expected 3 mappers, found %d" % len(maps))
+    if l == "tierNode" and not any("uplink" in d["metadata"]["name"] for d, _, _, _ in items): e.append("tierNode: no tier-uplink found")
+    print("  %s %-9s %d Connect container(s), %d mapper(s)" % ("FAIL" if e else "ok  ", l, len(items), len(maps))); errs += e
+items = list(selected(load(sys.argv[3])))
+e = ["control: Deployment/%s container %s still has a livenessProbe" % (d["metadata"]["name"], c.get("name")) for d, _, c, _ in items if c.get("livenessProbe")]
+if not items: e.append("control: 0 containers found (vacuous)")
+print("  %s control relayStallProbe.enabled=false: %d container(s), none with a livenessProbe" % ("FAIL" if e else "ok  ", len(items))); errs += e
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G26PY
+"$PY" "$G26_DIR/stall.py" "$G26_DIR/d.yaml" "$G26_DIR/t.yaml" "$G26_DIR/off.yaml" || fail=1
+rm -rf "$G26_DIR"
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
