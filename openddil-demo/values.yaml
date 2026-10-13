@@ -641,6 +641,16 @@ faustRegional:
 
 # --- HQ services ------------------------------------------------------------
 cmService:
+  # Stall detection -> LIVENESS. /healthz/live on the metrics port answers 503
+  # only when the producer attempted to publish within its window and confirmed
+  # no delivery; see the service's src/producer_health.py for the rule.
+  # periodSeconds x failureThreshold is the real budget; keep it generous.
+  stallProbe:
+    enabled: true
+    initialDelaySeconds: 180
+    periodSeconds: 30
+    failureThreshold: 4
+    port: 9464
   image:
     name: cm-service
     tag: ""
@@ -719,6 +729,16 @@ cmReports:
     source: telemetry_bit
 
 logisticsFusion:
+  # Stall detection -> LIVENESS. /healthz/live on the metrics port answers 503
+  # only when the producer attempted to publish within its window and confirmed
+  # no delivery; see the service's src/producer_health.py for the rule.
+  # periodSeconds x failureThreshold is the real budget; keep it generous.
+  stallProbe:
+    enabled: true
+    initialDelaySeconds: 180
+    periodSeconds: 30
+    failureThreshold: 4
+    port: 9464
   image:
     name: logistics-fusion-service
     tag: ""

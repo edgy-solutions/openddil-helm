@@ -411,6 +411,18 @@ spec:
         - name: cm-service
           image: {{ include "openddil.image" (dict "name" .Values.cmService.image.name "tag" .Values.cmService.image.tag "digest" .Values.cmService.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.cmService.image.pullPolicy "root" .) }}
+          {{- if .Values.cmService.stallProbe.enabled }}
+          # Liveness only: a producer wedge is cured by a restart, not by
+          # removing the pod from endpoints. Rule: src/producer_health.py.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: {{ .Values.cmService.stallProbe.port | int }}
+            initialDelaySeconds: {{ .Values.cmService.stallProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cmService.stallProbe.periodSeconds }}
+            failureThreshold: {{ .Values.cmService.stallProbe.failureThreshold }}
+            timeoutSeconds: 5
+          {{- end }}
           env:
             # cm-service multi-directory baseline support (CM_BASELINES_DIRS)
             # is intentionally NOT wired here. Customer overlays that want to
@@ -829,6 +841,18 @@ spec:
         - name: logistics-fusion
           image: {{ include "openddil.image" (dict "name" .Values.logisticsFusion.image.name "tag" .Values.logisticsFusion.image.tag "digest" .Values.logisticsFusion.image.digest "root" .) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .Values.logisticsFusion.image.pullPolicy "root" .) }}
+          {{- if .Values.logisticsFusion.stallProbe.enabled }}
+          # Liveness only: a producer wedge is cured by a restart, not by
+          # removing the pod from endpoints. Rule: src/producer_health.py.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: {{ .Values.logisticsFusion.stallProbe.port | int }}
+            initialDelaySeconds: {{ .Values.logisticsFusion.stallProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.logisticsFusion.stallProbe.periodSeconds }}
+            failureThreshold: {{ .Values.logisticsFusion.stallProbe.failureThreshold }}
+            timeoutSeconds: 5
+          {{- end }}
           env:
             - name: FUSION_KAFKA_BROKERS
               value: {{ $hqBroker | quote }}

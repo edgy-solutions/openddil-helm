@@ -1425,6 +1425,18 @@ spec:
       containers:
         - name: logistics-fusion
           image: {{ include "openddil.image" (dict "name" $root.Values.logisticsFusion.image.name "tag" $root.Values.logisticsFusion.image.tag "digest" $root.Values.logisticsFusion.image.digest "root" $root) }}
+          {{- if $root.Values.logisticsFusion.stallProbe.enabled }}
+          # Liveness only: a producer wedge is cured by a restart, not by
+          # removing the pod from endpoints. Rule: src/producer_health.py.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: {{ $root.Values.logisticsFusion.stallProbe.port | int }}
+            initialDelaySeconds: {{ $root.Values.logisticsFusion.stallProbe.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.logisticsFusion.stallProbe.periodSeconds }}
+            failureThreshold: {{ $root.Values.logisticsFusion.stallProbe.failureThreshold }}
+            timeoutSeconds: 5
+          {{- end }}
           env:
             # Produces to THIS tier's broker. This single value is what makes
             # severity reachable by a tier-local projector.
@@ -1530,6 +1542,18 @@ spec:
       containers:
         - name: cm-service
           image: {{ include "openddil.image" (dict "name" $root.Values.cmService.image.name "tag" $root.Values.cmService.image.tag "digest" $root.Values.cmService.image.digest "root" $root) }}
+          {{- if $root.Values.cmService.stallProbe.enabled }}
+          # Liveness only: a producer wedge is cured by a restart, not by
+          # removing the pod from endpoints. Rule: src/producer_health.py.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: {{ $root.Values.cmService.stallProbe.port | int }}
+            initialDelaySeconds: {{ $root.Values.cmService.stallProbe.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.cmService.stallProbe.periodSeconds }}
+            failureThreshold: {{ $root.Values.cmService.stallProbe.failureThreshold }}
+            timeoutSeconds: 5
+          {{- end }}
           env:
             - name: CM_KAFKA_BROKERS
               value: {{ $broker | quote }}

@@ -2469,6 +2469,54 @@ sys.exit(1 if errs else 0)
 G24PY
 "$PY" "$G24_DIR/spool.py" "$G24_DIR/d.yaml" "$G24_DIR/t.yaml" "$G24_DIR/off.yaml" || fail=1
 rm -rf "$G24_DIR"
+echo "guard 25: cm-service and logistics-fusion containers carry the stall liveness probe"
+G25_DIR="$(mktemp -d)"
+render > "$G25_DIR/d.yaml"
+render --set tierNode.enabled=true > "$G25_DIR/t.yaml"
+render --set cmService.stallProbe.enabled=false --set logisticsFusion.stallProbe.enabled=false --set tierNode.enabled=true > "$G25_DIR/off.yaml"
+cat > "$G25_DIR/live.py" <<'G25PY'
+import sys, re, yaml
+IMG = re.compile(r"(^|/)(cm-service|logistics-fusion-service)[:@]")
+NAMES = ("cm-service", "logistics-fusion")
+def load(p): return [d for d in yaml.safe_load_all(open(p, encoding="utf-8")) if d]
+def containers(docs, kind):
+    # Hook docs are included: bootstrap Jobs are hooks and are checked by the negative guard.
+    for d in docs:
+        if d.get("kind") != kind: continue
+        spec = (((d.get("spec") or {}).get("template") or {}).get("spec")) or {}
+        for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            m = IMG.search(str(c.get("image", "")))
+            if m: yield d, c, m.group(2)
+def services(docs):
+    # Long-running service containers: kind Deployment, container named cm-service/logistics-fusion, matching image.
+    return [x for x in containers(docs, "Deployment") if x[1].get("name") in NAMES]
+def tally(items):
+    t = {}
+    for _, _, k in items: t[k] = t.get(k, 0) + 1
+    return ", ".join("%d %s" % (v, k) for k, v in sorted(t.items())) or "none"
+errs, jobs = [], 0
+for p, l in zip(sys.argv[1:3], ("default", "tierNode")):
+    items = services(load(p)); e = []
+    for d, c, k in items:
+        h = (c.get("livenessProbe") or {}).get("httpGet") or {}
+        if h.get("path") != "/healthz/live" or h.get("port") != 9464:
+            e.append("%s: Deployment/%s container %s: no livenessProbe httpGet /healthz/live:9464 (got %s)" % (l, d["metadata"]["name"], c.get("name"), h or "none"))
+    if not items: e.append("%s: 0 service containers found (vacuous)" % l)
+    if l == "tierNode" and {k for _, _, k in items} != {"cm-service", "logistics-fusion-service"}:
+        e.append("tierNode: expected both images, found: " + tally(items))
+    j = list(containers(load(p), "Job")); jobs += len(j)
+    e += ["%s: Job/%s container %s must not have a livenessProbe" % (l, d["metadata"]["name"], c.get("name")) for d, c, _ in j if c.get("livenessProbe")]
+    print("  %s %-10s %d Deployment container(s): %s; %d Job container(s) on these images, none probed" % ("FAIL" if e else "ok  ", l, len(items), tally(items), len(j))); errs += e
+items = services(load(sys.argv[3]))
+e = ["control: Deployment/%s container %s still has a livenessProbe" % (d["metadata"]["name"], c.get("name")) for d, c, _ in items if c.get("livenessProbe")]
+if not items: e.append("control: 0 containers found (vacuous)")
+print("  %s control stallProbe.enabled=false: %d container(s), none with a livenessProbe" % ("FAIL" if e else "ok  ", len(items))); errs += e
+if jobs == 0: errs.append("0 Job containers seen on these images (negative check vacuous)")
+for e in errs: print("  FAIL: " + e)
+sys.exit(1 if errs else 0)
+G25PY
+"$PY" "$G25_DIR/live.py" "$G25_DIR/d.yaml" "$G25_DIR/t.yaml" "$G25_DIR/off.yaml" || fail=1
+rm -rf "$G25_DIR"
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
