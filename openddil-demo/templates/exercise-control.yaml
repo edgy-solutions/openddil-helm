@@ -115,19 +115,37 @@ block renders while resetJob is off.
 */}}
 {{- $rj := $root.Values.exerciseControl.resetJob | default dict }}
 {{- $rjOn := $rj.enabled | default false }}
+{{- $rjMode := $rj.mode | default "quick" }}
 {{- $job := dict }}
 {{- $jobSum := dict }}
 {{- if $rjOn }}
-{{- $cmd := list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
+{{- if not (has $rjMode (list "quick" "full")) }}
+{{- fail (printf "exerciseControl.resetJob.mode must be \"quick\" or \"full\", got %q" (toString $rjMode)) }}
+{{- end }}
+{{- if and (eq $rjMode "quick") ($rj.declareUnmeasured | default list) }}
+{{- fail "exerciseControl.resetJob.declareUnmeasured is set, but the quick reset (--quick) refuses --declare-unmeasured; this setting needs exerciseControl.resetJob.mode: full" }}
+{{- end }}
+{{- $cmd := list }}
+{{- $env := list }}
+{{- if eq $rjMode "quick" }}
+{{- $cmd = list "bash" "/opt/openddil/scripts/reset-scenario.sh" "--quick" }}
+{{- $cmd = concat $cmd ($rj.extraArgs | default list) }}
+{{- $env = list
+      (dict "name" "OPENDDIL_EXPECT_CONTEXT" "value" (printf "in-cluster:%s" $root.Release.Namespace))
+      (dict "name" "NS" "value" $root.Release.Namespace)
+      (dict "name" "RELEASE" "value" $root.Release.Name) }}
+{{- else }}
+{{- $cmd = list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
 {{- range $rj.declareUnmeasured | default list }}
 {{- $cmd = concat $cmd (list "--declare-unmeasured" (toString .)) }}
 {{- end }}
 {{- $cmd = concat $cmd ($rj.extraArgs | default list) }}
-{{- $env := list
+{{- $env = list
       (dict "name" "OPENDDIL_EXPECT_CONTEXT" "value" (printf "in-cluster:%s" $root.Release.Namespace))
       (dict "name" "EXERCISE_CONTROL_URL" "value" (printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port))
       (dict "name" "RESTART_SUBJECT" "value" "")
       (dict "name" "POLL_TIMEOUT_S" "value" (toString $rj.pollTimeoutSeconds)) }}
+{{- end }}
 {{- if $rj.haltBeforePhase }}
 {{- $env = append $env (dict "name" "RESET_HALT_BEFORE_PHASE" "value" (toString $rj.haltBeforePhase)) }}
 {{- end }}
@@ -268,6 +286,8 @@ spec:
             {{- if $rjOn }}
             - name: EXERCISE_RESET_JOB_FILE
               value: /etc/exercise-reset-job/job.json
+            - name: EXERCISE_RESET_MODE
+              value: {{ $rjMode | quote }}
             {{- end }}
           ports:
             - containerPort: {{ $root.Values.exerciseControl.port }}

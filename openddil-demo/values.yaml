@@ -1997,20 +1997,27 @@ exerciseControl:
   # service gains a "reset" op (not an adapter op) that creates a Job from a
   # template this chart renders into a ConfigMap. When the adapter has a
   # pause op, the press sends it first; a failed pause refuses the reset and
-  # creates no Job, so the reset never runs under a live simulator. The Job runs scripts/restart-exercise.sh from the reset-runner
-  # image in its in-cluster mode: the same cluster guard (the expected context
-  # is in-cluster:<release namespace>), the same halt semantics, and the
-  # restart still goes through control's own gate. The Job never retries
-  # (backoffLimit 0), so a halted reset stays halted and its log shows why;
-  # one reset runs at a time. The scripts are versioned with the image, so pin
-  # it by digest together with the chart.
+  # creates no Job, so the reset never runs under a live simulator.
+  # By default (mode: quick) the button runs the quick reset: about a minute,
+  # NOT MEASURED, no record, and the exercise is left paused; the operator
+  # presses Resume or Restart when ready. mode: full runs the measured reset
+  # plus the gated restart (scripts/restart-exercise.sh); it is the only mode
+  # that accepts declareUnmeasured. Automation normally runs
+  # restart-exercise.sh from a shell instead of using this button. The Job runs
+  # from the reset-runner image in its in-cluster mode: the same cluster guard
+  # (the expected context is in-cluster:<release namespace>) and, in full mode,
+  # the same halt semantics, with the restart going through control's own gate.
+  # The Job never retries (backoffLimit 0), so a halted reset stays halted and
+  # its log shows why; one reset runs at a time. The scripts are versioned with
+  # the image, so pin it by digest together with the chart.
   resetJob:
     enabled: false
+    mode: quick                # quick | full (see above); any other value fails the render
     # Follows global.imageRegistry / global.imagePrefix like the other OpenDDIL
     # images. A non-empty `repository` is a full override, kept for
     # compatibility and used verbatim.
     image: {name: reset-runner, repository: "", tag: latest, digest: "", pullPolicy: IfNotPresent}
-    declareUnmeasured: []      # each -> "--declare-unmeasured <name>"
+    declareUnmeasured: []      # each -> "--declare-unmeasured <name>"; mode: full only
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
     activeDeadlineSeconds: 1800

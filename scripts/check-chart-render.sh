@@ -1462,12 +1462,13 @@ if paths != ["/rewind", "/run"]:
 print("  ok   [14c2]: restart call list renders in order: " + str(paths))
 ' || fail=1
 
-# 14d-14g: the reset Job (exerciseControl.resetJob). One checker, four modes.
+# 14d-14g: the reset Job (exerciseControl.resetJob). One checker, five modes.
+# 14e is the default (quick); 14e2 is mode=full, today's restart command.
 # 14d is the absence side only: with resetJob off nothing reset-related may
 # render. That the control Deployment and NetworkPolicy are byte-identical to
 # the previous chart is proven by diffing two renders in the acceptance run,
 # not here.
-g14_reset_check() {  # $1 = mode (off|on|halt|declare); the rest are helm args
+g14_reset_check() {  # $1 = mode (off|on|full|halt|declare); the rest are helm args
   local mode="$1"; shift
   render --namespace ns9 --set releasability.enabled=true \
          --set exerciseControl.enabled=true \
@@ -1482,7 +1483,7 @@ by = {(d.get("kind"), (d.get("metadata") or {}).get("name")): d for d in docs}
 fail = False
 def bad(msg):
     global fail
-    print("  FAIL [14" + {"off": "d", "on": "e", "halt": "f", "declare": "g"}[mode] + "]: " + msg)
+    print("  FAIL [14" + {"off": "d", "on": "e", "full": "e2", "halt": "f", "declare": "g"}[mode] + "]: " + msg)
     fail = True
 ctl = by.get(("Deployment", "t-exercise-control")) or {}
 pod = ((ctl.get("spec") or {}).get("template") or {}).get("spec") or {}
@@ -1495,6 +1496,8 @@ if mode == "off":
         bad("resetJob off but the control Deployment has a serviceAccountName")
     if "EXERCISE_RESET_JOB_FILE" in cenv:
         bad("resetJob off but the control Deployment carries EXERCISE_RESET_JOB_FILE")
+    if "EXERCISE_RESET_MODE" in cenv:
+        bad("resetJob off but the control Deployment carries EXERCISE_RESET_MODE")
     if not fail:
         print("  ok   [14d]: resetJob off: no reset object, no serviceAccountName on control")
     sys.exit(1 if fail else 0)
@@ -1503,7 +1506,7 @@ job = None
 cm = by.get(("ConfigMap", "t-exercise-reset-job"))
 if cm:
     job = json.loads(cm["data"]["job.json"])
-if mode == "on":
+if mode in ("on", "full"):
     for k, n in [("ServiceAccount", "t-exercise-reset"), ("Role", "t-exercise-reset"),
                  ("RoleBinding", "t-exercise-reset"), ("ServiceAccount", "t-exercise-control"),
                  ("Role", "t-exercise-control"), ("RoleBinding", "t-exercise-control"),
@@ -1524,13 +1527,30 @@ if mode == "on":
     if labels.get("app.kubernetes.io/component") != "exercise-reset" or labels.get("app.kubernetes.io/instance") != "t":
         bad("job labels lack component exercise-reset / instance t")
     c0 = spec["template"]["spec"]["containers"][0]
-    if c0["command"][:2] != ["bash", "/opt/openddil/scripts/restart-exercise.sh"]:
-        bad("command does not start with bash restart-exercise.sh: " + str(c0["command"][:2]))
     jenv = {e["name"]: e.get("value") for e in c0["env"]}
     if jenv.get("OPENDDIL_EXPECT_CONTEXT") != "in-cluster:ns9":
         bad("OPENDDIL_EXPECT_CONTEXT is " + str(jenv.get("OPENDDIL_EXPECT_CONTEXT")))
-    if "RESTART_SUBJECT" not in jenv:
-        bad("no RESTART_SUBJECT env")
+    if mode == "on":
+        if c0["command"] != ["bash", "/opt/openddil/scripts/reset-scenario.sh", "--quick"]:
+            bad("default command is not the quick reset: " + str(c0["command"]))
+        if jenv.get("NS") != "ns9" or jenv.get("RELEASE") != "t":
+            bad("quick env lacks NS=ns9 / RELEASE=t: " + str(jenv))
+        for k in ("EXERCISE_CONTROL_URL", "RESTART_SUBJECT", "POLL_TIMEOUT_S"):
+            if k in jenv:
+                bad("quick env carries " + k)
+        if cenv.get("EXERCISE_RESET_MODE") != "quick":
+            bad("control EXERCISE_RESET_MODE is " + str(cenv.get("EXERCISE_RESET_MODE")))
+    else:
+        if c0["command"][:2] != ["bash", "/opt/openddil/scripts/restart-exercise.sh"]:
+            bad("full command does not start with bash restart-exercise.sh: " + str(c0["command"][:2]))
+        if c0["command"][2:] != ["--release", "t", "--namespace", "ns9"]:
+            bad("full command args differ from today: " + str(c0["command"][2:]))
+        if "RESTART_SUBJECT" not in jenv or "EXERCISE_CONTROL_URL" not in jenv or "POLL_TIMEOUT_S" not in jenv:
+            bad("full env lacks the restart env: " + str(jenv))
+        if "NS" in jenv or "RELEASE" in jenv:
+            bad("full env carries NS/RELEASE")
+        if cenv.get("EXERCISE_RESET_MODE") != "full":
+            bad("control EXERCISE_RESET_MODE is " + str(cenv.get("EXERCISE_RESET_MODE")))
     if "RESET_HALT_BEFORE_PHASE" in jenv:
         bad("RESET_HALT_BEFORE_PHASE is set by default")
     if cenv.get("EXERCISE_RESET_JOB_FILE") != "/etc/exercise-reset-job/job.json":
@@ -1546,7 +1566,10 @@ if mode == "on":
     if "exercise-reset" not in froms:
         bad("NetworkPolicy has no exercise-reset ingress")
     if not fail:
-        print("  ok   [14e]: resetJob on: 6 RBAC objects + ConfigMap; job.json is a Job (backoffLimit 0, Never, in-cluster:ns9); control env/mount/SA; NetworkPolicy admits the Job")
+        if mode == "on":
+            print("  ok   [14e]: resetJob on (default quick): reset-scenario.sh --quick, NS/RELEASE env, no restart env; 6 RBAC objects + ConfigMap; job.json is a Job (backoffLimit 0, Never, in-cluster:ns9); control env/mount/SA; NetworkPolicy admits the Job")
+        else:
+            print("  ok   [14e2]: resetJob mode=full: restart-exercise.sh --release t --namespace ns9 with the restart env; control EXERCISE_RESET_MODE=full")
     sys.exit(1 if fail else 0)
 if job is None:
     bad("no job.json")
@@ -1569,8 +1592,26 @@ sys.exit(1 if fail else 0)
 }
 g14_reset_check off
 g14_reset_check on --set exerciseControl.resetJob.enabled=true
+g14_reset_check full --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=full
 g14_reset_check halt --set exerciseControl.resetJob.enabled=true --set-string exerciseControl.resetJob.haltBeforePhase=2
-g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}'
+g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=full --set 'exerciseControl.resetJob.declareUnmeasured={a}'
+# 14e3/14e4: refusals at render time, naming the cause.
+G14N_OUT=$(mktemp)
+if helm template t "$CHART" --namespace ns9 --set releasability.enabled=true --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api --set exerciseControl.adapter.operations.pause.method=POST --set exerciseControl.adapter.operations.pause.path=/pause --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}' >"$G14N_OUT" 2>&1; then
+  echo "  FAIL [14e3]: mode=quick with declareUnmeasured rendered"; fail=1
+elif grep -q -- '--declare-unmeasured' "$G14N_OUT" && grep -q 'mode: full' "$G14N_OUT"; then
+  echo "  ok   [14e3]: mode=quick with declareUnmeasured is refused, naming --declare-unmeasured and mode: full"
+else
+  echo "  FAIL [14e3]: render failed but the message does not name the cause"; fail=1
+fi
+if helm template t "$CHART" --namespace ns9 --set releasability.enabled=true --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api --set exerciseControl.adapter.operations.pause.method=POST --set exerciseControl.adapter.operations.pause.path=/pause --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=bogus >"$G14N_OUT" 2>&1; then
+  echo "  FAIL [14e4]: an unknown resetJob.mode rendered"; fail=1
+elif grep -q 'resetJob.mode' "$G14N_OUT"; then
+  echo "  ok   [14e4]: an unknown resetJob.mode is refused, naming resetJob.mode"
+else
+  echo "  FAIL [14e4]: render failed but the message does not name resetJob.mode"; fail=1
+fi
+rm -f "$G14N_OUT"
 
 # 14h: exercise sequences (exerciseControl.sequences, sequenceEgress).
 G14_BASE=(--set releasability.enabled=true --set exerciseControl.enabled=true
