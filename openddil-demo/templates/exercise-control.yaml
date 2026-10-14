@@ -153,6 +153,7 @@ block renders while resetJob is off.
 {{- $jobLabels := merge (include "openddil.labels" $root | fromYaml) (include "openddil.selectorLabels" (dict "component" "exercise-reset" "root" $root) | fromYaml) }}
 {{- $podSpec := dict
       "restartPolicy" "Never"
+      "terminationGracePeriodSeconds" (int64 $rj.terminationGracePeriodSeconds)
       "serviceAccountName" (printf "%s-exercise-reset" $root.Release.Name)
       "containers" (list (dict
         "name" "reset"

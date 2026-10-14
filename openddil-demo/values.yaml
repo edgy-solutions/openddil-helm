@@ -2021,6 +2021,7 @@ exerciseControl:
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
     activeDeadlineSeconds: 1800
+    terminationGracePeriodSeconds: 180   # TERM waits out an in-flight exec (<=60 s), then the scale-downs are restored
     ttlSecondsAfterFinished: 86400
     pollTimeoutSeconds: 180    # -> POLL_TIMEOUT_S
     resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}

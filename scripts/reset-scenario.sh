@@ -98,6 +98,13 @@
 # ===========================================================================
 set -euo pipefail
 
+# As PID 1 in the reset Job, bash ignores TERM unless it has a handler, so a
+# Job delete or activeDeadlineSeconds would SIGKILL it after the grace period
+# without restoring the scale-downs. These handlers turn TERM/INT into a
+# normal exit so the EXIT trap (emergency_restore_scales) runs.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 # ---------------------------------------------------------------------------
 # WHICH CLUSTER. Asserted, never inherited. See lib/require-cluster.sh.
 # There is deliberately no --force / escape hatch here, for the same reason
@@ -1366,7 +1373,8 @@ delete_table() {
 restate_sql() {
   # Raw passthrough, kept for callers that only need an exit status.
   local pod="$1" sql="$2"
-  kubectl exec -n "$NS" "$pod" -c restate -- restate sql --json "$sql" 2>/dev/null
+  kubectl exec -n "$NS" "$pod" -c restate -- \
+    timeout "${RESTATE_CMD_TIMEOUT:-60}" restate sql --json "$sql" 2>/dev/null
 }
 
 restate_json() {
@@ -1879,7 +1887,7 @@ RESTATE_KILLED_IDS=()
 restate_unreadable() {
   local pod="$1" what="$2" st err
   st="$(kubectl get pod -n "$NS" "$pod" -o jsonpath='{.status.phase} ready={.status.containerStatuses[0].ready} restarts={.status.containerStatuses[0].restartCount}' 2>&1 || true)"
-  err="$(kubectl exec -n "$NS" "$pod" -c restate -- restate sql --json "select 1" 2>&1 >/dev/null | tail -3 || true)"
+  err="$(kubectl exec -n "$NS" "$pod" -c restate -- timeout "${RESTATE_CMD_TIMEOUT:-60}" restate sql --json "select 1" 2>&1 >/dev/null | tail -3 || true)"
   halt_reset "cannot query Restate on $pod ($what)" \
     "pod: ${st:-unreadable}" \
     "restate sql error: ${err:-none printed}" \
@@ -1888,6 +1896,20 @@ restate_unreadable() {
 
 restate_clear_pass() {
   local pod="$1" pass="$2" raw ids id svc_raw services svc key diag diag_sql
+  local open_n out rc
+  # 0. Backlog guard. Cancelling one id per kubectl exec cannot keep up with a
+  #    Restate that is still working through thousands of open invocations
+  #    (each id can complete between the list and the cancel), so refuse
+  #    before listing anything.
+  open_n="$(restate_count "$pod" "select count(*) as n from sys_invocation where status <> 'completed'")" \
+    || restate_unreadable "$pod" "counting open invocations"
+  [[ "$open_n" =~ ^[0-9]+$ ]] || restate_unreadable "$pod" "counting open invocations"
+  if [ "$open_n" -gt "${RESTATE_MAX_OPEN:-300}" ]; then
+    halt_reset "Restate on $pod has $open_n open invocations (limit ${RESTATE_MAX_OPEN:-300})" \
+      "Pod $pod has $open_n open invocations; the limit is ${RESTATE_MAX_OPEN:-300}." \
+      "Restate is still working through a backlog, so one-at-a-time cancels cannot keep up." \
+      "Remedy: re-run with --skip-restate (chart: exerciseControl.resetJob.extraArgs=[--skip-restate]) so topics and stores clear first, then wipe Restate with a helm upgrade that sets restate.ephemeralOnUpgrade=true"
+  fi
   # 1. Open invocations (the scheduled timers, plus any running or backing
   #    off that would re-arm). An id seen open here for the first time in
   #    this pod's run is cancelled, same as always. An id seen open again,
@@ -1916,10 +1938,10 @@ restate_clear_pass() {
         # the pass — the re-read decides, same reasoning as cancel's fallback.
         echo "   CLI kill failed for $id on $pod — falling back to admin API (PATCH)" >&2
         if ! kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
-               "curl -s -X PATCH http://localhost:9070/invocations/$id/kill"; then
+               "curl -s -m ${RESTATE_CURL_TIMEOUT:-30} -X PATCH http://localhost:9070/invocations/$id/kill"; then
           echo "   PATCH kill fallback failed for $id on $pod — falling back to DELETE" >&2
           kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
-            "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=kill'" || true
+            "curl -s -m ${RESTATE_CURL_TIMEOUT:-30} -X DELETE 'http://localhost:9070/invocations/$id?mode=kill'" || true
         fi
       fi
       RESTATE_KILLED_IDS+=("$id")
@@ -1927,15 +1949,23 @@ restate_clear_pass() {
     fi
     echo "-> cancel invocation $id on $pod"
     # Same -y / timeout reasoning as the state clear below: no tty here.
-    if ! kubectl exec -n "$NS" "$pod" -c restate -- \
-           timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$id"; then
+    out="$(kubectl exec -n "$NS" "$pod" -c restate -- \
+           timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$id" 2>&1)" && rc=0 || rc=$?
+    [ -z "$out" ] || echo "$out"
+    if [ "$rc" -ne 0 ] && [[ "$out" == *"No invocations found"* ]]; then
+      # Completed between the list and the cancel: nothing to cancel, nothing
+      # to escalate to kill, and no admin-API retry.
+      echo "   already completed: $id on $pod"
+      continue
+    fi
+    if [ "$rc" -ne 0 ]; then
       # Admin-API fallback, the exact syntax measured working in
       # FINDING-2026-09-26-no-asset-eviction.md. An id that completed between
       # the read and the cancel (a timer that fired and re-armed under a new
       # id) fails both: harmless, because the re-read sees the new id.
       echo "   CLI cancel failed for $id on $pod — falling back to admin API" >&2
       kubectl exec -n "$NS" "$pod" -c restate -- sh -c \
-        "curl -s -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'" || true
+        "curl -s -m ${RESTATE_CURL_TIMEOUT:-30} -X DELETE 'http://localhost:9070/invocations/$id?mode=cancel'" || true
     fi
     RESTATE_CANCELLED_IDS["$key"]="$pass"
   done
@@ -2001,6 +2031,9 @@ restate_clear_pass() {
 # clear every service's state anyway.
 # ===========================================================================
 RESTATE_CLEAR_MAX_PASSES="${RESTATE_CLEAR_MAX_PASSES:-5}"
+RESTATE_MAX_OPEN="${RESTATE_MAX_OPEN:-300}"
+RESTATE_CURL_TIMEOUT="${RESTATE_CURL_TIMEOUT:-30}"
+RESTATE_CMD_TIMEOUT="${RESTATE_CMD_TIMEOUT:-60}"
 RESTATE_ZERO_GAP_S="${RESTATE_ZERO_GAP_S:-5}"
 
 phase3_restate() {

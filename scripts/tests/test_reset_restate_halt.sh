@@ -256,7 +256,7 @@ out="$( (
 # printed; it must halt naming the pod, its status and the CLI's error.
 seed pod-f 2; seed pod-g 2; touch "$M/pod-g.down"
 eval "$(declare -f restate_json | sed '1,2s/^{/{ [ -e "$M\/$1.down" ] \&\& return 1;/')"
-eval "$(declare -f kubectl | sed '1,2s/^{/{ case "$*" in *"get pod -n openddil pod-g"*) echo "Running ready=false restarts=7"; return 0;; *"pod-g -c restate -- restate sql"*) echo "error: connection refused" >\&2; return 1;; esac;/')"
+eval "$(declare -f kubectl | sed '1,2s/^{/{ case "$*" in *"get pod -n openddil pod-g"*) echo "Running ready=false restarts=7"; return 0;; *"pod-g -c restate -- "*"restate sql"*) echo "error: connection refused" >\&2; return 1;; esac;/')"
 RESTATE_PODS=(pod-f pod-g)
 out="$( (
   set -e
