@@ -133,7 +133,8 @@ block renders while resetJob is off.
 {{- $env = list
       (dict "name" "OPENDDIL_EXPECT_CONTEXT" "value" (printf "in-cluster:%s" $root.Release.Namespace))
       (dict "name" "NS" "value" $root.Release.Namespace)
-      (dict "name" "RELEASE" "value" $root.Release.Name) }}
+      (dict "name" "RELEASE" "value" $root.Release.Name)
+      (dict "name" "RESTART_SUBJECT" "value" "") }}
 {{- else }}
 {{- $cmd = list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
 {{- range $rj.declareUnmeasured | default list }}

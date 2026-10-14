@@ -1535,9 +1535,13 @@ if mode in ("on", "full"):
             bad("default command is not the quick reset: " + str(c0["command"]))
         if jenv.get("NS") != "ns9" or jenv.get("RELEASE") != "t":
             bad("quick env lacks NS=ns9 / RELEASE=t: " + str(jenv))
-        for k in ("EXERCISE_CONTROL_URL", "RESTART_SUBJECT", "POLL_TIMEOUT_S"):
+        for k in ("EXERCISE_CONTROL_URL", "POLL_TIMEOUT_S"):
             if k in jenv:
                 bad("quick env carries " + k)
+        # The control refuses to start on a template without it: it stamps the
+        # requesting subject there on every Job, whichever reset the Job runs.
+        if "RESTART_SUBJECT" not in jenv:
+            bad("quick env lacks RESTART_SUBJECT (exercise-control refuses the template)")
         if cenv.get("EXERCISE_RESET_MODE") != "quick":
             bad("control EXERCISE_RESET_MODE is " + str(cenv.get("EXERCISE_RESET_MODE")))
     else:
@@ -1567,7 +1571,7 @@ if mode in ("on", "full"):
         bad("NetworkPolicy has no exercise-reset ingress")
     if not fail:
         if mode == "on":
-            print("  ok   [14e]: resetJob on (default quick): reset-scenario.sh --quick, NS/RELEASE env, no restart env; 6 RBAC objects + ConfigMap; job.json is a Job (backoffLimit 0, Never, in-cluster:ns9); control env/mount/SA; NetworkPolicy admits the Job")
+            print("  ok   [14e]: resetJob on (default quick): reset-scenario.sh --quick, NS/RELEASE/RESTART_SUBJECT env, no restart env; 6 RBAC objects + ConfigMap; job.json is a Job (backoffLimit 0, Never, in-cluster:ns9); control env/mount/SA; NetworkPolicy admits the Job")
         else:
             print("  ok   [14e2]: resetJob mode=full: restart-exercise.sh --release t --namespace ns9 with the restart env; control EXERCISE_RESET_MODE=full")
     sys.exit(1 if fail else 0)
