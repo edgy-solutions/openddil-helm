@@ -251,6 +251,27 @@ out="$( (
 { [ "$rc" -eq 1 ] && ! grep -q "RESET HALTED" <<<"$out"; } \
   && pass "E: completed run with phase-8 FAIL exits 1, no halt block" || fail "E: rc=$rc or a halt block on a completed run"
 
+# --- case F: a Restate the CLI cannot query (pod-g). The read used to fail
+# inside a command substitution and end the run under `set -e` with nothing
+# printed; it must halt naming the pod, its status and the CLI's error.
+seed pod-f 2; seed pod-g 2; touch "$M/pod-g.down"
+eval "$(declare -f restate_json | sed '1,2s/^{/{ [ -e "$M\/$1.down" ] \&\& return 1;/')"
+eval "$(declare -f kubectl | sed '1,2s/^{/{ case "$*" in *"get pod -n openddil pod-g"*) echo "Running ready=false restarts=7"; return 0;; *"pod-g -c restate -- restate sql"*) echo "error: connection refused" >\&2; return 1;; esac;/')"
+RESTATE_PODS=(pod-f pod-g)
+out="$( (
+  set -e
+  RESET_RUN=true; PHASES_DONE=("2 quiesce")
+  type on_reset_exit >/dev/null 2>&1 && trap on_reset_exit EXIT
+  run_phase "3 restate" quick_restate
+  echo "PHASE-4-RAN"
+) 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && pass "F: unqueryable Restate — exit 2 (a halt)" || fail "F: unqueryable Restate — exit $rc, expected 2"
+grep -q "cannot query Restate on pod-g (listing open invocations)" <<<"$out" \
+  && pass "F: names pod-g and the read" || fail "F: pod-g / the failing read not named"
+grep -q "pod: Running ready=false restarts=7" <<<"$out" && pass "F: prints the pod status" || fail "F: pod status not printed"
+grep -q "restate sql error: error: connection refused" <<<"$out" && pass "F: prints the CLI error" || fail "F: CLI error not printed"
+grep -q "PHASE-4-RAN" <<<"$out" && fail "F: a later phase ran" || pass "F: no later phase ran"
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "test_reset_restate_halt: ALL PASS"; exit 0; fi
 echo "test_reset_restate_halt: FAILED"; exit 1

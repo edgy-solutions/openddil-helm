@@ -1873,6 +1873,19 @@ RESTATE_KILLED_IDS=()
 # with the list: the list is a snapshot of objects that re-arm themselves,
 # and the re-read in phase3_restate, not this pass, decides whether the pod
 # is clear.
+# restate_unreadable POD WHAT -> halts, naming the pod's state and the CLI's
+# own error. restate_sql drops stderr, so without this a failed read inside a
+# command substitution ended the run under `set -e` with nothing printed.
+restate_unreadable() {
+  local pod="$1" what="$2" st err
+  st="$(kubectl get pod -n "$NS" "$pod" -o jsonpath='{.status.phase} ready={.status.containerStatuses[0].ready} restarts={.status.containerStatuses[0].restartCount}' 2>&1 || true)"
+  err="$(kubectl exec -n "$NS" "$pod" -c restate -- restate sql --json "select 1" 2>&1 >/dev/null | tail -3 || true)"
+  halt_reset "cannot query Restate on $pod ($what)" \
+    "pod: ${st:-unreadable}" \
+    "restate sql error: ${err:-none printed}" \
+    "Check: kubectl -n $NS logs $pod -c restate --tail=50"
+}
+
 restate_clear_pass() {
   local pod="$1" pass="$2" raw ids id svc_raw services svc key diag diag_sql
   # 1. Open invocations (the scheduled timers, plus any running or backing
@@ -1880,7 +1893,8 @@ restate_clear_pass() {
   #    this pod's run is cancelled, same as always. An id seen open again,
   #    after THIS pod already cancelled it in an earlier pass, escalates to
   #    kill: cancel already had its chance and the invocation is still open.
-  raw="$(restate_json "$pod" "select id from sys_invocation where status <> 'completed'")"
+  raw="$(restate_json "$pod" "select id from sys_invocation where status <> 'completed'")" \
+    || restate_unreadable "$pod" "listing open invocations"
   mapfile -t ids < <(json_field "$raw" "id")
   for id in "${ids[@]}"; do
     key="$pod|$id"
@@ -1927,7 +1941,8 @@ restate_clear_pass() {
   done
 
   # 2. Services with any state, cleared only after their timers are cancelled.
-  svc_raw="$(restate_json "$pod" "select service_name, count(distinct service_key) as n from state group by service_name")"
+  svc_raw="$(restate_json "$pod" "select service_name, count(distinct service_key) as n from state group by service_name")" \
+    || restate_unreadable "$pod" "listing services with state"
   mapfile -t services < <(json_field "$svc_raw" "service_name")
   for svc in "${services[@]}"; do
     echo "-> clear state for service $svc on $pod"
