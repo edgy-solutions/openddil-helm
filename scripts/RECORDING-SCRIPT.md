@@ -1,9 +1,9 @@
 # Recording script — beat order
 
-Four browser profiles, four logins, two connected beats (the C2 picture; a
-fault report to an action), two cuts, two heals. Roughly 18–22 minutes of
-recording. Every number below was measured on 2026-09-09 unless dated
-otherwise (BEATS 2a and 2b: 2026-10-03); if one disagrees on the day, **stop
+Four browser profiles, four logins, three connected beats (the C2 picture; a
+fault report to an action; an arrival), two cuts, two heals. Roughly 21–25
+minutes of recording. Every number below was measured on 2026-09-09 unless dated
+otherwise (BEATS 2a and 2b: 2026-10-03; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
 and check rather than narrate around it** — that disagreement is the finding.
 Lines marked `<dry run: …>` are placeholders the dry run fills in; do not
 record over one that is still open.
@@ -174,7 +174,9 @@ beats below disagree with what was measured, the measurement is here:
 * **The HQ-attached edge is invisible.** Under a cut HQ keeps edge-03 fresh
   (1–5 s) while the tier edges go stale, but edge-03's only asset is
   unlabelled and shown to no one, so no screen draws its row or its
-  HQ-ATTACHED label. Do not promise it on camera.
+  HQ-ATTACHED label. Do not promise it on camera. BEAT 2c declares that
+  asset, but the Restart exercise clears the declaration before the cut
+  beats, so this still holds for them.
 * **BEAT 6 options 1 and 2** are about the relay's backoff after a
   `sever-tier.sh` cut. `--restart-relay-on-heal` brought edge-01 back in
   ~5 s after the heal was proven.
@@ -415,18 +417,93 @@ report was filed at the edge, crossed the boundary once, under a label,
 and came back as an action, and HQ can show which records went out and which
 did not.
 
-## Between BEAT 2b and BEAT 3 — Restart exercise (off camera, ~13 min)
+## BEAT 2c — Arrival: something observed becomes a fleet asset (~3 min)
+
+Connected; no cut. Screens: the **hub, maintainer view, edge-03 selected**
+(`<hub-host>/?role=maintainer&edge=edge-03`, Ada, `operator.atlantia`) and
+**HQ**. edge-03 has no screen of its own on the lab; its arrivals are
+answered at the hub, so this view is the edge-03 screen. Run this beat
+before the Restart exercise: the reset clears the declaration and the asset
+is undeclared again afterwards.
+
+There is no "create asset" button anywhere. An asset enters the fleet only
+when a person declares something that has been observed, or confirms that
+something the logistics system of record fielded has arrived.
+
+1. **HQ — the unknown is counted.** The ARRIVALS panel, under the fleet
+   summary, reads `edge-03  undeclared 1 · expected 0` (measured 2026-10-15,
+   rev 172, right after the reset). The panel shows counts only, never ids. It is the same record as BEAT 2a's **withheld 1**:
+   observed, unlabelled, and so shown to no one.
+   While the lab's second arrival fixture runs at edge-01, withheld reads
+   **2** and the HQ line for edge-01 reads `undeclared 1 · expected 2 (1
+   overdue)`. That is the other entity; this beat leaves it alone.
+2. **Edge-03 view — the ARRIVALS panel** lists one row: `dis:1:1:1099`,
+   resolved variant **HMMWV-M1151A1**, no expected serial to match it to.
+   One action: **Declare**. `<dry run: the panel and form by eye at the hub;
+   measured so far through the same API the form calls>`.
+3. **Optional, the refusal first.** Bram (`operator.borduria`) declaring it
+   ATL is refused, **403** "originator_nation is not one this subject may
+   declare" (measured 2026-10-15, rev 171). A declarer must be entitled to
+   the nation they assign. Show it only if Bram's profile is already up.
+4. **Ada declares it.** The form is pre-filled from the observation. She
+   picks the unit from the deployment's list, sets nation **ATL**, enters a
+   serial, and leaves the baseline at none: the lab has no baseline for this
+   variant. Submit: **201** (measured 2026-10-15, rev 171). The
+   declaration reached HQ's store in **1 s**. The first labelled sample came
+   at **+11 s**, because the label cache holds for 10 s. The row leaves the
+   panel.
+5. **HQ — the asset is in the fleet.** HQ's labelled count went **20 → 21**,
+   unlabelled **1 → 0**. ARRIVALS reads `edge-03  undeclared 0 · expected 0`
+   (measured 2026-10-15, rev 172, with the declaration in place). **Read
+   at +25 s or later:** one read at +12 s was
+   still one sample behind.
+6. **HQ — the C2 picture.** The egress pane for the C2 destination: the
+   liaison's **12 / 8 / 20 / withheld 1** became **13 / 8 / 21 / withheld 0**,
+   and Ada's **12 / withheld 1** became **13 / 0**. The record that was
+   withheld is now admitted. With the second fixture running, every
+   unlabelled and withheld count is one higher, before and after. TAK: `<dry run: the device's track count after
+   the declaration; one more ATL track is expected>`.
+7. **Who declared it.** The declaration record carries the declarer
+   (`declared_by`). The hub's decision log records the act:
+   `kubectl -n openddil logs deploy/openddil-pep | grep arrival:declare`
+   shows one allow line with `subject`, `asset_id` and the reason
+   `declared; nation=ATL source=declare serial=…`. Show it as an insert.
+   **The C2 track on the device carries the nation label, not the
+   declarer.** Do not say the picture shows who declared it.
+8. **Optional, no second time.** Declaring the same entity again gets
+   **404** "asset is not awaiting declaration at this edge".
+
+Do not point at the region rollup in this beat. After a relabel, the bucket
+it emptied keeps its last count and is not retired, so the rollup counts the
+asset twice (measured 2026-10-15).
+
+**Under a cut** (not on camera; measured 2026-10-15 at edge-01, with a
+second entity matched to an expected serial). The declaration is made at the
+edge's own tier and needs no hub call. During the cut it answered 201, and
+the edge's own view labelled the asset within 25 s. HQ learned of it
+between 30 and 45 s after the heal.
+
+*The beat:* the fleet grew by one because a named person said what an
+observed thing is, under a nation they are entitled to. Until then the hub
+counted it and showed it to no one.
+
+## Between BEAT 2c and BEAT 3 — Restart exercise (off camera, ~13 min)
 
 Sign in as the supervisor and press **Restart exercise** in the exercise
 panel; read the result as in pre-flight steps 3 and 4. Measured 2026-10-10
 (rev 136): the Job took **647 s**, **731 s** on the dry run and **769 s** on the
-round trip after it (**724 s** on the 2026-10-12 dry run, rev 142); verdict
+round trip after it (**724 s** on the 2026-10-12 dry run, rev 142; **792 s** on 2026-10-15,
+rev 172); verdict
 PASS, last line `RESTART SENT (adapter 200)`, one `DECLARED UNMEASURED`.
 Budget ~13 minutes; the spread is in the last phase (waiting for
 subscriptions to show live after the restart). It stops and restarts every simulator labelled
-`openddil.io/role=simulator` (six on the lab, 0 `NOT A PRODUCER`), so every
+`openddil.io/role=simulator` (seven on the lab since 2026-10-15, 0 `NOT A
+PRODUCER`), so every
 schedule starts again from its own t0: the launcher reads `emplaced` from
 its container's start at all three tiers, and BEAT 3m's clock starts here.
+It also clears every arrival declaration and correlation, at every tier
+(measured 2026-10-15: 0 in all four stores), so the BEAT 2c asset is
+undeclared again and BEAT 2c can be run again.
 Then:
 
 * **Reload every screen.** The four profiles stay signed in (no new sign-in
