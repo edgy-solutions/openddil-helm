@@ -100,6 +100,21 @@ jobs:
       - name: Tier config contract
         run: ./scripts/check-tier-config.sh
 
+      # Does the runtime bundle carry every path a bundle-loader copies from it?
+      # A missing COPY renders fine and fails every pod that loads it in Init.
+      - name: Bundle sources
+        run: python scripts/check_bundle_sources.py
+
+      # Red-check: drop one COPY the templates need and require a non-zero exit.
+      - name: Bundle sources red-check
+        run: |
+          grep -v 'declaration-intake.yaml' bundle/Dockerfile > /tmp/Dockerfile.planted
+          if python scripts/check_bundle_sources.py --dockerfile /tmp/Dockerfile.planted; then
+            echo "RED CHECK FAILED: a Dockerfile missing a loaded path passed"
+            exit 1
+          fi
+          echo "red-check green: the missing path was reported"
+
       # Can an air-gapped site actually pull what this chart renders?
       #
       # The mirror script's image list is hand-written and the chart's images
