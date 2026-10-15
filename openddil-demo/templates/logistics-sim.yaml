@@ -48,6 +48,11 @@ data:
 {{- $producesTopics = append $producesTopics "hq/asset-element-telemetry" }}
 {{- end }}
 {{- $producesTopics = concat $producesTopics (list "hq/asset-element-inventory" "hq/parts-availability") }}
+{{- if $cfg.config }}{{- if $cfg.config.fielding }}
+{{- $fieldingSites := list }}
+{{- range $rec := (default (list) $cfg.config.fielding.records) }}{{- $fieldingSites = append $fieldingSites $rec.site }}{{- end }}
+{{- range $site := uniq $fieldingSites }}{{- $producesTopics = append $producesTopics (printf "%s/asset-fielding" $site) }}{{- end }}
+{{- end }}{{- end }}
 {{- $logisticsSimPairs := list }}
 {{- range .Values.edges }}
 {{- $logisticsSimPairs = append $logisticsSimPairs (printf "%s/logistics-sim-%s" .id .id) }}
@@ -79,6 +84,9 @@ metadata:
     # parts stand-in's topic, also a CODE DEFAULT (parts_availability.topic
     # in the service's default config, which this chart does not override);
     # the stand-in always runs, on its own interval, on HQ.
+    # "asset-fielding" is the fielding stand-in's topic (fielding.topic in the
+    # service config), published only when config.fielding.records is set,
+    # one entry per distinct record site, on that site's edge broker.
     openddil.io/produces-topics: {{ join " " $producesTopics | quote }}
 spec:
   replicas: 1
