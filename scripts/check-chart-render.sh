@@ -1191,7 +1191,7 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 # of what it writes:
 #   faust-edge-<e>         the app's four send targets (code defaults in the
 #                          app, pinned here) + its two table changelogs
-#   redpanda-connect-<e>   raw-sensor-stream, effector-events, ingress-dlq
+#   redpanda-connect-<e>   raw-sensor-stream, effector-events, munition-tracks, ingress-dlq
 #   cm-service / fusion    their state topic + tactical-events
 #   egress-gate-c2         every route's sink_topic (c2's + the fixture's)
 #   egress-assembler       every entry's output_topic
@@ -1244,7 +1244,7 @@ for d in docs:
 FAUST_EDGE_SENDS = ["telemetry-latest-state", "asset-telemetry-windows",
                     "tactical-events", "derived-sustainment"]
 FAUST_EDGE_TABLES = ["asset_state", "prognostics_accumulators"]
-CONNECT_SENDS = ["raw-sensor-stream", "effector-events", "ingress-dlq"]
+CONNECT_SENDS = ["raw-sensor-stream", "effector-events", "munition-tracks", "ingress-dlq"]
 TIERS = {"region-east"}
 want = {}
 for name in decl:
@@ -2842,6 +2842,40 @@ if fail:
 print(f"  ok   : {len(decl)} region fan-in topic(s), each in its own broker Job and no other")
 ' || fail=1
 rm -f "$G29_VALUES"
+# 15: redpandaConnect.entityKinds (ADR-0049). The defaults reach every edge
+# Connect container as the env pair; a kind in both sets, or a non-0-255
+# token, fails the render naming the key.
+echo "[15] entity kind split env + validation"
+render | "$PY" -c '
+import sys, yaml
+n = 0
+for d in yaml.safe_load_all(sys.stdin):
+    if not d or d.get("kind") != "Deployment" or "-redpanda-connect-" not in d["metadata"]["name"]:
+        continue
+    c = [c for c in d["spec"]["template"]["spec"]["containers"] if c["name"] == "connect"][0]
+    e = {x["name"]: x.get("value") for x in c.get("env", [])}
+    if e.get("DIS_ADMITTED_ENTITY_KINDS") != "1" or e.get("DIS_TRACK_ENTITY_KINDS") != "2":
+        print("  FAIL [15]: " + d["metadata"]["name"] + " connect env is " + repr((e.get("DIS_ADMITTED_ENTITY_KINDS"), e.get("DIS_TRACK_ENTITY_KINDS"))))
+        sys.exit(1)
+    n += 1
+if n == 0:
+    print("  FAIL [15]: no redpanda-connect Deployment seen"); sys.exit(1)
+print(f"  ok   [15]: {n} edge connect container(s) carry DIS_ADMITTED_ENTITY_KINDS=1, DIS_TRACK_ENTITY_KINDS=2")
+' || fail=1
+g15_fail_check() {
+  local desc="$1" needle="$2"; shift 2
+  local err
+  if err=$(helm template t "$CHART" "$@" 2>&1 >/dev/null); then
+    echo "  FAIL [15]: $desc did not fail the render"; fail=1
+  elif ! printf '%s' "$err" | grep -q "$needle"; then
+    echo "  FAIL [15]: $desc failed, but did not name the reason (expected: $needle)"; fail=1
+  else
+    echo "  ok   [15]: $desc fails the render, naming the reason"
+  fi
+}
+g15_fail_check "entityKinds.track overlapping asset" "must not intersect" --set-string redpandaConnect.entityKinds.track=1
+g15_fail_check "entityKinds token out of range" "not an integer 0-255" --set-string redpandaConnect.entityKinds.track=256
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

@@ -1037,6 +1037,7 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- if not $managed }}{{- $t = append $t "raw-sensor-stream" -}}{{- end -}}
 {{- $t = append $t "tactical-events" -}}
 {{- $t = append $t "effector-events" -}}
+{{- $t = append $t "munition-tracks" -}}
 {{- $t = append $t "link-heartbeat" -}}
 {{- if $managed -}}
 {{- /* The per-element tree stays at the owning edge; its rollup rides asset-telemetry-windows. */ -}}
@@ -1046,7 +1047,7 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "munition-tracks" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
 {{- end }}
 
 {{/*
@@ -1394,7 +1395,7 @@ it with more steps.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-13-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+15-topic consumer-group set (SPEC-consumer-declarations.md Part A).
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1402,7 +1403,7 @@ non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
 back to the image's baked-in root config at
 /app/src/config/projector_config.yaml in the openddil-projector repo. That
 file is this list's source of truth; this is a mirror of it, written once so
-every caller shares one list instead of re-typing 13 names.
+every caller shares one list instead of re-typing 15 names.
 
 Values measured from the live lab census (expected-declared.tsv), since the
 source file lives in a different repo this chart does not vendor. The 13th
@@ -1415,7 +1416,7 @@ config is shared), but their broker has no such topic, so that group sits
 idle there, same as the regional rollups.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1565,6 +1566,15 @@ mappings:
     handler: effector_launch
     table: effector_launch
     consumer_group: tier-projector-effector-launch-{{ $tier.id }}
+    decode_as: json
+    mode: custom
+  # In-flight munition tracks (ADR-0049). mode: custom with no
+  # retention_hours/asset_ttl_hours, as effector_launch above: the handler
+  # owns its own Postgres I/O and ageing rows out is its call, not the pruner's.
+  - topic: munition-tracks
+    handler: munition_track
+    table: munition_track
+    consumer_group: tier-projector-munition-track-{{ $tier.id }}
     decode_as: json
     mode: custom
   - topic: asset-element-telemetry
@@ -1795,6 +1805,7 @@ for spec in \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
   "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "munition-tracks|-p 4 -r 1 -c retention.ms=86400000" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
   "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000 -c compression.type=lz4" \

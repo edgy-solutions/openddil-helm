@@ -124,3 +124,15 @@ topics:
     revisit: >-
       When a launcher is assigned to edge-02, remove edge-02 from the scope
       (and the entry, if no tier is left).
+
+  munition-tracks:
+    status: declared
+    tiers: [edge-02]
+    reason: >-
+      Same shape as effector-events: only a tier with a launcher sees a
+      munition in flight (ADR-0049), and edge-02 has none, so its
+      munition-tracks stays at watermark 0. Edge-01 has a launcher and its
+      topic must flow once that launcher fires. Declared 2026-10-15.
+    revisit: >-
+      When a launcher is assigned to edge-02, remove edge-02 from the scope
+      (and the entry, if no tier is left).

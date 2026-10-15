@@ -1270,6 +1270,7 @@ TABLES=(
   intake_records
   effector_launch
   effector_resupply
+  munition_track
   parts_availability
 )
 # effector_declared_load is deliberately NOT in TABLES. It is the declared

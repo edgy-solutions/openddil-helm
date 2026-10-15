@@ -776,6 +776,8 @@ spec:
               value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
             - name: EFFECTOR_TERMINAL_TIMEOUT_S
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
+            - name: MUNITION_TRACK_SILENCE_S
+              value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
           resources:
             {{- toYaml $root.Values.projector.resources | nindent 12 }}
           volumeMounts:

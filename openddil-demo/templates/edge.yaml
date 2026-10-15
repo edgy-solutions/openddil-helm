@@ -44,6 +44,21 @@
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* redpandaConnect.entityKinds (values.yaml) -- the asset and track kind
+   sets must each be integer 0-255 tokens and must not intersect, or one kind
+   would be both a fleet asset and an in-flight track. */ -}}
+{{- $assetKinds := splitList "," (toString $root.Values.redpandaConnect.entityKinds.asset | replace " " "") }}
+{{- $trackKinds := splitList "," (toString $root.Values.redpandaConnect.entityKinds.track | replace " " "") }}
+{{- range (concat $assetKinds $trackKinds) }}
+{{- if or (not (regexMatch "^[0-9]{1,3}$" .)) (gt (int .) 255) }}
+{{- fail (printf "redpandaConnect.entityKinds: token %q is not an integer 0-255" .) }}
+{{- end }}
+{{- end }}
+{{- range $assetKinds }}
+{{- if has . $trackKinds }}
+{{- fail (printf "redpandaConnect.entityKinds: kind %s is in both asset and track -- the two sets must not intersect" .) }}
+{{- end }}
+{{- end }}
 {{- range .Values.edges }}
 {{- $edge := . }}
 {{- $edgeBroker := printf "%s-redpanda-%s%s:%d" $root.Release.Name $edge.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort) }}
@@ -272,9 +287,10 @@ metadata:
     # this edge's broker and writes the mapped record back to the SAME
     # broker. "raw-sensor-stream" is, like connect-dis-mapper above, a CODE
     # DEFAULT baked into the same connect.yaml, not a value this chart sets.
-    # The same connect.yaml also routes effector PDUs to effector-events and
-    # unparseable records to ingress-dlq on this broker.
-    openddil.io/produces-topics: {{ printf "%s/raw-sensor-stream %s/effector-events %s/ingress-dlq" $edge.id $edge.id $edge.id | quote }}
+    # The same connect.yaml also routes effector PDUs to effector-events,
+    # in-flight munition entities to munition-tracks, and unparseable records
+    # to ingress-dlq on this broker.
+    openddil.io/produces-topics: {{ printf "%s/raw-sensor-stream %s/effector-events %s/munition-tracks %s/ingress-dlq" $edge.id $edge.id $edge.id $edge.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -317,6 +333,11 @@ spec:
           env:
             - name: REDPANDA_BROKER
               value: {{ $edgeBroker | quote }}
+            # DIS entity kinds per ingress path (redpandaConnect.entityKinds).
+            - name: DIS_ADMITTED_ENTITY_KINDS
+              value: {{ $root.Values.redpandaConnect.entityKinds.asset | quote }}
+            - name: DIS_TRACK_ENTITY_KINDS
+              value: {{ $root.Values.redpandaConnect.entityKinds.track | quote }}
             {{- if $eventReportOn }}
             # --- the DIS Event Report -> CmEvent path, this edge's own
             # tier-cm-intake (see $eventReportOn above and dis-event-report
@@ -822,6 +843,8 @@ spec:
               value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
             - name: EFFECTOR_TERMINAL_TIMEOUT_S
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
+            - name: MUNITION_TRACK_SILENCE_S
+              value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
           ports:
             - name: metrics
               containerPort: {{ $root.Values.projector.port }}

@@ -1082,6 +1082,8 @@ spec:
               value: /etc/openddil/effector-declared-load/effector-declared-load.yaml
             - name: EFFECTOR_TERMINAL_TIMEOUT_S
               value: {{ .Values.effectors.terminalTimeoutSeconds | quote }}
+            - name: MUNITION_TRACK_SILENCE_S
+              value: {{ .Values.munitionTracks.silenceSeconds | quote }}
           ports:
             - name: metrics
               containerPort: {{ .Values.projector.port }}

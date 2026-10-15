@@ -515,6 +515,13 @@ sensorIngest:
   entityAssignment: []
 
 redpandaConnect:
+  # DIS entity kinds per ingress path (ADR-0049). `asset`: kinds that may
+  # become fleet assets (kind gate). `track`: kinds routed to the
+  # in-flight munition track path instead. The two sets must not
+  # intersect; render fails if they do.
+  entityKinds:
+    asset: "1"
+    track: "2"
   image:
     repository: docker.redpanda.com/redpandadata/connect
     tag: "4.91.0"
@@ -603,6 +610,12 @@ effectors:
   declaredLoad:
     asset: {}
     variant: {}
+
+munitionTracks:
+  # A track this tier has not heard from for this long becomes `silent`
+  # (ADR-0049). 12 s is the DIS default entity timeout (2.4 x 5 s heartbeat).
+  # Judged on this tier's arrival clock; never a launch outcome.
+  silenceSeconds: 12
 
 # Declared inputs for the frontend move panel. DECLARED and overlay-supplied:
 # doctrinal timings and fuel figures are deployment values, never code
@@ -1780,6 +1793,9 @@ releasability:
     # One row per Resupply Received supply line, labelled from the launcher
     # exactly as effector_launch.
     - effector_resupply
+    # In-flight munition tracks: labelled from the launcher at the projector;
+    # an unjoined row is unlabelled and therefore not served (ADR-0049).
+    - munition_track
     # Joined 2026-09-08. The rollups, labelled by COMPOSITION: the aggregator
     # intersects its contributors' releasable_to over the same snapshot the
     # counts come from, so an aggregate is no more visible than its least
