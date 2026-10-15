@@ -1044,6 +1044,10 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- $t = concat $t (list "asset-declarations" "asset-fielding") -}}
 {{- /* The per-element tree stays at the owning edge; its rollup rides asset-telemetry-windows. */ -}}
 {{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-inventory" "derived-sustainment") -}}
+{{- else -}}
+{{- /* ADR-0050: fielding lands on the fielded-to edge's broker at every edge, so an
+       edge with no tier must bridge it too or the record is stranded there. */ -}}
+{{- $t = append $t "asset-fielding" -}}
 {{- end -}}
 {{- join "," $t -}}
 {{- end }}
