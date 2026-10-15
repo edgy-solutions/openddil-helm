@@ -54,6 +54,11 @@ COPY openddil-demo/dynamic-mappings              /bundle/demo/dynamic-mappings/
 # same as the DIS mapper), gated at install by cmReports.enabled.
 COPY openddil-demo/cm-intake.yaml                /bundle/demo/cm-intake.yaml
 
+# declaration-intake — the arrival declaration record's connect pipeline
+# (ADR-0050 §2). Same convention as cm-intake; every intake's bundle-loader
+# `cp`s this one path, so a missing COPY fails every intake in Init.
+COPY openddil-demo/declaration-intake.yaml       /bundle/demo/declaration-intake.yaml
+
 # Deployment ontology OVERLAY (ADR-0029 §3). Copied on top of
 # contracts/ontology by the chart's bundleInit, so a deployment can declare
 # facts about ITS OWN fleet — releasability labels, first — without those
