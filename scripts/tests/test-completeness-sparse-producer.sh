@@ -72,13 +72,13 @@ case "${1:-}" in
     done
     case "$sql" in
       *"column_name = 'originator_nation'"*)
-        printf 'effector_launch\nsynthetic_asset_table\ntactical_events\n' ;;
+        printf 'effector_launch\nmunition_track\nsynthetic_asset_table\ntactical_events\n' ;;
       *"table_type='BASE TABLE'"*)
-        printf 'effector_launch\nsynthetic_asset_table\ntactical_events\n' ;;
+        printf 'effector_launch\nmunition_track\nsynthetic_asset_table\ntactical_events\n' ;;
       *"column_name IN ('originator_nation','releasable_to')"*)
-        printf 'effector_launch\nsynthetic_asset_table\ntactical_events\n' ;;
+        printf 'effector_launch\nmunition_track\nsynthetic_asset_table\ntactical_events\n' ;;
       *"FILTER (WHERE originator_nation IS NULL)"*)
-        printf 'effector_launch|0|0|0\nsynthetic_asset_table|1|0|0\ntactical_events|0|0|0\n' ;;
+        printf 'effector_launch|0|0|0\nmunition_track|0|0|0\nsynthetic_asset_table|1|0|0\ntactical_events|0|0|0\n' ;;
       *)
         : ;;
     esac
@@ -102,6 +102,7 @@ export OPENDDIL_NAMESPACE="openddil"
 RESULTS_DIR="$(mktemp -d)"
 export OPENDDIL_DERIVE_RESULT="$RESULTS_DIR/derive.result"
 export OPENDDIL_EFFECTOR_CONSUMER_RESULT="$RESULTS_DIR/effector.result"
+export OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT="$RESULTS_DIR/munition-track.result"
 # A deliberately-missing declared-unlabelled file: no asset excuse must
 # participate in a result that is only about the two sparse tables.
 export OPENDDIL_DECLARED_UNLABELLED="$RESULTS_DIR/no-such-declared-unlabelled.yaml"
@@ -136,6 +137,29 @@ write_effector() {
 }
 rm_effector() { rm -f "$OPENDDIL_EFFECTOR_CONSUMER_RESULT"; }
 
+write_munition_track() {
+  local verdict="$1" ns="${2:-openddil}" epoch="${3:-$(date -u +%s)}" group="${4:-projector-munition-track}"
+  {
+    printf 'epoch=%s
+' "$epoch"
+    printf 'verdict=%s
+' "$verdict"
+    printf 'window_s=60
+'
+    printf 'group=%s
+' "$group"
+    printf 'members=1
+'
+    printf 'lag=0
+'
+    printf 'hwm=0
+'
+    printf 'namespace=%s
+' "$ns"
+  } > "$OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT"
+}
+rm_munition_track() { rm -f "$OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT"; }
+
 now="$(date -u +%s)"
 old_epoch=$(( now - 9999 ))   # well past the default 1800s max age
 
@@ -161,6 +185,7 @@ expect_line() {
 # ---------------------------------------------------------------------------
 write_derive COMPLETING openddil "$now"
 write_effector ALIVE openddil "$now" projector-effector-launch
+write_munition_track ALIVE openddil "$now" projector-munition-track
 out_a="$(run_gate)"; rc_a=$?
 expect_line "(a) effector_launch line: SPARSE, producer alive" "$out_a" \
   "effector_launch" "SPARSE, producer effector-launch alive"
@@ -254,6 +279,40 @@ out_i="$(run_gate)"; rc_i=$?
 expect_line "(i) effector_launch UNMEASURED (no group line)" "$out_i"   "effector_launch" "PRODUCER UNMEASURED (effector-launch)"
 [ "$rc_i" -eq 1 ] && pass "(i) gate exit 1" || fail "(i) expected gate exit 1, got $rc_i"
 
+# ---------------------------------------------------------------------------
+# (m1)-(m4): munition_track has its OWN producer. Effector is held ALIVE and
+# fresh throughout, so a pass here could only have come from the
+# munition-track file.
+# ---------------------------------------------------------------------------
+write_derive COMPLETING openddil "$now"
+write_effector ALIVE openddil "$now" projector-effector-launch
+
+write_munition_track ALIVE openddil "$now" projector-munition-track
+out_m1="$(run_gate)"; rc_m1=$?
+expect_line "(m1) munition_track SPARSE, producer alive" "$out_m1"   "munition_track" "SPARSE, producer munition-track alive"
+[ "$rc_m1" -eq 0 ] && pass "(m1) gate exit 0" || fail "(m1) expected gate exit 0, got $rc_m1"
+
+write_munition_track NOT_ALIVE openddil "$now" projector-munition-track
+out_m2="$(run_gate)"; rc_m2=$?
+expect_line "(m2) munition_track PRODUCER STOPPED" "$out_m2"   "munition_track" "PRODUCER STOPPED (munition-track)"
+[ "$rc_m2" -eq 1 ] && pass "(m2) gate exit 1" || fail "(m2) expected gate exit 1, got $rc_m2"
+
+# The honesty property: the effector group's file never answers for this table.
+write_munition_track ALIVE openddil "$now" projector-effector-launch
+out_m3="$(run_gate)"; rc_m3=$?
+expect_line "(m3) munition_track UNMEASURED (effector group)" "$out_m3"   "munition_track" "PRODUCER UNMEASURED (munition-track)"   "result is for group projector-effector-launch, expected projector-munition-track"
+printf '%s
+' "$out_m3" | grep 'munition_track' | grep -qF 'SPARSE'   && fail "(m3) munition_track read green on the effector group" || pass "(m3) munition_track not green"
+[ "$rc_m3" -eq 1 ] && pass "(m3) gate exit 1" || fail "(m3) expected gate exit 1, got $rc_m3"
+
+rm_munition_track
+out_m4="$(run_gate)"; rc_m4=$?
+expect_line "(m4) munition_track UNMEASURED (no file)" "$out_m4"   "munition_track" "PRODUCER UNMEASURED (munition-track)" "no result file"
+printf '%s
+' "$out_m4" | grep 'munition_track' | grep -qF 'SPARSE'   && fail "(m4) munition_track read green with no file" || pass "(m4) munition_track not green"
+expect_line "(m4) effector_launch still SPARSE (producers are separate)" "$out_m4"   "effector_launch" "SPARSE, producer effector-launch alive"
+[ "$rc_m4" -eq 1 ] && pass "(m4) gate exit 1" || fail "(m4) expected gate exit 1, got $rc_m4"
+
 # ===========================================================================
 # Cases (j)-(p): OPENDDIL_EFFECTOR_CONSUMER_RESULT UNSET -- the gate probes
 # each store itself, through a fake probe script that records its argv.
@@ -264,17 +323,19 @@ cat > "$PROBE_DIR/fake-probe.sh" <<'PROBE'
 #!/usr/bin/env bash
 echo "$*" >> "$PROBE_ARGS_FILE"
 echo "FAKE-PROBE-STDOUT"
-group="projector-effector-launch"
+stem="effector-launch"; prev=""
+for a in "$@"; do [ "$prev" = "--producer" ] && stem="$a"; prev="$a"; done
+group="projector-$stem"
 prev=""
 for a in "$@"; do
-  [ "$prev" = "--tier" ] && group="tier-projector-effector-launch-$a"
+  [ "$prev" = "--tier" ] && group="tier-projector-$stem-$a"
   prev="$a"
 done
 ns="openddil"; prev=""
 for a in "$@"; do [ "$prev" = "-n" ] && ns="$a"; prev="$a"; done
 case "${FAKE_PROBE_MODE:-}" in
   alive|wronggroup)
-    [ "$FAKE_PROBE_MODE" = wronggroup ] && group="tier-projector-effector-launch-elsewhere"
+    [ "$FAKE_PROBE_MODE" = wronggroup ] && group="tier-projector-$stem-elsewhere"
     {
       printf 'epoch=%s\nverdict=ALIVE\nwindow_s=1\n' "$(date -u +%s)"
       printf 'group=%s\nmembers=1\nlag=0\nhwm=0\nnamespace=%s\n' "$group" "$ns"
@@ -293,7 +354,7 @@ run_probing() {
   local mode="$1"; shift
   [ "$#" -gt 0 ] || set -- --root-only
   : > "$PROBE_ARGS"
-  env -u OPENDDIL_EFFECTOR_CONSUMER_RESULT TMPDIR="$PROBE_DIR" \
+  env -u OPENDDIL_EFFECTOR_CONSUMER_RESULT -u OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT TMPDIR="$PROBE_DIR" \
     OPENDDIL_EFFECTOR_PROBE="$PROBE_DIR/fake-probe.sh" \
     OPENDDIL_EFFECTOR_PROBE_WINDOW_S=1 PROBE_ARGS_FILE="$PROBE_ARGS" \
     FAKE_PROBE_MODE="$mode" bash "$GATE" -n openddil "$@" 2>"$PROBE_DIR/stderr"
@@ -309,7 +370,11 @@ else fail "(j) probe args wrong: $(cat "$PROBE_ARGS")"; fi
 expect_line "(j) header says per store" "$out_j" "effector probe: per store"
 grep -qF "effector probe (root): exit 0" "$PROBE_DIR/stderr" \
   && pass "(j) stderr names the probe run" || fail "(j) stderr line missing"
-[ "$(grep -c . "$PROBE_ARGS")" -eq 1 ] && pass "(j) probe ran once" || fail "(j) probe ran $(grep -c . "$PROBE_ARGS") times"
+# One probe per sparse producer, once each: effector-launch (no --producer,
+# the default) and munition-track (--producer munition-track).
+[ "$(grep -c . "$PROBE_ARGS")" -eq 2 ] && pass "(j) each producer probed once" || fail "(j) probe ran $(grep -c . "$PROBE_ARGS") times"
+[ "$(grep -c -- '--producer munition-track' "$PROBE_ARGS")" -eq 1 ]   && pass "(j) munition-track probe invoked with --producer" || fail "(j) no --producer munition-track call: $(cat "$PROBE_ARGS")"
+expect_line "(j) munition_track SPARSE via its own probe" "$out_j" "munition_track" "SPARSE, producer munition-track alive"
 # (p)
 printf '%s\n' "$out_j" | grep -qF "FAKE-PROBE-STDOUT" \
   && fail "(p) probe stdout leaked into the gate's stdout" || pass "(p) probe stdout absent from gate stdout"
@@ -341,6 +406,7 @@ if grep -qF -- "--tier edge-01" "$PROBE_ARGS" && grep -qF -- "-n openddil" "$PRO
   pass "(n) probe args: --tier edge-01 and -n openddil"
 else fail "(n) probe args wrong: $(cat "$PROBE_ARGS")"; fi
 expect_line "(n) tier store: SPARSE" "$out_n" "effector_launch" "SPARSE, producer effector-launch alive"
+expect_line "(n) tier store: munition_track SPARSE" "$out_n" "munition_track" "SPARSE, producer munition-track alive"
 
 # (o) caller-set header, from an existing caller-set run
 expect_line "(o) caller-set header" "$out_a" "effector probe: caller-supplied file" "(not re-measured)"

@@ -377,6 +377,13 @@ if [ -f "$EXPECTED_EMPTY" ]; then
       echo "  effector probe: per store (this run measures its own group; OPENDDIL_EFFECTOR_CONSUMER_RESULT not set)"
     fi
   fi
+  if printf '%s\n' "$DECLARED_SPARSE" | cut -f2 | grep -qx 'munition-track'; then
+    if [ -n "${OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT+x}" ]; then
+      echo "  munition-track probe: caller-supplied file ${OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT} (not re-measured)"
+    else
+      echo "  munition-track probe: per store (this run measures its own group; OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT not set)"
+    fi
+  fi
 else
   echo "  declared-empty: NONE — no $EXPECTED_EMPTY"
   echo "                  every empty labelled table will be reported as"
@@ -520,7 +527,9 @@ excused_region_rollup_rows() {
 # `tactical_events`'s producer is check-derive-stage.sh, which asks whether
 # fusion completes invocations. `effector_launch`'s producer is its own
 # projector consumer group, which fusion's verdict says nothing about --
-# check-effector-consumer.sh measures that one instead. producer_state()
+# check-effector-consumer.sh measures that one instead; `munition_track`
+# (ADR-0049) is a third, its own group again (--producer munition-track), and
+# is never answered by the effector group's file. producer_state()
 # below takes the producer name from the entry and reads the matching result
 # file; it used to come from one script for every entry, and now comes per
 # entry (ontology/expected-empty.yaml's `producer:` key).
@@ -536,7 +545,9 @@ excused_region_rollup_rows() {
 # the verdict: the file it writes, read back through the checks below, is.
 # A caller-supplied file is read as before, for every store, and is not
 # re-measured. OPENDDIL_EFFECTOR_PROBE and OPENDDIL_EFFECTOR_PROBE_WINDOW_S
-# override the probe script and its window (seconds, default 60).
+# override the probe script and its window (seconds, default 60). The
+# munition-track twin is OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT, with the
+# file openddil-munition-track-consumer-<store>.result.
 #
 #   empty AND producer completing      -> sparse   (green, with the reason)
 #   empty AND producer not completing  -> stopped  (a finding)
@@ -566,22 +577,51 @@ EFFECTOR_PROBE="${OPENDDIL_EFFECTOR_PROBE:-$(cd "$(dirname "$0")" && pwd)/check-
 EFFECTOR_PROBE_WINDOW_S="${OPENDDIL_EFFECTOR_PROBE_WINDOW_S:-60}"
 EFFECTOR_CONSUMER_MAX_AGE_S="${OPENDDIL_EFFECTOR_CONSUMER_MAX_AGE_S:-1800}"
 
-# The rpk consumer group check-effector-consumer.sh is expected to have
-# measured, AT THIS STORE -- the tier form on a tier run, the root form
-# otherwise. A root run's result naming a tier's group (or vice versa) says
-# nothing about this store's own projector, same reasoning as the namespace
-# check below, one level more specific.
-if [ -n "$TIER" ]; then
-  EFFECTOR_EXPECTED_GROUP="tier-projector-effector-launch-${TIER}"
+if [ -n "${OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT+x}" ]; then
+  MUNITION_RESULT_CALLER_SET=1
 else
-  EFFECTOR_EXPECTED_GROUP="projector-effector-launch"
+  MUNITION_RESULT_CALLER_SET=0
 fi
+MUNITION_TRACK_CONSUMER_RESULT="${OPENDDIL_MUNITION_TRACK_CONSUMER_RESULT:-${TMPDIR:-/tmp}/openddil-munition-track-consumer.result}"
+
+# The rpk consumer group check-effector-consumer.sh is expected to have
+# measured for projector stem $1, AT THIS STORE -- the tier form on a tier
+# run, the root form otherwise. A root run's result naming a tier's group (or
+# vice versa), or another producer's group, says nothing about this store's
+# own projector, same reasoning as the namespace check below, one level more
+# specific.
+expected_group() {
+  if [ -n "$TIER" ]; then
+    echo "tier-projector-$1-${TIER}"
+  else
+    echo "projector-$1"
+  fi
+}
+
+# Run the per-store probe for producer $1 (log label $3) once per gate process, writing
+# result file $2. stdout here is captured by the caller's $(...), so the
+# probe's output goes to a log, never to stdout. The marker (this gate's pid)
+# keeps the probe to once per gate process even though producer_state runs in
+# a subshell.
+run_store_probe() {
+  local producer="$1" file="$2" label="$3" rc=0
+  if [ "$(cat "$file.probed" 2>/dev/null)" != "$$" ]; then
+    rm -f "$file" "$file.probed"
+    if [ -n "$TIER" ]; then
+      OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" --producer "$producer" --tier "$TIER" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
+    else
+      OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" --producer "$producer" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
+    fi
+    printf '%s' "$$" > "$file.probed"
+    echo "  $label probe (${TIER:-root}): exit $rc, log $file.log" >&2
+  fi
+}
 
 producer_state() {
   # $1 = producer name, from the sparse entry's `producer:` key (or the
   # `derive-stage` default). -> "completing" | "not_completing" |
   # "unmeasured:<why>"
-  local producer="$1" result max_age ok_verdict bad_verdict
+  local producer="$1" result max_age ok_verdict bad_verdict expected_grp=""
   case "$producer" in
     derive-stage)
       result="$DERIVE_RESULT"; max_age="$DERIVE_MAX_AGE_S"
@@ -594,23 +634,24 @@ producer_state() {
         # $(...), so the probe's output goes to a log, never to stdout. The
         # marker (this gate's pid) keeps the probe to once per gate process
         # even though producer_state runs in a subshell.
-        local store file rc
-        store="${TIER:-root}"
-        file="${TMPDIR:-/tmp}/openddil-effector-consumer-${store}.result"
-        if [ "$(cat "$file.probed" 2>/dev/null)" != "$$" ]; then
-          rm -f "$file" "$file.probed"
-          rc=0
-          if [ -n "$TIER" ]; then
-            OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" --tier "$TIER" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
-          else
-            OPENDDIL_EFFECTOR_CONSUMER_RESULT="$file" bash "$EFFECTOR_PROBE" -n "$NS" "$EFFECTOR_PROBE_WINDOW_S" >"$file.log" 2>&1 || rc=$?
-          fi
-          printf '%s' "$$" > "$file.probed"
-          echo "  effector probe ($store): exit $rc, log $file.log" >&2
-        fi
+        local file
+        file="${TMPDIR:-/tmp}/openddil-effector-consumer-${TIER:-root}.result"
+        run_store_probe effector-launch "$file" effector
         result="$file"
       fi
       ok_verdict="ALIVE"; bad_verdict="NOT_ALIVE"
+      expected_grp="$(expected_group effector-launch)"
+      ;;
+    munition-track)
+      result="$MUNITION_TRACK_CONSUMER_RESULT"; max_age="$EFFECTOR_CONSUMER_MAX_AGE_S"
+      if [ "$MUNITION_RESULT_CALLER_SET" -eq 0 ]; then
+        local mfile
+        mfile="${TMPDIR:-/tmp}/openddil-munition-track-consumer-${TIER:-root}.result"
+        run_store_probe munition-track "$mfile" munition-track
+        result="$mfile"
+      fi
+      ok_verdict="ALIVE"; bad_verdict="NOT_ALIVE"
+      expected_grp="$(expected_group munition-track)"
       ;;
     *)
       # UNKNOWN PRODUCER IS UNMEASURED, NEVER SPARSE-GREEN. A typo in the
@@ -640,7 +681,7 @@ producer_state() {
   # line: an older derive-stage result written before this line existed is
   # still read exactly as before.
   line_ns="$(sed -n 's/^namespace=//p' "$result" | head -1)"
-  if [ "$producer" = "effector-launch" ] && [ -z "$line_ns" ]; then
+  if [ -n "$expected_grp" ] && [ -z "$line_ns" ]; then
     echo "unmeasured:result names no namespace"
     return
   fi
@@ -649,15 +690,15 @@ producer_state() {
     return
   fi
 
-  # GROUP CHECK (effector-launch only). A tier store's sparse entry is
+  # GROUP CHECK (consumer-group producers only). A tier store's sparse entry is
   # answered only by a result measuring THAT tier's own consumer group; a
   # root run needs the root group. The probe has always written both lines,
   # so here (unlike derive-stage) a missing line is unmeasured, not excused.
-  if [ "$producer" = "effector-launch" ]; then
+  if [ -n "$expected_grp" ]; then
     local line_group
     line_group="$(sed -n 's/^group=//p' "$result" | head -1)"
-    if [ "$line_group" != "$EFFECTOR_EXPECTED_GROUP" ]; then
-      echo "unmeasured:result is for group $line_group, expected $EFFECTOR_EXPECTED_GROUP"
+    if [ "$line_group" != "$expected_grp" ]; then
+      echo "unmeasured:result is for group $line_group, expected $expected_grp"
       return
     fi
   fi
@@ -1147,6 +1188,7 @@ if [ -n "$unmeasured_tables" ]; then
   echo "Run the named producer's probe, then re-run this gate:"
   echo "  derive-stage probe:    bash scripts/check-derive-stage.sh 60"
   echo "  effector-launch probe: bash scripts/check-effector-consumer.sh"
+  echo "  munition-track probe:  bash scripts/check-effector-consumer.sh --producer munition-track"
   echo "Each publishes the result file this gate reads for its own producer."
   exit 1
 fi

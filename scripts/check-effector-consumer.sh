@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# check-effector-consumer.sh — is the effector-launch PROJECTOR CONSUMER alive?
+# check-effector-consumer.sh — is a sparse table's PROJECTOR CONSUMER alive?
+# --producer effector-launch (default) or munition-track; see GROUP AND BROKER.
 # ===========================================================================
 # THE GAP THIS FILLS. `effector_launch` holds one row per DIS Fire. A
 # deployment where nothing has fired has an empty table, and that is the
@@ -39,34 +40,52 @@ fi
 
 NS="${NS:-openddil}"
 REL="${OPENDDIL_RELEASE:-openddil}"
-TOPIC="effector-events"
+PRODUCER="effector-launch"
 TIER=""
 WINDOW=60
 while [ $# -gt 0 ]; do
   case "$1" in
     --tier) TIER="$2"; shift 2 ;;
+    --producer) PRODUCER="$2"; shift 2 ;;
     -n) NS="$2"; shift 2 ;;
     *) WINDOW="$1"; shift ;;
   esac
 done
 
+# One probe, two producers: each sparse table is answered only by the
+# consumer group that writes it, so the producer picks the group stem, topic,
+# table and default result file. munition_track (ADR-0049) reads
+# munition-tracks on its own group; effector-launch's liveness says nothing
+# about it.
+case "$PRODUCER" in
+  effector-launch)
+    TOPIC="effector-events"; STEM="effector-launch"; TABLE="effector_launch"
+    DEFAULT_RESULT="openddil-effector-consumer.result" ;;
+  munition-track)
+    TOPIC="munition-tracks"; STEM="munition-track"; TABLE="munition_track"
+    DEFAULT_RESULT="openddil-munition-track-consumer.result" ;;
+  *)
+    echo "usage: $0 [--producer effector-launch|munition-track] [--tier <id>] [-n <namespace>] [window_s]" >&2
+    exit 2 ;;
+esac
+
 # GROUP AND BROKER, per store. `--tier <id>` reads the group the tier's own
 # projector uses (templates/_helpers.tpl's tierProjectorConfig, consumer_group
-# tier-projector-effector-launch-<id>) on that tier's own broker
+# tier-projector-<stem>-<id>) on that tier's own broker
 # (<release>-redpanda-<id>-0, the same service tier-node.yaml's $broker
 # resolves to). The default (root) reads the root projector's group
-# (projector-effector-launch, openddil-projector's own config) on the root
+# (projector-<stem>, openddil-projector's own config) on the root
 # broker (<release>-redpanda-hq-0) -- same pod naming check-derive-stage.sh's
 # tier rows use, one level up at "hq" instead of a tier id.
 if [ -n "$TIER" ]; then
-  GROUP="tier-projector-effector-launch-${TIER}"
+  GROUP="tier-projector-${STEM}-${TIER}"
   POD="${REL}-redpanda-${TIER}-0"
 else
-  GROUP="projector-effector-launch"
+  GROUP="projector-${STEM}"
   POD="${REL}-redpanda-hq-0"
 fi
 
-RESULT="${OPENDDIL_EFFECTOR_CONSUMER_RESULT:-${TMPDIR:-/tmp}/openddil-effector-consumer.result}"
+RESULT="${OPENDDIL_EFFECTOR_CONSUMER_RESULT:-${TMPDIR:-/tmp}/${DEFAULT_RESULT}}"
 
 # ---------------------------------------------------------------------------
 # parse_group_describe — reads `rpk group describe <group>` text on stdin,
@@ -134,7 +153,7 @@ if [ "${OPENDDIL_EFFECTOR_CONSUMER_SOURCE_ONLY:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-echo "=== effector-launch consumer probe ==="
+echo "=== $PRODUCER consumer probe ==="
 echo "  namespace: $NS   group: $GROUP   pod: $POD   window: ${WINDOW}s"
 echo
 
@@ -201,12 +220,12 @@ fi
 } > "$RESULT" 2>/dev/null \
   && echo "verdict published: $RESULT" \
   || echo "WARNING: could not publish verdict to $RESULT -- the completeness" \
-          "gate will treat effector_launch as unmeasured" >&2
+          "gate will treat $TABLE as unmeasured" >&2
 
 if [ "$verdict" = "ALIVE" ]; then
-  echo "effector-launch consumer: ALIVE"
+  echo "$PRODUCER consumer: ALIVE"
   exit 0
 else
-  echo "effector-launch consumer: NOT ALIVE — see above."
+  echo "$PRODUCER consumer: NOT ALIVE — see above."
   exit 1
 fi
