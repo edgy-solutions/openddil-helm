@@ -136,3 +136,23 @@ topics:
     revisit: >-
       When a launcher is assigned to edge-02, remove edge-02 from the scope
       (and the entry, if no tier is left).
+
+  asset-declarations:
+    status: declared
+    reason: >-
+      Written only when an operator declares an arriving asset or confirms an
+      expected one (ADR-0050). A deployment that has declared nothing leaves
+      the topic at watermark 0, which is the correct value, not a gap.
+    revisit: >-
+      Remove this entry once a declaration is part of every exercise's
+      standard start.
+
+  asset-fielding:
+    status: declared
+    reason: >-
+      The expected-arrival list is loaded from a unit's baseline or posted by
+      an operator (ADR-0050). With none loaded the topic stays at watermark 0
+      by design.
+    revisit: >-
+      Remove this entry once an exercise loads an expected-arrival list as
+      standard.

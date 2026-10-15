@@ -1091,6 +1091,9 @@ spec:
             ($tier.publicOrigin | default "")
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
           ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
+        {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+        {{ . }}
+        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -1099,6 +1102,9 @@ spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: pep
@@ -1134,6 +1140,13 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            # --- asset arrivals (ADR-0050): only a leaf tier (an edge) takes
+            # declarations, through its own intake; a region tier owns none.
+            {{- if $tier.hasChildren }}
+            {{- include "openddil.arrivalsPepEnv" (dict "root" $root "url" "" "edges" "" "owningTier" $tier.id) | nindent 12 }}
+            {{- else }}
+            {{- include "openddil.arrivalsPepEnv" (dict "root" $root "url" (printf "http://%s-tier-declaration-intake-%s%s:4198/asset-declarations" $root.Release.Name $tier.id (include "openddil.svcDomain" $root)) "edges" $tier.id "owningTier" $tier.id) | nindent 12 }}
+            {{- end }}
             {{- if $root.Values.cmReports.enabled }}
             # --- the CM write path, THIS TIER's own cm-intake --------
             - name: OPENDDIL_CM_INTAKE_URL
@@ -1252,6 +1265,12 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: bundle-shared
+              mountPath: /baselines
+              subPath: baselines
             {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
@@ -1261,11 +1280,22 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+        {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
+        {{ . | nindent 8 | trim }}
+        {{- end }}
         {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:
             name: {{ $root.Release.Name }}-cm-fault-codes
         {{- end }}
+{{- if not $tier.hasChildren }}
+---
+# ===========================================================================
+# tier-declaration-intake-{{ $tier.id }} -- this leaf tier's asset
+# declarations (ADR-0050 s2); a region tier takes none.
+# ===========================================================================
+{{ include "openddil.declarationIntake" (dict "root" $root "name" (printf "tier-declaration-intake-%s" $tier.id) "component" (printf "tier-declaration-intake-%s" $tier.id) "pepComponent" (printf "tier-pep-%s" $tier.id) "broker" $broker "brokerId" $tier.id) }}
+{{- end }}
 {{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION AT THE TIER. Slice 1's policy named the ROOT's

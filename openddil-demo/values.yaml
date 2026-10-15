@@ -611,6 +611,19 @@ effectors:
     asset: {}
     variant: {}
 
+# Asset arrivals (ADR-0050): the declare panel's roles, unit list and the
+# mapper's label-lookup cache.
+arrivals:
+  # Roles allowed to declare an arriving asset at the PEP (ADR-0050 s2).
+  # Anything else gets 403. Comma-joined into OPENDDIL_ARRIVALS_DECLARE_ROLES.
+  declareRoles: [edge-operator, regional-operator, supervisor]
+  # Units offered by the declare panel, as [{id, name}]. A deployment declares
+  # its own list; the OSS default is empty (ADR-0050 s2).
+  units: []
+  # How long the mapper caches a declared-label lookup before re-reading the
+  # store (ADR-0050 s3). A Go duration, e.g. 10s.
+  labelLookupTtl: 10s
+
 munitionTracks:
   # A track this tier has not heard from for this long becomes `silent`
   # (ADR-0049). 12 s is the DIS default entity timeout (2.4 x 5 s heartbeat).
@@ -1796,6 +1809,11 @@ releasability:
     # In-flight munition tracks: labelled from the launcher at the projector;
     # an unjoined row is unlabelled and therefore not served (ADR-0049).
     - munition_track
+    # Asset arrivals (ADR-0050): each record carries its own originator_nation
+    # and releasable_to, stamped at declaration time.
+    - asset_declaration
+    - asset_correlation
+    - asset_fielding
     # Joined 2026-09-08. The rollups, labelled by COMPOSITION: the aggregator
     # intersects its contributors' releasable_to over the same snapshot the
     # counts come from, so an aggregate is no more visible than its least

@@ -432,6 +432,9 @@ spec:
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
           ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
+        {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
+        {{ . }}
+        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -440,6 +443,9 @@ spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: pep
@@ -464,6 +470,10 @@ spec:
               value: "8080"
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
+            # --- asset arrivals (ADR-0050): the edges this PEP owns are the
+            # ones with no tier of their own; the rest go to their tier's PEP.
+            {{- $arrEdges := include "openddil.arrivalsRootEdges" $root }}
+            {{- include "openddil.arrivalsPepEnv" (dict "root" $root "url" (ternary (printf "http://%s-declaration-intake%s:4198/asset-declarations" $root.Release.Name (include "openddil.svcDomain" $root)) "" (ne $arrEdges "")) "edges" $arrEdges "owningTier" "root") | nindent 12 }}
             {{- if $root.Values.picture.enabled }}
             {{- include "openddil.pictureValidate" $root }}
             # --- picture route for service clients (HUB PEP only) ----------
@@ -582,6 +592,12 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: bundle-shared
+              mountPath: /baselines
+              subPath: baselines
             {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
@@ -591,6 +607,9 @@ spec:
         - name: bundle-shared
           emptyDir:
             sizeLimit: {{ $root.Values.releasability.pep.appVolumeSize }}
+        {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
+        {{ . | nindent 8 | trim }}
+        {{- end }}
         {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:

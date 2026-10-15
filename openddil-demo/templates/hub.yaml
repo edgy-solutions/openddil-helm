@@ -588,6 +588,15 @@ spec:
         - protocol: TCP
           port: 4197
 {{- end }}
+{{- if and .Values.releasability.enabled (include "openddil.arrivalsRootEdges" .) }}
+---
+# ===========================================================================
+# declaration-intake -- asset declarations for the edges with no tier of
+# their own (ADR-0050 s2). Rendered only when such an edge exists; a managed
+# edge's declarations go to its own tier-declaration-intake (tier-node.yaml).
+# ===========================================================================
+{{ include "openddil.declarationIntake" (dict "root" . "name" "declaration-intake" "component" "declaration-intake" "pepComponent" "pep" "broker" $hqBroker "brokerId" "hq") }}
+{{- end }}
 ---
 # ===========================================================================
 # asset-registry-service (ADR-0028) — canonical asset->edge->region writer

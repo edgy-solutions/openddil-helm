@@ -338,6 +338,18 @@ spec:
               value: {{ $root.Values.redpandaConnect.entityKinds.asset | quote }}
             - name: DIS_TRACK_ENTITY_KINDS
               value: {{ $root.Values.redpandaConnect.entityKinds.track | quote }}
+            # --- declared-label lookup (ADR-0050 s3; dynamic-mappings/
+            # declared-label.yaml). The mapper reads the store its edge's
+            # declarations land in: the edge's own tier store when the edge is
+            # tier-managed, else the root store. EVERY mapper pod needs the
+            # PG* set -- the mapping interpolates them with no defaults.
+            {{- if include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) }}
+            {{- include "openddil.pgTierEnv" (dict "root" $root "tier" $edge.id) | nindent 12 }}
+            {{- else }}
+            {{- include "openddil.pgHqEnv" $root | nindent 12 }}
+            {{- end }}
+            - name: DECLARED_LABEL_TTL
+              value: {{ $root.Values.arrivals.labelLookupTtl | quote }}
             {{- if $eventReportOn }}
             # --- the DIS Event Report -> CmEvent path, this edge's own
             # tier-cm-intake (see $eventReportOn above and dis-event-report

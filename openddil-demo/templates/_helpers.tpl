@@ -1040,6 +1040,8 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- $t = append $t "munition-tracks" -}}
 {{- $t = append $t "link-heartbeat" -}}
 {{- if $managed -}}
+{{- /* ADR-0050: an unmanaged edge's declarations are written at the root directly. */ -}}
+{{- $t = concat $t (list "asset-declarations" "asset-fielding") -}}
 {{- /* The per-element tree stays at the owning edge; its rollup rides asset-telemetry-windows. */ -}}
 {{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-inventory" "derived-sustainment") -}}
 {{- end -}}
@@ -1047,7 +1049,7 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "munition-tracks" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "munition-tracks" "asset-declarations" "asset-fielding" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
 {{- end }}
 
 {{/*
@@ -1416,7 +1418,7 @@ config is shared), but their broker has no such topic, so that group sits
 idle there, same as the regional rollups.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-element-inventory projector-asset-element-telemetry projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1577,6 +1579,27 @@ mappings:
     consumer_group: tier-projector-munition-track-{{ $tier.id }}
     decode_as: json
     mode: custom
+  # Asset arrivals (ADR-0050). The declaration and its correlation record
+  # share one topic and are projected by two groups; the fielding list is
+  # its own topic. Records of intent: no retention_hours/asset_ttl_hours.
+  - topic: asset-declarations
+    handler: asset_declaration
+    table: asset_declaration
+    consumer_group: tier-projector-asset-declaration-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: asset-declarations
+    handler: asset_correlation
+    table: asset_correlation
+    consumer_group: tier-projector-asset-correlation-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
+  - topic: asset-fielding
+    handler: asset_fielding
+    table: asset_fielding
+    consumer_group: tier-projector-asset-fielding-{{ $tier.id }}
+    decode_as: json
+    mode: upsert
   - topic: asset-element-telemetry
     handler: asset_element_telemetry
     table: asset_element_telemetry
@@ -1805,7 +1828,7 @@ for spec in \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
   "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
-  "munition-tracks|-p 4 -r 1 -c retention.ms=86400000" \
+  "munition-tracks|-p 4 -r 1 -c retention.ms=86400000"   "asset-declarations|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"   "asset-fielding|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
   "cm-items|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "cm-events|-p 8 -r 1 -c cleanup.policy=compact,delete -c retention.ms=2592000000 -c compression.type=lz4" \
@@ -2255,4 +2278,141 @@ hook probes are not the same set.
 {{- end -}}
 {{- end -}}
 {{- join "\n" $o -}}
+{{- end }}
+
+{{/*
+Asset arrivals (ADR-0050). openddil.arrivalsRootEdges -- the edge ids whose
+declarations the ROOT PEP takes: every edge that is NOT tier-managed (a
+managed edge's own tier PEP takes its declarations). Comma-joined; empty when
+every edge is tier-managed. Takes the chart root.
+*/}}
+{{- define "openddil.arrivalsRootEdges" -}}
+{{- $root := . -}}
+{{- $ids := list -}}
+{{- range $root.Values.edges -}}
+{{- if not (include "openddil.isTierManaged" (dict "id" .id "root" $root)) -}}{{- $ids = append $ids .id -}}{{- end -}}
+{{- end -}}
+{{- join "," $ids -}}
+{{- end }}
+
+{{/*
+openddil.arrivalsPepEnv -- the env block every PEP gets for the arrivals
+routes. Takes (dict "root" $root "url" <intake URL or ""> "edges" <csv>
+"owningTier" <id>). Roles and units come from values `arrivals`.
+*/}}
+{{- define "openddil.arrivalsPepEnv" -}}
+- name: OPENDDIL_DECLARATION_INTAKE_URL
+  value: {{ .url | quote }}
+- name: OPENDDIL_ARRIVALS_EDGES
+  value: {{ .edges | quote }}
+- name: OPENDDIL_ARRIVALS_OWNING_TIER
+  value: {{ .owningTier | quote }}
+- name: OPENDDIL_ARRIVALS_DECLARE_ROLES
+  value: {{ join "," .root.Values.arrivals.declareRoles | quote }}
+- name: OPENDDIL_ARRIVALS_UNITS
+  value: {{ .root.Values.arrivals.units | toJson | quote }}
+- name: OPENDDIL_RELEASABILITY_FILE
+  value: /ontology/releasability.yaml
+- name: OPENDDIL_BASELINES_DIRS
+  value: /baselines
+{{- end }}
+
+{{/*
+openddil.declarationIntake -- one declaration-intake (ADR-0050 s2): a connect
+Deployment taking the PEP's POST on 4198 and producing to asset-declarations
+on its tier's broker, its Service, and a NetworkPolicy admitting only that
+tier's PEP. A transport, not a gate. Takes (dict "root" $root "name" <suffix
+after the release name> "component" <label component> "pepComponent" <the
+PEP's label component> "broker" <host:port> "brokerId" <hq or tier id>).
+*/}}
+{{- define "openddil.declarationIntake" -}}
+{{- $root := .root -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-{{ .name }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 4 }}
+  annotations:
+    openddil.io/produces-topics: {{ printf "%s/asset-declarations" .brokerId | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 8 }}
+      annotations:
+        # declaration-intake.yaml ships as a static bundle file the init
+        # container copies once at pod start; same staleness hazard and fix as
+        # cm-intake.
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "declaration-intake" .name)) | sha256sum | quote }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/declaration-intake.yaml" "dst" "connect.yaml")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: connect
+          image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.redpandaConnect.image.pullPolicy "root" $root) }}
+          args: ["--chilled", "run", "/connect.yaml"]
+          env:
+            - name: REDPANDA_BROKER
+              value: {{ .broker | quote }}
+          ports:
+            - name: http
+              containerPort: 4198
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /connect.yaml
+              subPath: connect.yaml
+          resources:
+            {{- toYaml $root.Values.redpandaConnect.resources | nindent 12 }}
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-{{ .name }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 4198
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 4 }}
+---
+# BYPASS PREVENTION, SAME SHAPE AS cm-intake-pep-only. The intake trusts its
+# caller's identity unchecked; only this tier's PEP may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $root.Release.Name }}-{{ .name }}-pep-only
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" .pepComponent "root" $root) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 4198
 {{- end }}

@@ -1272,6 +1272,9 @@ TABLES=(
   effector_resupply
   munition_track
   parts_availability
+  asset_declaration
+  asset_correlation
+  asset_fielding
 )
 # effector_declared_load is deliberately NOT in TABLES. It is the declared
 # munitions-per-launcher-variant config, not run data — the projector
