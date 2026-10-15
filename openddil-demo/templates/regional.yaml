@@ -31,10 +31,9 @@
          keyed by the region's own id, once tier-managed -- see
          REGIONAL_EDGES below). */ -}}
 {{- $tierManaged := include "openddil.isTierManaged" (dict "id" $region.id "root" $root) }}
-{{- $aggHqBrokerId := "hq" }}
+{{- $aggHqBrokerId := include "openddil.regionAggBrokerId" (dict "id" $region.id "root" $root) }}
 {{- $sourceIds := list }}
 {{- if $tierManaged }}
-{{- $aggHqBrokerId = $region.id }}
 {{- $sourceIds = list $region.id }}
 {{- else }}
 {{- range $root.Values.edges }}
@@ -60,7 +59,7 @@
        The changelog is the aggregator's one Faust Table
        (openddil.faustRegionalAggregatorTable), named from the SAME
        $region.id this whole file already keys on. */ -}}
-{{- $regionFanInTopic := printf "%s-fan-in" $region.id }}
+{{- $regionFanInTopic := include "openddil.regionFanInTopic" $region.id }}
 {{- $regionAggregatorAppId := printf "region-%s-aggregator" $region.id }}
 {{- $regionalProduces := list
     (printf "%s/%s" $aggHqBrokerId $regionFanInTopic)

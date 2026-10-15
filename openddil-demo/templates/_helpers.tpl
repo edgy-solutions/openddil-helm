@@ -925,6 +925,50 @@ Usage: {{ include "openddil.ingressAnnotations" (dict "root" $root "redirect" $r
 {{- end -}}
 {{- end }}
 
+{{- /*
+openddil.regionAggBrokerId — the broker a region's faust-regional aggregator
+reads and writes: the region's own broker when it is tier-managed, else hq.
+Takes (dict "id" <region id> "root" $).
+*/ -}}
+{{- define "openddil.regionAggBrokerId" -}}
+{{- if include "openddil.isTierManaged" (dict "id" .id "root" .root) -}}
+{{- .id -}}
+{{- else -}}
+hq
+{{- end -}}
+{{- end }}
+
+{{- /*
+openddil.regionFanInTopic — the topic a region's source sub-apps fan state in
+to, for its aggregator to read. Takes the region id.
+*/ -}}
+{{- define "openddil.regionFanInTopic" -}}
+{{- printf "%s-fan-in" . -}}
+{{- end }}
+
+{{- /*
+openddil.regionFanInSpecs — topic-init spec strings ("name|args") for the
+fan-in topics whose aggregator broker is .brokerId, as a JSON list; pass it to
+openddil.topicInitCreateLoop as .extra via fromJsonArray. Takes
+(dict "brokerId" <id> "root" $).
+
+Why topic-init declares these: faust-regional declares its fan-in topic only
+at pod start, and broker auto-create is off. A broker that later loses its
+topics (volume wipe) would otherwise never get it back, and the aggregator
+would stay stuck until a restart. Ranges the same .Values.regions list as
+regional.yaml, so the two cannot disagree. The args match what Faust creates
+(1 partition, delete, 7 d), so enforcing them on a live topic changes nothing.
+*/ -}}
+{{- define "openddil.regionFanInSpecs" -}}
+{{- $specs := list -}}
+{{- range .root.Values.regions -}}
+{{- if eq (include "openddil.regionAggBrokerId" (dict "id" .id "root" $.root)) $.brokerId -}}
+{{- $specs = append $specs (printf "%s|-p 1 -r 1 -c cleanup.policy=delete -c retention.ms=604800000" (include "openddil.regionFanInTopic" .id)) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $specs -}}
+{{- end }}
+
 {{/*
 openddil.validateEdgeAttachment — render-time guard for `edges[].attachment`.
 
@@ -1692,7 +1736,10 @@ kept in parallel (see infrastructure.yaml's "BROKER LIST" history
 comment). A hub edit and a tier edit of two copies of this spec list would
 be the same failure mode one level up.
 
-Takes .broker — the host:port string passed to `-X brokers=`.
+Takes .broker — the host:port string passed to `-X brokers=`, and an optional
+.extra — a list of further "name|args" spec strings for this broker only (the
+region fan-in topics, see openddil.regionFanInSpecs), emitted after the fixed
+entries.
 */ -}}
 {{- define "openddil.topicInitCreateLoop" -}}
 {{- $B := .broker }}
@@ -1766,6 +1813,9 @@ for spec in \
   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
   "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "link-heartbeat|-p 1 -r 1 -c retention.ms=3600000 -c cleanup.policy=delete" \
+{{- range .extra }}
+  {{ . | quote }} \
+{{- end }}
   ; do
   topic="${spec%%|*}"
   args="${spec##*|}"

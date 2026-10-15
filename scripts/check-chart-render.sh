@@ -801,7 +801,9 @@ if broker_ids != job_ids:
 SPEC_RE = re.compile(r"\"([a-z0-9][a-z0-9.-]*\|[^\"]*)\"")
 
 def specs_of(d):
-    return set(SPEC_RE.findall(script_text(d)))
+    # <region>-fan-in specs are per-broker by design (only the aggregator
+    # broker carries one); guard 29 checks them. Everything else is common.
+    return {x for x in SPEC_RE.findall(script_text(d)) if not x.split("|", 1)[0].endswith("-fan-in")}
 
 for tid, d in job_by_id.items():
     text = script_text(d)
@@ -2775,6 +2777,71 @@ else
   "$PY" "$G28_DIR/check.py" "$G28_DIR/reg.yaml" "$G28_DIR/compat.yaml" example.invalid/x/reset-runner:latest || fail=1
 fi
 rm -rf "$G28_DIR"
+
+# --- guard 29: each region's fan-in topic is created by its broker's -------
+# topic-init Job. faust-regional declares <region>-fan-in only at pod start
+# and broker auto-create is off, so a broker that loses its topics never gets
+# it back unless topic-init declares it (openddil.regionFanInSpecs). The
+# Job must be the one for the broker faust-regional's produces-topics names
+# (hq: <release>-topic-init; a tier: <release>-topic-init-<tier>), and no
+# other broker's Job may carry it. One tier-managed region (broker = its own)
+# and one not (broker = hq) so both routes are exercised.
+echo
+echo "guard 29: each region's fan-in topic is in its own broker's topic-init Job, and only there"
+G29_VALUES="$(mktemp)"
+cat > "$G29_VALUES" <<'G29'
+tierNode:
+  enabled: true
+  tiers: [region-east]
+G29
+render -f "$G29_VALUES" | "$PY" -c '
+import sys, re, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+decl = {}
+jobs = {}
+for d in docs:
+    md = d.get("metadata") or {}
+    name = md.get("name", "")
+    if d.get("kind") == "Deployment" and "-faust-regional-" in name:
+        v = (md.get("annotations") or {}).get("openddil.io/produces-topics") or ""
+        decl[name.split("-faust-regional-", 1)[1]] = set(v.split())
+    elif d.get("kind") == "Job" and "-topic-init" in name:
+        cmd = d["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+        block = cmd.split("for spec in", 1)[1].split("; do", 1)[0]
+        broker = "hq" if name.endswith("-topic-init") else name.split("-topic-init-", 1)[1]
+        jobs[broker] = set(re.findall(r"\"([^\"|]+)[|]", block))
+fail = False
+if not decl or "hq" not in jobs:
+    print("  FAIL: fixture rendered no faust-regional or no hub topic-init Job -- this guard proved nothing")
+    sys.exit(1)
+brokers_seen = set()
+for r in sorted(decl):
+    fan = r + "-fan-in"
+    want = [x.split("/", 1)[0] for x in decl[r] if x.endswith("/" + fan)]
+    if len(want) != 1:
+        print(f"  FAIL: faust-regional-{r} declares {len(want)} {fan} produces-topics entries (want 1)")
+        fail = True
+        continue
+    b = want[0]
+    brokers_seen.add(b)
+    if b not in jobs:
+        print(f"  FAIL: {fan} is declared on broker {b}, which has no topic-init Job")
+        fail = True
+    elif fan not in jobs[b]:
+        print(f"  FAIL: {fan} is declared on broker {b} but its topic-init Job does not create it")
+        fail = True
+    for ob, topics in sorted(jobs.items()):
+        if ob != b and fan in topics:
+            print(f"  FAIL: {fan} belongs on broker {b} but the topic-init Job for {ob} also creates it")
+            fail = True
+if brokers_seen != {"hq", "region-east"}:
+    print("  FAIL: fixture covered brokers " + str(sorted(brokers_seen)) + ", want hq and region-east -- this guard proved nothing for the rest")
+    fail = True
+if fail:
+    sys.exit(1)
+print(f"  ok   : {len(decl)} region fan-in topic(s), each in its own broker Job and no other")
+' || fail=1
+rm -f "$G29_VALUES"
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

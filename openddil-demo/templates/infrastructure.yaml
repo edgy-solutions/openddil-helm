@@ -460,7 +460,7 @@ spec:
                 fi
                 sleep 2
               done
-              {{- include "openddil.topicInitCreateLoop" (dict "broker" $brokerAddr) | nindent 14 }}
+              {{- include "openddil.topicInitCreateLoop" (dict "broker" $brokerAddr "extra" (include "openddil.regionFanInSpecs" (dict "brokerId" $edge.id "root" $) | fromJsonArray)) | nindent 14 }}
 ---
 {{- end }}
 {{- end }}
@@ -915,7 +915,7 @@ spec:
                 fi
                 sleep 2
               done
-              {{- include "openddil.topicInitCreateLoop" (dict "broker" "$HQB") | nindent 14 }}
+              {{- include "openddil.topicInitCreateLoop" (dict "broker" "$HQB" "extra" (include "openddil.regionFanInSpecs" (dict "brokerId" "hq" "root" $) | fromJsonArray)) | nindent 14 }}
 
               # ---------------------------------------------------------
               # HQ-ONLY TOPICS -- the release boundary
