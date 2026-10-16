@@ -1034,11 +1034,15 @@ frontend:
   # and is passed through as opaque JSON into the hub frontend's
   # deployment.json. Empty by default -- no panes, no ConfigMap, no mount.
   releasedRecordsPanes: []
-  # Forward operating bases drawn on the HQ theater, one link each. Rendered
+  # Forward operating bases that PLACE tiers on the HQ theater. Rendered
   # into deployment.json as `fobs` when non-empty; the key is omitted when
   # empty. Each entry is {edge_id, region_id, lat, lon, label?}, where
-  # edge_id is the processing edge (or tier) id whose link_status row paints
-  # the link. Placeholder shape, synthetic coordinates:
+  # edge_id is the id of the tier (edge or region) the FOB places; that
+  # tier's link_status row paints its link. A FOB whose edge_id is not a tier
+  # is not drawn. A FOB may name a region tier to place it; a region with no
+  # FOB is drawn at the mean of its drawn children. The tier tree itself is
+  # rendered as `tiers` ({id, parent, hasChildren}). Placeholder shape,
+  # synthetic coordinates:
   #   fobs:
   #     - {edge_id: edge-01, region_id: region-east, lat: 0.0, lon: 0.0, label: "FOB One"}
   fobs: []

@@ -155,4 +155,35 @@ helm template t "$CHART" > "$TMP/g.yaml" 2>/dev/null
 gotg="$(childlinks "$TMP/g.yaml" | "$PY" -c 'import sys,json; c=json.load(sys.stdin).get("childLinks") or []; print("ok" if c and all(e.get("hasChildren") is False for e in c) else "bad %r" % c)')"
 ok "G childLinks rendered with releasability off" "$([ "$gotg" = "ok" ] && echo 0 || echo 1)" "got=$gotg"
 
+# ---- H -------------------------------------------------------------------
+# hub deployment.json `tiers`: the whole tier tree, {id,parent,hasChildren} in
+# tierList order (parent as tierList gives it). Omitted when there are no tiers.
+cat > "$TMP/h.yaml" <<'YAML'
+regions:
+  - id: region-a
+edges:
+  - id: edge-a
+    region: region-a
+    udpPort: 62040
+  - id: edge-b
+    region: region-a
+    udpPort: 62041
+  - id: edge-c
+    parent: root
+    udpPort: 62042
+YAML
+helm template t "$CHART" -f "$TMP/h.yaml" > "$TMP/h.out" 2>"$TMP/h.err" || { echo "FAIL H render failed"; cat "$TMP/h.err"; FAIL=1; }
+want='[{"hasChildren":false,"id":"edge-a","parent":"region-a"},{"hasChildren":false,"id":"edge-b","parent":"region-a"},{"hasChildren":false,"id":"edge-c","parent":"root"},{"hasChildren":true,"id":"region-a","parent":"root"}]'
+goth="$(childlinks "$TMP/h.out" | "$PY" -c 'import sys,json; t=json.load(sys.stdin).get("tiers"); print(json.dumps(sorted(t,key=lambda e:e["id"]),sort_keys=True,separators=(",",":")) if t is not None else "<absent>")')"
+ok "H tiers rendered with parents" "$([ "$goth" = "$want" ] && echo 0 || echo 1)" "got=$goth"
+gotn="$(childlinks "$TMP/h.out" | "$PY" -c 'import sys,json; t=json.load(sys.stdin).get("tiers") or []; print(",".join(e["id"] for e in t))')"
+ok "H tiers in tierList order (edges then regions)" "$([ "$gotn" = "edge-a,edge-b,edge-c,region-a" ] && echo 0 || echo 1)" "got=$gotn"
+printf 'edges: []\nregions: []\ntiers: []\n' > "$TMP/h0.yaml"
+helm template t "$CHART" -f "$TMP/h0.yaml" > "$TMP/h0.out" 2>"$TMP/h0.err" || { echo "FAIL H0 render failed"; head -5 "$TMP/h0.err"; FAIL=1; }
+goth0="$(childlinks "$TMP/h0.out" | "$PY" -c '
+import sys,json
+raw=sys.stdin.read().strip()
+print("ok" if raw=="<none>" or "tiers" not in json.loads(raw) else "bad "+raw)')"
+ok "H no tiers omits the key" "$([ "$goth0" = "ok" ] && echo 0 || echo 1)" "got=$goth0"
+
 exit "$FAIL"

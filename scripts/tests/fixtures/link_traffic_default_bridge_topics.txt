@@ -1,3 +1,3 @@
-              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat"
-              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat"
-              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat"
+              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat,asset-fielding"
+              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat,asset-fielding"
+              value: "raw-sensor-stream,tactical-events,effector-events,munition-tracks,link-heartbeat,asset-fielding"

@@ -462,7 +462,7 @@ for cm in cms:
         print("  FAIL [7d-default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
     if not isinstance(cfg, dict):
         print("  FAIL [7d-default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
-    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes", "effectors", "movement"))
+    extra = sorted(k for k in cfg if k not in ("childLinks", "tiers", "releasedRecordsPanes", "effectors", "movement"))
     if cfg.get("effectors") != {"declaredLoad": {"asset": {}, "variant": {}}} or cfg.get("movement") != {"standards": {}, "units": []}:
         print("  FAIL [7d-default]: default effectors/movement are not the empty declared inputs: " + json.dumps({k: cfg.get(k) for k in ("effectors", "movement")})); sys.exit(1)
     if extra:
@@ -495,7 +495,7 @@ got = json.loads(hub["data"]["deployment.json"])
 gotPanes = got.get("releasedRecordsPanes")
 if gotPanes != want:
     print("  FAIL [7e]: hub deployment.json releasedRecordsPanes = " + repr(gotPanes) + ", want " + repr(want)); sys.exit(1)
-if set(got.keys()) - {"effectors", "movement"} != {"releasedRecordsPanes"}:
+if set(got.keys()) - {"effectors", "movement", "tiers", "childLinks"} != {"releasedRecordsPanes"}:
     print(f"  FAIL [7e]: hub deployment.json has extra keys: {sorted(got.keys())}"); sys.exit(1)
 if not tiers:
     print("  FAIL [7e]: no tier-frontend-config ConfigMaps rendered with tierNode.enabled=true -- cannot check absence"); sys.exit(1)
@@ -990,7 +990,7 @@ for cm in cms:
         print("  FAIL [10 default]: deployment.json missing or not JSON in " + cm["metadata"]["name"] + ": " + str(e)); sys.exit(1)
     if not isinstance(cfg, dict):
         print("  FAIL [10 default]: deployment.json is not a JSON object in " + cm["metadata"]["name"]); sys.exit(1)
-    extra = sorted(k for k in cfg if k not in ("childLinks", "releasedRecordsPanes", "effectors", "movement"))
+    extra = sorted(k for k in cfg if k not in ("childLinks", "tiers", "releasedRecordsPanes", "effectors", "movement"))
     if cfg.get("effectors") != {"declaredLoad": {"asset": {}, "variant": {}}} or cfg.get("movement") != {"standards": {}, "units": []}:
         print("  FAIL [10 default]: default effectors/movement are not the empty declared inputs: " + json.dumps({k: cfg.get(k) for k in ("effectors", "movement")})); sys.exit(1)
     if extra:

@@ -217,6 +217,25 @@ jobs:
             && { echo "plant target not found: the red-check would test nothing"; exit 1; }
           plant "merge arguments swapped" "FAIL R1 merge container runs the script on the staged realm" /tmp/dlu-args
 
+      # Link traffic topics, the hub's childLinks, and the hub's whole tier tree (deployment.json `tiers`, which
+      # the theater topology draws). Exit 2 (no python with PyYAML) fails the step: a skip would read green.
+      - name: Link traffic and tier tree render test
+        run: bash scripts/tests/test_link_traffic_render.sh
+
+      # One plant: the tier tree helper with every parent forced to root. The test must exit non-zero AND print
+      # the tiers check it breaks.
+      - name: Tier tree red-check
+        run: |
+          cp -r openddil-demo /tmp/ltr-parent
+          sed -i 's#"parent" .parent "hasChildren"#"parent" "root" "hasChildren"#' /tmp/ltr-parent/templates/_helpers.tpl
+          cmp -s openddil-demo/templates/_helpers.tpl /tmp/ltr-parent/templates/_helpers.tpl \
+            && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          if CHART=/tmp/ltr-parent bash scripts/tests/test_link_traffic_render.sh > /tmp/ltr-red.log 2>&1; then
+            cat /tmp/ltr-red.log; echo "RED CHECK FAILED: the plant passed"; exit 1; fi
+          grep -qF -- "FAIL H tiers rendered with parents" /tmp/ltr-red.log \
+            || { cat /tmp/ltr-red.log; echo "RED CHECK FAILED: failed, but without the tiers line"; exit 1; }
+          echo "red-check green: FAIL H tiers rendered with parents"
+
       # Does the render actually carry the DIS entity allow-list that
       # sensorIngest.entityAssignment (values.yaml) declares?
       # templates/edge.yaml's own render-time validation already refuses a

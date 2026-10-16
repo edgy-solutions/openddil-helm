@@ -1722,6 +1722,21 @@ decides whether that file is rendered at all, so the two cannot disagree.
 {{- end }}
 
 {{/*
+openddil.hqTierTreeJson -- the whole tier tree as a JSON array of
+{id, parent, hasChildren}, one entry per openddil.tierList entry, in tierList
+order; "[]" when there are no tiers. `parent` is passed through exactly as
+tierList gives it (not normalised). Read by the hub frontend's deployment.json
+so the HQ theater can draw the chart's tiers.
+*/}}
+{{- define "openddil.hqTierTreeJson" -}}
+{{- $out := list -}}
+{{- range (include "openddil.tierList" . | fromYamlArray) }}
+{{- $out = append $out (dict "id" (.id | toString) "parent" .parent "hasChildren" (.hasChildren | default false)) }}
+{{- end }}
+{{- toJson $out -}}
+{{- end }}
+
+{{/*
 openddil.frontendMoveInputsJson -- the move panel's declared inputs as a JSON
 object with the two keys `effectors` and `movement`. Always both keys, empty
 maps/list when undeclared. One definition for the hub and every tier.
@@ -1775,6 +1790,10 @@ browser can tell "declared empty" from "an older chart".
 {{- $childLinks := include "openddil.hqChildLinks" . | fromJsonArray -}}
 {{- if $childLinks -}}
 {{- $_ := set $d "childLinks" $childLinks -}}
+{{- end -}}
+{{- $tierTree := include "openddil.hqTierTreeJson" . | fromJsonArray -}}
+{{- if $tierTree -}}
+{{- $_ := set $d "tiers" $tierTree -}}
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}
