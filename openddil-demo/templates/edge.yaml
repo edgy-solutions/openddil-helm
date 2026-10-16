@@ -55,9 +55,12 @@
 {{- $nonAssetTokens := list }}
 {{- $nonAssetWide := list }}
 {{- range $nonAssetSources }}
-{{- $nas := (toString .site) }}
+{{- $nas := "*" }}
+{{- if not (kindIs "invalid" .site) }}
+{{- $nas = (toString .site) }}
+{{- end }}
 {{- $naa := (toString .application) }}
-{{- if or (not (regexMatch "^[0-9]{1,5}$" $nas)) (gt (int $nas) 65535) (not (regexMatch "^[0-9]{1,5}$" $naa)) (gt (int $naa) 65535) }}
+{{- if or (and (ne $nas "*") (or (not (regexMatch "^[0-9]{1,5}$" $nas)) (gt (int $nas) 65535))) (not (regexMatch "^[0-9]{1,5}$" $naa)) (gt (int $naa) 65535) }}
 {{- fail (printf "sensorIngest.nonAssetSources: site %q / application %q must each be an integer 0-65535" $nas $naa) }}
 {{- end }}
 {{- $nak := "" }}
@@ -73,6 +76,9 @@
 {{- fail (printf "sensorIngest.nonAssetSources: source %s:%s has no name" $nas $naa) }}
 {{- end }}
 {{- $nat := printf "%d:%d" (int $nas) (int $naa) }}
+{{- if eq $nas "*" }}
+{{- $nat = printf "*:%d" (int $naa) }}
+{{- end }}
 {{- if ne $nak "" }}
 {{- $nat = printf "%s:%d" $nat (int $nak) }}
 {{- else }}
@@ -86,8 +92,94 @@
 {{- range $entityAssignment }}
 {{- $eparts := splitList ":" (.id | toString) }}
 {{- $esrc := printf "%d:%d" (int (index $eparts 1)) (int (index $eparts 2)) }}
-{{- if has $esrc $nonAssetWide }}
+{{- if or (has $esrc $nonAssetWide) (has (printf "*:%d" (int (index $eparts 2))) $nonAssetWide) }}
 {{- fail (printf "sensorIngest.entityAssignment: id %q comes from source %s, which is declared in sensorIngest.nonAssetSources -- an asset cannot come from a non-asset source" .id $esrc) }}
+{{- end }}
+{{- end }}
+{{- /* sensorIngest.assignment (values.yaml) -- the rules model. Validated
+   once here, like entityAssignment above; the sidecar fails closed on the
+   regex, geofence numbers and country ints, so those are not re-checked. */ -}}
+{{- $assignment := $root.Values.sensorIngest.assignment | default dict }}
+{{- $assignRules := $assignment.rules | default list }}
+{{- $assignFallback := $assignment.fallbackEdge | default "" }}
+{{- $rulesMode := gt (len $assignRules) 0 }}
+{{- if and $rulesMode (gt (len $entityAssignment) 0) }}
+{{- fail "sensorIngest.assignment.rules and sensorIngest.entityAssignment are both set -- one model per deployment" }}
+{{- end }}
+{{- if and $rulesMode (eq $assignFallback "") }}
+{{- fail "sensorIngest.assignment.fallbackEdge: required once sensorIngest.assignment.rules is non-empty -- an entity matching no rule would be dropped at every edge" }}
+{{- end }}
+{{- if and (not $rulesMode) (ne $assignFallback "") }}
+{{- fail (printf "sensorIngest.assignment.fallbackEdge: %q is set but sensorIngest.assignment.rules is empty -- it has no meaning there" $assignFallback) }}
+{{- end }}
+{{- if and (ne $assignFallback "") (not (has $assignFallback $validEdgeIds)) }}
+{{- fail (printf "sensorIngest.assignment.fallbackEdge: %q is not in edges[]" $assignFallback) }}
+{{- end }}
+{{- $seenRuleNames := list }}
+{{- $seenRuleIds := list }}
+{{- range $ri, $rule := $assignRules }}
+{{- $rname := $rule.name | default "" | toString }}
+{{- if eq $rname "" }}
+{{- fail (printf "sensorIngest.assignment.rules[%d].name: required and must be non-empty" $ri) }}
+{{- end }}
+{{- if has $rname $seenRuleNames }}
+{{- fail (printf "sensorIngest.assignment.rules: name %q is used twice" $rname) }}
+{{- end }}
+{{- $seenRuleNames = append $seenRuleNames $rname }}
+{{- if not (has ($rule.edge | default "" | toString) $validEdgeIds) }}
+{{- fail (printf "sensorIngest.assignment.rules[%s].edge: %q is not in edges[]" $rname ($rule.edge | default "" | toString)) }}
+{{- end }}
+{{- $rmatch := $rule.match | default dict }}
+{{- $rmKeys := keys $rmatch }}
+{{- if not (and (eq (len $rmKeys) 1) (has (index $rmKeys 0) (list "ids" "geofence" "marking" "country"))) }}
+{{- fail (printf "sensorIngest.assignment.rules[%s].match: must have exactly one of ids, geofence, marking, country" $rname) }}
+{{- end }}
+{{- if hasKey $rmatch "ids" }}
+{{- range $rmatch.ids }}
+{{- $rid := . | toString }}
+{{- if not (regexMatch "^dis:[0-9]+:[0-9]+:[0-9]+$" $rid) }}
+{{- fail (printf "sensorIngest.assignment.rules[%s].match.ids: malformed id %q -- must match dis:<site>:<application>:<entity>" $rname $rid) }}
+{{- end }}
+{{- if has $rid $seenRuleIds }}
+{{- fail (printf "sensorIngest.assignment.rules[%s].match.ids: id %q is listed twice" $rname $rid) }}
+{{- end }}
+{{- $seenRuleIds = append $seenRuleIds $rid }}
+{{- $rparts := splitList ":" $rid }}
+{{- $rsrc := printf "%d:%d" (int (index $rparts 1)) (int (index $rparts 2)) }}
+{{- if or (has $rsrc $nonAssetWide) (has (printf "*:%d" (int (index $rparts 2))) $nonAssetWide) }}
+{{- fail (printf "sensorIngest.assignment.rules[%s].match.ids: id %q comes from source %s, which is declared in sensorIngest.nonAssetSources -- an asset cannot come from a non-asset source" $rname $rid $rsrc) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* sensorIngest.nationStamping (values.yaml) -- the nation stamp. */ -}}
+{{- $nationStamping := $root.Values.sensorIngest.nationStamping | default dict }}
+{{- $nationOverrides := $nationStamping.overrides | default dict }}
+{{- $nationRules := $nationStamping.rules | default list }}
+{{- range $okey, $oval := $nationOverrides }}
+{{- if not (regexMatch "^dis:[0-9]+:[0-9]+:[0-9]+$" ($okey | toString)) }}
+{{- fail (printf "sensorIngest.nationStamping.overrides: malformed id %q -- must match dis:<site>:<application>:<entity>" $okey) }}
+{{- end }}
+{{- if not (regexMatch "^[A-Z]{3}$" ($oval | toString)) }}
+{{- fail (printf "sensorIngest.nationStamping.overrides: nation %q for id %q must be three capital letters" $oval $okey) }}
+{{- end }}
+{{- end }}
+{{- $seenNationNames := list }}
+{{- range $ni, $nrule := $nationRules }}
+{{- $nname := $nrule.name | default "" | toString }}
+{{- if eq $nname "" }}
+{{- fail (printf "sensorIngest.nationStamping.rules[%d].name: required and must be non-empty" $ni) }}
+{{- end }}
+{{- if has $nname $seenNationNames }}
+{{- fail (printf "sensorIngest.nationStamping.rules: name %q is used twice" $nname) }}
+{{- end }}
+{{- $seenNationNames = append $seenNationNames $nname }}
+{{- if not (regexMatch "^[A-Z]{3}$" ($nrule.nation | default "" | toString)) }}
+{{- fail (printf "sensorIngest.nationStamping.rules[%s].nation: %q must be three capital letters" $nname ($nrule.nation | default "" | toString)) }}
+{{- end }}
+{{- $nmKeys := keys ($nrule.match | default dict) }}
+{{- if not (and (eq (len $nmKeys) 1) (has (index $nmKeys 0) (list "geofence" "marking" "country"))) }}
+{{- fail (printf "sensorIngest.nationStamping.rules[%s].match: must have exactly one of geofence, marking, country" $nname) }}
 {{- end }}
 {{- end }}
 {{- /* Fallback edge's deny list: ids assigned to every OTHER edge. */ -}}
@@ -219,7 +311,15 @@ spec:
             - name: INGEST_SPOOL_STALL_S
               value: {{ $root.Values.sensorIngest.spool.stallSeconds | quote }}
             {{- end }}
-            {{- if and (ne $unassignedEdge "") (eq $edge.id $unassignedEdge) }}
+            {{- if $rulesMode }}
+            # Rules model (sensorIngest.assignment, values.yaml): the same
+            # rule list and fallback edge on every sidecar; no admit or deny
+            # list in this mode.
+            - name: DIS_ASSIGNMENT_RULES
+              value: {{ $assignRules | toJson | quote }}
+            - name: DIS_FALLBACK_EDGE
+              value: {{ $assignFallback | quote }}
+            {{- else if and (ne $unassignedEdge "") (eq $edge.id $unassignedEdge) }}
             {{- if gt (len $deniedAtFallback) 0 }}
             # Fallback edge (sensorIngest.unassignedEdge, values.yaml): admits
             # every entity not assigned to another edge, so it denies exactly
@@ -239,6 +339,11 @@ spec:
             # (sensorIngest.nonAssetSources): dropped and counted here.
             - name: DIS_NON_ASSET_SOURCES
               value: {{ $nonAssetTokens | sortAlpha | join "," | quote }}
+            {{- end }}
+            {{- if or (gt (len $nationOverrides) 0) (gt (len $nationRules) 0) }}
+            # Nation stamp (sensorIngest.nationStamping, values.yaml).
+            - name: DIS_NATION_RULES
+              value: {{ dict "overrides" $nationOverrides "rules" $nationRules | toJson | quote }}
             {{- end }}
           ports:
             - name: dis-udp

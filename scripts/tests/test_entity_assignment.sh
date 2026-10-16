@@ -266,6 +266,176 @@ out="$(CHECK_ENTITY_ASSIGNMENT_RENDER_FILE="$M/tamper2.yaml" "$CHECK" "$CHART" -
 grep -q "dis:1:1:1' is rendered into more than one sidecar" <<<"$out" && pass "2: the duplicated id is named" \
   || fail "2: duplicate-id message not found as expected"
 
+
+# ===========================================================================
+# case 9 -- sensorIngest.assignment (rules mode), nationStamping, and a
+# site-less nonAssetSources entry. (a)-(g) follow the item-6 spec letters.
+# ===========================================================================
+cat > "$M/rules.yaml" <<'YAML'
+sensorIngest:
+  assignment:
+    fallbackEdge: edge-03
+    rules:
+      - { name: ids-1, edge: edge-01, match: { ids: ["dis:1:1:1", "dis:1:1:2"] } }
+      - { name: box-1, edge: edge-02, match: { geofence: { south: 10.0, west: 20.0, north: 11.5, east: 21.5 } } }
+      - { name: markings-1, edge: edge-02, match: { marking: "^AB" } }
+      - { name: country-1, edge: edge-01, match: { country: [1, 2] } }
+YAML
+
+# the sidecar's env, by Deployment name, as JSON
+sidecar_env() {  # render-file
+  "$PY" - "$1" <<'PYEOF'
+import json, sys
+import yaml
+out = {}
+for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")):
+    if not d or d.get("kind") != "Deployment":
+        continue
+    name = d["metadata"]["name"]
+    if "-sensor-ingest-" not in name:
+        continue
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        if c["name"] == "sensor-ingest":
+            out[name] = {e["name"]: e.get("value") for e in c.get("env", [])}
+print(json.dumps(out))
+PYEOF
+}
+
+# (a) rules: the same JSON on every sidecar, no admit or deny env.
+helm template t "$CHART" -f "$M/rules.yaml" > "$M/rules-render.yaml" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && pass "9a: a rules deployment renders" || fail "9a: rc=$rc -- $(tail -3 "$M/rules-render.yaml")"
+sidecar_env "$M/rules-render.yaml" > "$M/rules-env.json" 2>&1
+if "$PY" - "$M/rules-env.json" <<'PYEOF'
+import json, sys
+envs = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(envs) == 3, f"expected 3 sidecars, got {len(envs)}"
+want = [
+    {"name": "ids-1", "edge": "edge-01", "match": {"ids": ["dis:1:1:1", "dis:1:1:2"]}},
+    {"name": "box-1", "edge": "edge-02", "match": {"geofence": {"south": 10.0, "west": 20.0, "north": 11.5, "east": 21.5}}},
+    {"name": "markings-1", "edge": "edge-02", "match": {"marking": "^AB"}},
+    {"name": "country-1", "edge": "edge-01", "match": {"country": [1, 2]}},
+]
+for name, env in envs.items():
+    assert json.loads(env["DIS_ASSIGNMENT_RULES"]) == want, name
+    assert env["DIS_FALLBACK_EDGE"] == "edge-03", name
+    for k in ("DIS_ADMITTED_ENTITY_IDS", "DIS_DENIED_ENTITY_IDS"):
+        assert k not in env, f"{name} carries {k}"
+assert len({e["DIS_ASSIGNMENT_RULES"] for e in envs.values()}) == 1
+PYEOF
+then pass "9a: identical rules and fallback on every sidecar, no admit or deny env"
+else fail "9a: rules env wrong"; fi
+out="$("$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && grep -qi "rules mode" <<<"$out" && pass "9a: the checker recognises rules mode and passes" \
+  || fail "9a: checker rc=$rc -- $out"
+
+# the checker must catch tampered renders in rules mode
+sed '0,/DIS_FALLBACK_EDGE/{n;s/edge-03/edge-01/}' "$M/rules-render.yaml" > "$M/tamper-fb.yaml"
+cmp -s "$M/rules-render.yaml" "$M/tamper-fb.yaml" && fail "9a: fallback tamper planted nothing"
+out="$(CHECK_ENTITY_ASSIGNMENT_RENDER_FILE="$M/tamper-fb.yaml" "$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "DIS_FALLBACK_EDGE" <<<"$out" && pass "9a: one sidecar with a different fallback edge fails the check" \
+  || fail "9a: fallback tamper rc=$rc -- $out"
+sed '0,/\^AB/s//^AC/' "$M/rules-render.yaml" > "$M/tamper-rules.yaml"
+cmp -s "$M/rules-render.yaml" "$M/tamper-rules.yaml" && fail "9a: rules tamper planted nothing"
+out="$(CHECK_ENTITY_ASSIGNMENT_RENDER_FILE="$M/tamper-rules.yaml" "$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "DIS_ASSIGNMENT_RULES" <<<"$out" && pass "9a: one sidecar with different rules fails the check" \
+  || fail "9a: rules tamper rc=$rc -- $out"
+sed 's/name: DIS_FALLBACK_EDGE/name: DIS_DENIED_ENTITY_IDS/' "$M/rules-render.yaml" > "$M/tamper-deny.yaml"
+out="$(CHECK_ENTITY_ASSIGNMENT_RENDER_FILE="$M/tamper-deny.yaml" "$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "DIS_DENIED_ENTITY_IDS" <<<"$out" && pass "9a: a deny env in rules mode fails the check" \
+  || fail "9a: deny tamper rc=$rc -- $out"
+
+# (b)-(d) and the other refusals
+expect_fail g-both "one model per deployment" sensorIngest: \
+  '  entityAssignment: [{ id: "dis:1:1:1", edge: edge-01 }, { id: "dis:2:1:7", edge: edge-02 }]' \
+  '  unassignedEdge: edge-03' '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { ids: ["dis:3:1:1"] } }] }'
+expect_fail g-edge "sensorIngest.assignment.rules[r1].edge" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-09, match: { ids: ["dis:3:1:1"] } }] }'
+expect_fail g-nonasset "an asset cannot come from a non-asset source" sensorIngest: \
+  '  nonAssetSources: [{ application: 900, name: x }]' \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { ids: ["dis:7:900:1"] } }] }'
+expect_fail g-fb-missing "sensorIngest.assignment.fallbackEdge: required" sensorIngest: \
+  '  assignment: { rules: [{ name: r1, edge: edge-01, match: { country: [1] } }] }'
+expect_fail g-fb-unknown "sensorIngest.assignment.fallbackEdge" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-09, rules: [{ name: r1, edge: edge-01, match: { country: [1] } }] }'
+expect_fail g-fb-norules "sensorIngest.assignment.fallbackEdge: \"edge-03\" is set but" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03 }'
+expect_fail g-noname "sensorIngest.assignment.rules[0].name" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ edge: edge-01, match: { country: [1] } }] }'
+expect_fail g-dupname "name \"r1\" is used twice" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { country: [1] } }, { name: r1, edge: edge-02, match: { country: [2] } }] }'
+expect_fail g-match0 "sensorIngest.assignment.rules[r1].match" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: {} }] }'
+expect_fail g-match2 "sensorIngest.assignment.rules[r1].match" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { country: [1], marking: "^A" } }] }'
+expect_fail g-badid "sensorIngest.assignment.rules[r1].match.ids" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { ids: ["dis:1:1"] } }] }'
+expect_fail g-dupid "listed twice" sensorIngest: \
+  '  assignment: { fallbackEdge: edge-03, rules: [{ name: r1, edge: edge-01, match: { ids: ["dis:1:1:1"] } }, { name: r2, edge: edge-02, match: { ids: ["dis:1:1:1"] } }] }'
+
+# (e) nation stamping
+cat > "$M/nation.yaml" <<'YAML'
+sensorIngest:
+  nationStamping:
+    overrides: { "dis:1:1:1": ATL }
+    rules:
+      - { name: markings-1, nation: BDR, match: { marking: "^BD" } }
+      - { name: box-1, nation: ATL, match: { geofence: { south: 10.0, west: 20.0, north: 11.5, east: 21.5 } } }
+YAML
+helm template t "$CHART" -f "$M/nation.yaml" > "$M/nation-render.yaml" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && pass "9e: nation stamping renders" || fail "9e: rc=$rc"
+sidecar_env "$M/nation-render.yaml" > "$M/nation-env.json" 2>&1
+if "$PY" - "$M/nation-env.json" <<'PYEOF'
+import json, sys
+envs = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(envs) == 3
+want = {"overrides": {"dis:1:1:1": "ATL"}, "rules": [
+    {"name": "markings-1", "nation": "BDR", "match": {"marking": "^BD"}},
+    {"name": "box-1", "nation": "ATL", "match": {"geofence": {"south": 10.0, "west": 20.0, "north": 11.5, "east": 21.5}}}]}
+for name, env in envs.items():
+    assert json.loads(env["DIS_NATION_RULES"]) == want, name
+PYEOF
+then pass "9e: DIS_NATION_RULES is the overrides and rules, on every sidecar"
+else fail "9e: nation env wrong"; fi
+expect_fail n-badcode "sensorIngest.nationStamping.rules[r1].nation" sensorIngest: \
+  '  nationStamping: { rules: [{ name: r1, nation: atl, match: { country: [1] } }] }'
+expect_fail n-badover "sensorIngest.nationStamping.overrides" sensorIngest: \
+  '  nationStamping: { overrides: { "dis:1:1:1": ATLA } }'
+expect_fail n-badkey "sensorIngest.nationStamping.overrides" sensorIngest: \
+  '  nationStamping: { overrides: { "dis:1:1": ATL } }'
+expect_fail n-dupname "name \"r1\" is used twice" sensorIngest: \
+  '  nationStamping: { rules: [{ name: r1, nation: ATL, match: { country: [1] } }, { name: r1, nation: BDR, match: { country: [2] } }] }'
+expect_fail n-ids "sensorIngest.nationStamping.rules[r1].match" sensorIngest: \
+  '  nationStamping: { rules: [{ name: r1, nation: ATL, match: { ids: ["dis:1:1:1"] } }] }'
+out="$(helm template t "$CHART" 2>&1)"
+grep -q "DIS_NATION_RULES" <<<"$out" && fail "9e: DIS_NATION_RULES rendered with nothing set" \
+  || pass "9e: no DIS_NATION_RULES when nothing is set"
+
+# (f) a site-less non-asset source renders *:<app>; the list stays sorted
+cat > "$M/nosite.yaml" <<'YAML'
+sensorIngest:
+  nonAssetSources:
+    - { application: 900, name: any-site-adapter }
+    - { site: 1, application: 901, kind: 3, name: scenario-controller }
+    - { application: 902, kind: 4, name: any-site-kind }
+YAML
+helm template t "$CHART" -f "$M/nosite.yaml" > "$M/nosite-render.yaml" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && pass "9f: a site-less source renders" || fail "9f: rc=$rc"
+[ "$(grep -cF 'value: "*:900,*:902:4,1:901:3"' "$M/nosite-render.yaml")" -eq 3 ] \
+  && pass "9f: *:900 is on all three sidecars, sorted" || fail "9f: expected token list not on three sidecars"
+out="$("$CHECK" "$CHART" -f "$M/nosite.yaml" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && pass "9f: the checker agrees" || fail "9f: checker rc=$rc -- $out"
+expect_fail s-dup "source *:900 is listed twice" sensorIngest: \
+  '  nonAssetSources: [{ application: 900, name: x }, { application: 900, name: y }]'
+
+# (g) empty rules: the sidecar Deployments are byte-identical to the
+#     unchanged chart's, kept as golden files taken before this feature.
+GOLD="$HERE/golden-entity-assignment"
+for f in default valid sources fallback-only; do
+  if [ "$f" = default ]; then args=(); else args=(-f "$M/$f.yaml"); fi
+  helm template t "$CHART" "${args[@]}" 2>/dev/null | "$PY" "$HERE/sensor_ingest_docs.py" > "$M/gold-$f.yaml"
+  cmp -s "$M/gold-$f.yaml" "$GOLD/$f.yaml" && pass "9g: $f sidecar Deployments are byte-identical to the unchanged chart" \
+    || fail "9g: $f sidecar Deployments differ from the golden"
+done
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "test_entity_assignment.sh: ALL PASS"

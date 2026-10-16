@@ -1,0 +1,659 @@
+# Source: openddil-demo/templates/edge.yaml
+# ===========================================================================
+# sensor-ingest-edge-01 — DIS UDP ingestion
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t-sensor-ingest-edge-01
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: t
+    app.kubernetes.io/version: "0.1.5"
+    app.kubernetes.io/part-of: openddil
+    helm.sh/chart: openddil-demo-VERSION
+    app.kubernetes.io/name: openddil-demo
+    app.kubernetes.io/component: sensor-ingest-edge-01
+  annotations:
+    # openddil.io/produces-topics -- same
+    # shape as openddil.io/consumer-groups, space-separated <broker-id>/
+    # <topic> pairs, on the workload that ORIGINATES the records. Reads the
+    # SAME $sensorIngestTopic the KAFKA_TOPIC env below reads.
+    openddil.io/produces-topics: "edge-01/ingress-dis-raw"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openddil-demo
+      app.kubernetes.io/component: sensor-ingest-edge-01
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: t
+        app.kubernetes.io/version: "0.1.5"
+        app.kubernetes.io/part-of: openddil
+        app.kubernetes.io/name: openddil-demo
+        app.kubernetes.io/component: sensor-ingest-edge-01
+    spec:
+      initContainers:
+        # ontology: DIS entity-appearance decoding reads dis_appearance.yaml
+        # from /ontology (ADR-0026 / ADR-0030). Stage 1 gained this dependency
+        # when appearance decoding landed; appearance.py defaults to that path.
+        #
+        # WITHOUT THE MOUNT THE DECODER IS INERT RATHER THAN BROKEN: a missing
+        # table means it emits no appearance facts at all, which is the same
+        # honest outcome as an undeclared source. Correct fail-safe behaviour —
+        # and exactly why the gap was invisible on 2026-08-28: the pipeline
+        # stayed green, no pod complained, and the health axis simply never
+        # populated. A dependency that fails safely still has to be declared.
+        - name: bundle-loader
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # contracts/gen/python -> /shared/proto
+              mkdir -p "$(dirname /shared/proto)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/proto"
+              if [ -f "/bundle/contracts/gen/python" ]; then
+                cp "/bundle/contracts/gen/python" "/shared/proto"
+              else
+                cp -r "/bundle/contracts/gen/python" "/shared/proto"
+              fi
+              # contracts/ontology -> /shared/ontology
+              mkdir -p "$(dirname /shared/ontology)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/ontology"
+              if [ -f "/bundle/contracts/ontology" ]; then
+                cp "/bundle/contracts/ontology" "/shared/ontology"
+              else
+                cp -r "/bundle/contracts/ontology" "/shared/ontology"
+              fi
+              # demo/ontology -> /shared/ontology (OVERLAY)
+              mkdir -p "$(dirname /shared/ontology)"
+              # OVERLAY: merge CONTENTS into an existing destination directory.
+              # `cp -r src dst` on an existing dst copies the directory INTO it
+              # (/shared/ontology/ontology/), which is silent and produces a tree
+              # nothing reads. The trailing `/.` is what makes this a merge.
+              #
+              # Overlay entries must be listed AFTER the base they overlay; the
+              # later copy wins on a filename collision, which is the intended
+              # precedence (a deployment may override a shipped default).
+              mkdir -p "/shared/ontology"
+              cp -r "/bundle/demo/ontology/." "/shared/ontology/"
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
+      containers:
+        - name: sensor-ingest
+          image: ghcr.io/edgy-solutions/openddil/sensor-ingest:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "dis_ingestor.py"]
+          env:
+            - name: KAFKA_BROKERS
+              value: "t-redpanda-edge-01:9092"
+            - name: KAFKA_TOPIC
+              value: "ingress-dis-raw"
+            - name: OPENDDIL_EDGE_ID
+              value: "edge-01"
+            - name: OPENDDIL_REGION_ID
+              value: "region-east"
+            - name: UDP_PORT
+              value: "62040"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app"
+            - name: INGEST_SPOOL_DIR
+              value: "/var/spool/ingest"
+            - name: INGEST_SPOOL_MAX
+              value: "10000"
+            - name: INGEST_SPOOL_STALL_S
+              value: "90"
+          ports:
+            - name: dis-udp
+              protocol: UDP
+              containerPort: 62040
+            - name: http
+              containerPort: 8080
+          # STALL DETECTION GATES LIVENESS, NOT READINESS.
+          #
+          # Readiness removes a pod from Service endpoints, which means
+          # nothing for a Kafka client: nobody routes to it, and the pod that
+          # is stuck stays stuck. The remedy for a wedge is a RESTART, and
+          # restart is what liveness does. Wiring this to readiness would ship
+          # a probe that flips endpoints nobody reads while the wedged process
+          # runs forever — a check that appears to act and does not.
+          #
+          # The endpoint answers 503 only when INPUT ADVANCED AND OUTPUT DID
+          # NOT. Both terms are load-bearing: "output stopped" alone fires on
+          # a quiet fleet, and a liveness probe that restarts healthy pods
+          # every window is a worse outage than the wedge it was added to
+          # catch.
+          #
+          # THRESHOLDS ARE MINUTES. failureThreshold x periodSeconds is the
+          # real budget, and it is deliberately long — a wedge that persists
+          # for minutes is still caught far sooner than a person would notice
+          # it, while a flapping probe is an outage of its own making.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 4
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            # The init container COPIES the ontology into the shared volume;
+            # this is what makes it visible to the process. Both halves are
+            # required and only one of them is obvious — adding the copy alone
+            # leaves /ontology absent and the appearance decoder silently
+            # inert, which is how this was missed the first time.
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: ingest-spool
+              mountPath: /var/spool/ingest
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+        - name: ingest-spool
+          emptyDir:
+            sizeLimit: "64Mi"
+---
+# Source: openddil-demo/templates/edge.yaml
+# ===========================================================================
+# sensor-ingest-edge-02 — DIS UDP ingestion
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t-sensor-ingest-edge-02
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: t
+    app.kubernetes.io/version: "0.1.5"
+    app.kubernetes.io/part-of: openddil
+    helm.sh/chart: openddil-demo-VERSION
+    app.kubernetes.io/name: openddil-demo
+    app.kubernetes.io/component: sensor-ingest-edge-02
+  annotations:
+    # openddil.io/produces-topics -- same
+    # shape as openddil.io/consumer-groups, space-separated <broker-id>/
+    # <topic> pairs, on the workload that ORIGINATES the records. Reads the
+    # SAME $sensorIngestTopic the KAFKA_TOPIC env below reads.
+    openddil.io/produces-topics: "edge-02/ingress-dis-raw"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openddil-demo
+      app.kubernetes.io/component: sensor-ingest-edge-02
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: t
+        app.kubernetes.io/version: "0.1.5"
+        app.kubernetes.io/part-of: openddil
+        app.kubernetes.io/name: openddil-demo
+        app.kubernetes.io/component: sensor-ingest-edge-02
+    spec:
+      initContainers:
+        # ontology: DIS entity-appearance decoding reads dis_appearance.yaml
+        # from /ontology (ADR-0026 / ADR-0030). Stage 1 gained this dependency
+        # when appearance decoding landed; appearance.py defaults to that path.
+        #
+        # WITHOUT THE MOUNT THE DECODER IS INERT RATHER THAN BROKEN: a missing
+        # table means it emits no appearance facts at all, which is the same
+        # honest outcome as an undeclared source. Correct fail-safe behaviour —
+        # and exactly why the gap was invisible on 2026-08-28: the pipeline
+        # stayed green, no pod complained, and the health axis simply never
+        # populated. A dependency that fails safely still has to be declared.
+        - name: bundle-loader
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # contracts/gen/python -> /shared/proto
+              mkdir -p "$(dirname /shared/proto)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/proto"
+              if [ -f "/bundle/contracts/gen/python" ]; then
+                cp "/bundle/contracts/gen/python" "/shared/proto"
+              else
+                cp -r "/bundle/contracts/gen/python" "/shared/proto"
+              fi
+              # contracts/ontology -> /shared/ontology
+              mkdir -p "$(dirname /shared/ontology)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/ontology"
+              if [ -f "/bundle/contracts/ontology" ]; then
+                cp "/bundle/contracts/ontology" "/shared/ontology"
+              else
+                cp -r "/bundle/contracts/ontology" "/shared/ontology"
+              fi
+              # demo/ontology -> /shared/ontology (OVERLAY)
+              mkdir -p "$(dirname /shared/ontology)"
+              # OVERLAY: merge CONTENTS into an existing destination directory.
+              # `cp -r src dst` on an existing dst copies the directory INTO it
+              # (/shared/ontology/ontology/), which is silent and produces a tree
+              # nothing reads. The trailing `/.` is what makes this a merge.
+              #
+              # Overlay entries must be listed AFTER the base they overlay; the
+              # later copy wins on a filename collision, which is the intended
+              # precedence (a deployment may override a shipped default).
+              mkdir -p "/shared/ontology"
+              cp -r "/bundle/demo/ontology/." "/shared/ontology/"
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
+      containers:
+        - name: sensor-ingest
+          image: ghcr.io/edgy-solutions/openddil/sensor-ingest:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "dis_ingestor.py"]
+          env:
+            - name: KAFKA_BROKERS
+              value: "t-redpanda-edge-02:9092"
+            - name: KAFKA_TOPIC
+              value: "ingress-dis-raw"
+            - name: OPENDDIL_EDGE_ID
+              value: "edge-02"
+            - name: OPENDDIL_REGION_ID
+              value: "region-east"
+            - name: UDP_PORT
+              value: "62041"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app"
+            - name: INGEST_SPOOL_DIR
+              value: "/var/spool/ingest"
+            - name: INGEST_SPOOL_MAX
+              value: "10000"
+            - name: INGEST_SPOOL_STALL_S
+              value: "90"
+          ports:
+            - name: dis-udp
+              protocol: UDP
+              containerPort: 62041
+            - name: http
+              containerPort: 8080
+          # STALL DETECTION GATES LIVENESS, NOT READINESS.
+          #
+          # Readiness removes a pod from Service endpoints, which means
+          # nothing for a Kafka client: nobody routes to it, and the pod that
+          # is stuck stays stuck. The remedy for a wedge is a RESTART, and
+          # restart is what liveness does. Wiring this to readiness would ship
+          # a probe that flips endpoints nobody reads while the wedged process
+          # runs forever — a check that appears to act and does not.
+          #
+          # The endpoint answers 503 only when INPUT ADVANCED AND OUTPUT DID
+          # NOT. Both terms are load-bearing: "output stopped" alone fires on
+          # a quiet fleet, and a liveness probe that restarts healthy pods
+          # every window is a worse outage than the wedge it was added to
+          # catch.
+          #
+          # THRESHOLDS ARE MINUTES. failureThreshold x periodSeconds is the
+          # real budget, and it is deliberately long — a wedge that persists
+          # for minutes is still caught far sooner than a person would notice
+          # it, while a flapping probe is an outage of its own making.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 4
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            # The init container COPIES the ontology into the shared volume;
+            # this is what makes it visible to the process. Both halves are
+            # required and only one of them is obvious — adding the copy alone
+            # leaves /ontology absent and the appearance decoder silently
+            # inert, which is how this was missed the first time.
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: ingest-spool
+              mountPath: /var/spool/ingest
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+        - name: ingest-spool
+          emptyDir:
+            sizeLimit: "64Mi"
+---
+# Source: openddil-demo/templates/edge.yaml
+# ===========================================================================
+# sensor-ingest-edge-03 — DIS UDP ingestion
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t-sensor-ingest-edge-03
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: t
+    app.kubernetes.io/version: "0.1.5"
+    app.kubernetes.io/part-of: openddil
+    helm.sh/chart: openddil-demo-VERSION
+    app.kubernetes.io/name: openddil-demo
+    app.kubernetes.io/component: sensor-ingest-edge-03
+  annotations:
+    # openddil.io/produces-topics -- same
+    # shape as openddil.io/consumer-groups, space-separated <broker-id>/
+    # <topic> pairs, on the workload that ORIGINATES the records. Reads the
+    # SAME $sensorIngestTopic the KAFKA_TOPIC env below reads.
+    openddil.io/produces-topics: "edge-03/ingress-dis-raw"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openddil-demo
+      app.kubernetes.io/component: sensor-ingest-edge-03
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: t
+        app.kubernetes.io/version: "0.1.5"
+        app.kubernetes.io/part-of: openddil
+        app.kubernetes.io/name: openddil-demo
+        app.kubernetes.io/component: sensor-ingest-edge-03
+    spec:
+      initContainers:
+        # ontology: DIS entity-appearance decoding reads dis_appearance.yaml
+        # from /ontology (ADR-0026 / ADR-0030). Stage 1 gained this dependency
+        # when appearance decoding landed; appearance.py defaults to that path.
+        #
+        # WITHOUT THE MOUNT THE DECODER IS INERT RATHER THAN BROKEN: a missing
+        # table means it emits no appearance facts at all, which is the same
+        # honest outcome as an undeclared source. Correct fail-safe behaviour —
+        # and exactly why the gap was invisible on 2026-08-28: the pipeline
+        # stayed green, no pod complained, and the health axis simply never
+        # populated. A dependency that fails safely still has to be declared.
+        - name: bundle-loader
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # contracts/gen/python -> /shared/proto
+              mkdir -p "$(dirname /shared/proto)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/proto"
+              if [ -f "/bundle/contracts/gen/python" ]; then
+                cp "/bundle/contracts/gen/python" "/shared/proto"
+              else
+                cp -r "/bundle/contracts/gen/python" "/shared/proto"
+              fi
+              # contracts/ontology -> /shared/ontology
+              mkdir -p "$(dirname /shared/ontology)"
+              # IDEMPOTENT, because this init container runs more than once against
+              # the SAME emptyDir. The volume survives container restarts within a
+              # pod, so on any rerun `/shared/<dst>` already exists -- and `cp -r src
+              # dst` on an existing directory copies INTO it, producing
+              # /shared/proto/proto/openddil/... instead of replacing the tree.
+              #
+              # MEASURED 2026-09-16: the DIS mapper at edge-01 sat in
+              # CrashLoopBackOff with 949 restarts, failing to start on
+              #   symbol "openddil.common.v1.Quantity" already defined at
+              #   openddil/common/v1/quantity.proto
+              # -- the same file reachable under two import paths because the tree had
+              # been nested. Each retry nested it one level deeper, so the failure fed
+              # itself. A fresh pod (clean emptyDir) came up immediately with a single
+              # tree, which is what identified the cause.
+              #
+              # The OVERLAY branch below already guards this hazard with `/.` and an
+              # explicit mkdir, and its comment describes the exact failure -- for the
+              # ontology tree. This branch never got the same treatment, so the guard
+              # existed beside the hole it was written for.
+              rm -rf "/shared/ontology"
+              if [ -f "/bundle/contracts/ontology" ]; then
+                cp "/bundle/contracts/ontology" "/shared/ontology"
+              else
+                cp -r "/bundle/contracts/ontology" "/shared/ontology"
+              fi
+              # demo/ontology -> /shared/ontology (OVERLAY)
+              mkdir -p "$(dirname /shared/ontology)"
+              # OVERLAY: merge CONTENTS into an existing destination directory.
+              # `cp -r src dst` on an existing dst copies the directory INTO it
+              # (/shared/ontology/ontology/), which is silent and produces a tree
+              # nothing reads. The trailing `/.` is what makes this a merge.
+              #
+              # Overlay entries must be listed AFTER the base they overlay; the
+              # later copy wins on a filename collision, which is the intended
+              # precedence (a deployment may override a shipped default).
+              mkdir -p "/shared/ontology"
+              cp -r "/bundle/demo/ontology/." "/shared/ontology/"
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /shared
+      containers:
+        - name: sensor-ingest
+          image: ghcr.io/edgy-solutions/openddil/sensor-ingest:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "dis_ingestor.py"]
+          env:
+            - name: KAFKA_BROKERS
+              value: "t-redpanda-edge-03:9092"
+            - name: KAFKA_TOPIC
+              value: "ingress-dis-raw"
+            - name: OPENDDIL_EDGE_ID
+              value: "edge-03"
+            - name: OPENDDIL_REGION_ID
+              value: "region-west"
+            - name: UDP_PORT
+              value: "62042"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PYTHONPATH
+              value: "/proto:/app"
+            - name: INGEST_SPOOL_DIR
+              value: "/var/spool/ingest"
+            - name: INGEST_SPOOL_MAX
+              value: "10000"
+            - name: INGEST_SPOOL_STALL_S
+              value: "90"
+          ports:
+            - name: dis-udp
+              protocol: UDP
+              containerPort: 62042
+            - name: http
+              containerPort: 8080
+          # STALL DETECTION GATES LIVENESS, NOT READINESS.
+          #
+          # Readiness removes a pod from Service endpoints, which means
+          # nothing for a Kafka client: nobody routes to it, and the pod that
+          # is stuck stays stuck. The remedy for a wedge is a RESTART, and
+          # restart is what liveness does. Wiring this to readiness would ship
+          # a probe that flips endpoints nobody reads while the wedged process
+          # runs forever — a check that appears to act and does not.
+          #
+          # The endpoint answers 503 only when INPUT ADVANCED AND OUTPUT DID
+          # NOT. Both terms are load-bearing: "output stopped" alone fires on
+          # a quiet fleet, and a liveness probe that restarts healthy pods
+          # every window is a worse outage than the wedge it was added to
+          # catch.
+          #
+          # THRESHOLDS ARE MINUTES. failureThreshold x periodSeconds is the
+          # real budget, and it is deliberately long — a wedge that persists
+          # for minutes is still caught far sooner than a person would notice
+          # it, while a flapping probe is an outage of its own making.
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 4
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            # The init container COPIES the ontology into the shared volume;
+            # this is what makes it visible to the process. Both halves are
+            # required and only one of them is obvious — adding the copy alone
+            # leaves /ontology absent and the appearance decoder silently
+            # inert, which is how this was missed the first time.
+            - name: bundle-shared
+              mountPath: /ontology
+              subPath: ontology
+            - name: ingest-spool
+              mountPath: /var/spool/ingest
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+        - name: ingest-spool
+          emptyDir:
+            sizeLimit: "64Mi"

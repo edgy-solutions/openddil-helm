@@ -547,7 +547,71 @@ sensorIngest:
   #   nonAssetSources:
   #     - { site: 1, application: 900, name: stand-in-adapter }
   #     - { site: 1, application: 901, kind: 3, name: scenario-controller }
+  #     - { application: 902, name: any-site-adapter }
+  #
+  # `site` is optional. Left out, the entry matches that application at
+  # any site and renders `*:<app>[:<kind>]`; the duplicate check and the
+  # entityAssignment / assignment id check both treat it that way.
   nonAssetSources: []
+  # The rules model, an alternative to entityAssignment: instead of naming
+  # every entity, say which edge owns what. {rules: [], fallbackEdge: ""}.
+  # Each rule is {name, edge, match} and `match` has exactly ONE key:
+  #   ids:      [dis:S:A:E, ...]   exact entities
+  #   geofence: {south, west, north, east}
+  #   marking:  <regex>
+  #   country:  [<int>, ...]
+  # Rules are tried in list order and the FIRST match wins. Only Entity
+  # State kind 1 is decided by geofence, marking and country; an id rule
+  # is the only way to place any other kind, and one no id rule names is
+  # owned by the fallback edge.
+  #
+  # The decision is sticky: an entity keeps the edge it was first given,
+  # even if it later moves out of the box or its marking changes. An entity
+  # that matches no rule belongs to `fallbackEdge`, which therefore owns
+  # everything unmatched. Before an entity's first Entity State arrives
+  # there is nothing to match on, so it is undecided: no sidecar claims it,
+  # and any other PDU for it is dropped until its Entity State decides it.
+  #
+  # `fallbackEdge` is required once rules are set, must be in edges[], and
+  # is refused while rules is empty. Setting this and entityAssignment is
+  # refused: one model per deployment. Every sensor-ingest sidecar gets the
+  # same DIS_ASSIGNMENT_RULES and DIS_FALLBACK_EDGE and no admit or deny
+  # list. Validated at render time (templates/edge.yaml): edges, unique
+  # non-empty names, exactly one match key, id shape and duplicates, and
+  # ids from a nonAssetSources source. The regex, the geofence numbers and
+  # the country ints are NOT re-checked here; the sidecar fails closed on
+  # them at start.
+  #
+  # Example:
+  #   assignment:
+  #     fallbackEdge: edge-b
+  #     rules:
+  #       - { name: box-1, edge: edge-a, match: { geofence: { south: 10.0, west: 20.0, north: 11.5, east: 21.5 } } }
+  #       - { name: markings-1, edge: edge-a, match: { marking: "^AB" } }
+  assignment:
+    rules: []
+    fallbackEdge: ""
+  # The nation stamp: which nation an entity belongs to, written by the
+  # sidecar as `stamped_nation` on what it publishes (omitted when no
+  # nation is known). {overrides: {}, rules: []}. `overrides` maps an id to
+  # a nation, and wins over `rules`; `rules` are {name, nation, match} with
+  # `match` one of geofence, marking, country (same shapes as above, no
+  # ids), first match wins, kind 1 only. Like assignment, the stamp is
+  # sticky per entity. A nation is three capital letters. Names must
+  # be unique and ids well formed. Rendered as DIS_NATION_RULES on every
+  # sidecar, and only when overrides or rules is non-empty.
+  #
+  # Where the stamp ranks as a releasability label: below an explicit
+  # declaration and below a per-asset row, and above the file default.
+  #
+  # Example:
+  #   nationStamping:
+  #     overrides: { "dis:1:1:1": ATL }
+  #     rules:
+  #       - { name: markings-1, nation: BDR, match: { marking: "^BD" } }
+  nationStamping:
+    overrides: {}
+    rules: []
 
 redpandaConnect:
   # DIS entity kinds per ingress path (ADR-0049). `asset`: kinds that may

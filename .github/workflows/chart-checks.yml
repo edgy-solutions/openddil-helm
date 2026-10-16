@@ -19,6 +19,9 @@ on:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
       - "scripts/check-entity-assignment.sh"
+      - "scripts/tests/test_entity_assignment.sh"
+      - "scripts/tests/sensor_ingest_docs.py"
+      - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
@@ -29,6 +32,9 @@ on:
       - "openddil-demo/**"
       - "scripts/check-chart-render.sh"
       - "scripts/check-entity-assignment.sh"
+      - "scripts/tests/test_entity_assignment.sh"
+      - "scripts/tests/sensor_ingest_docs.py"
+      - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
@@ -245,6 +251,26 @@ jobs:
       # copied into a second one.
       - name: Entity assignment coverage
         run: ./scripts/check-entity-assignment.sh ./openddil-demo
+
+      # The render-time refusals of sensorIngest.entityAssignment, the rules
+      # model (sensorIngest.assignment), nationStamping and site-less
+      # nonAssetSources, the checker's rules mode, and the byte-identity of
+      # the sensor-ingest Deployments when no rules are set.
+      - name: Entity assignment render test
+        run: bash scripts/tests/test_entity_assignment.sh
+
+      # One plant: an admit list rendered alongside the rules. The test must
+      # exit non-zero AND print the rules-env line it breaks.
+      - name: Entity assignment red-check
+        run: |
+          rm -rf /tmp/ea-red && mkdir /tmp/ea-red && cp -r openddil-demo /tmp/ea-red/openddil-demo
+          sed -i 's|^\( *\)- name: DIS_FALLBACK_EDGE$|\1- name: DIS_ADMITTED_ENTITY_IDS\n\1  value: "dis:1:1:1"\n&|' /tmp/ea-red/openddil-demo/templates/edge.yaml
+          cmp -s openddil-demo/templates/edge.yaml /tmp/ea-red/openddil-demo/templates/edge.yaml && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          cp -r scripts /tmp/ea-red/scripts
+          if bash /tmp/ea-red/scripts/tests/test_entity_assignment.sh > /tmp/ea-red.log 2>&1; then
+            cat /tmp/ea-red.log; echo "RED CHECK FAILED: the plant passed"; exit 1; fi
+          grep -qF -- "FAIL: 9a: rules env wrong" /tmp/ea-red.log || { cat /tmp/ea-red.log; echo "RED CHECK FAILED: failed, but without the rules-env line"; exit 1; }
+          echo "red-check green: FAIL: 9a: rules env wrong"
 
       # Does the chart emit a tier config the FRONTEND will accept?
       #

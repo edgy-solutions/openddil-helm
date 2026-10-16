@@ -39,7 +39,19 @@
 #      when that set is empty -- its own entries, if any, are not denied)
 #   5. no other edge carries DIS_DENIED_ENTITY_IDS
 #   6. every sidecar's DIS_NON_ASSET_SOURCES agrees with
-#      sensorIngest.nonAssetSources (absent iff the list is empty)
+#      sensorIngest.nonAssetSources (absent iff the list is empty; a source
+#      with no site is `*:<app>[:<kind>]`)
+#
+# RULES MODE. When sensorIngest.assignment.rules is non-empty the chart
+# renders no per-edge id list at all, so checks 1-5 have nothing to compare
+# and would pass vacuously. The checker recognises the mode (any sidecar
+# carrying DIS_ASSIGNMENT_RULES, or rules in the values) and checks instead:
+#   a. the mode in the render and in the values agree
+#   b. every sidecar carries DIS_ASSIGNMENT_RULES, all identical, equal to
+#      the rules in the values, and the same DIS_FALLBACK_EDGE as the values
+#   c. no sidecar carries DIS_ADMITTED_ENTITY_IDS or DIS_DENIED_ENTITY_IDS
+#   d. check 6 above
+# and reports "rules mode" in its OK line.
 #
 # TESTABILITY
 # -----------
@@ -173,7 +185,8 @@ non_asset = merged_key("nonAssetSources", [])
 
 
 def source_token(src):
-    t = f"{int(src['site'])}:{int(src['application'])}"
+    site = "*" if src.get("site") is None else f"{int(src['site'])}"
+    t = f"{site}:{int(src['application'])}"
     if src.get("kind") is not None:
         t += f":{int(src['kind'])}"
     return t
@@ -204,6 +217,82 @@ for d in docs:
 if not sensor_deploys:
     print("NOT RUN: the render produced no sensor-ingest Deployments.", file=sys.stderr)
     sys.exit(3)
+
+def merged_assignment():
+    """sensorIngest.assignment across the files: a dict, so Helm merges it
+    key by key -- the last file to set `rules` (or `fallbackEdge`) wins."""
+    out = {"rules": [], "fallbackEdge": ""}
+    for path in [chart_values_path] + value_file_paths:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        a = (doc.get("sensorIngest") or {}).get("assignment")
+        if isinstance(a, dict):
+            for k in out:
+                if k in a:
+                    out[k] = a[k] or ([] if k == "rules" else "")
+    return out
+
+
+import json
+
+envs = {}
+for name, c in sensor_deploys:
+    envs[name] = {e.get("name"): e.get("value") for e in (c.get("env") or [])}
+assign = merged_assignment()
+render_rules_mode = any("DIS_ASSIGNMENT_RULES" in e for e in envs.values())
+values_rules_mode = len(assign["rules"]) > 0
+
+if render_rules_mode or values_rules_mode:
+    fail = False
+    if render_rules_mode != values_rules_mode:
+        print(f"FAIL: rules mode in the render is {render_rules_mode} but "
+              f"sensorIngest.assignment.rules says {values_rules_mode}")
+        sys.exit(1)
+    if entity_map:
+        print("FAIL: sensorIngest.entityAssignment is set in rules mode; "
+              "one model per deployment")
+        fail = True
+    want_rules = assign["rules"]
+    seen_rules = {}
+    for name, env in sorted(envs.items()):
+        raw = env.get("DIS_ASSIGNMENT_RULES")
+        if raw is None:
+            print(f"FAIL: {name} carries no DIS_ASSIGNMENT_RULES in rules mode")
+            fail = True
+            continue
+        try:
+            got = json.loads(raw)
+        except ValueError:
+            print(f"FAIL: {name} DIS_ASSIGNMENT_RULES is not JSON")
+            fail = True
+            continue
+        seen_rules[name] = raw
+        if got != want_rules:
+            print(f"FAIL: {name} DIS_ASSIGNMENT_RULES differs from "
+                  f"sensorIngest.assignment.rules")
+            fail = True
+        if env.get("DIS_FALLBACK_EDGE") != assign["fallbackEdge"]:
+            print(f"FAIL: {name} DIS_FALLBACK_EDGE {env.get('DIS_FALLBACK_EDGE')!r} != "
+                  f"{assign['fallbackEdge']!r} from sensorIngest.assignment.fallbackEdge")
+            fail = True
+        for bad in ("DIS_ADMITTED_ENTITY_IDS", "DIS_DENIED_ENTITY_IDS"):
+            if bad in env:
+                print(f"FAIL: {name} carries {bad} in rules mode")
+                fail = True
+    if len(set(seen_rules.values())) > 1:
+        print("FAIL: sidecars do not carry identical DIS_ASSIGNMENT_RULES")
+        fail = True
+    for name, env in sorted(envs.items()):
+        if (env.get("DIS_NON_ASSET_SOURCES") or "") != expected_sources:
+            print(f"FAIL: {name} DIS_NON_ASSET_SOURCES {env.get('DIS_NON_ASSET_SOURCES')!r} != "
+                  f"{expected_sources!r} from sensorIngest.nonAssetSources")
+            fail = True
+    if fail:
+        sys.exit(1)
+    print(f"OK: rules mode: {len(envs)} sensor-ingest Deployment(s) carry the same "
+          f"{len(want_rules)} assignment rule(s) and fallback edge "
+          f"{assign['fallbackEdge']!r}; no admit or deny env.")
+    sys.exit(0)
 
 rendered = {}  # name -> (has_env, set(ids)); non-fallback edges only
 fallback = {}  # name -> (admit raw, deny raw)
