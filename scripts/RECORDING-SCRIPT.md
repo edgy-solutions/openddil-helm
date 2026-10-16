@@ -447,8 +447,13 @@ something the logistics system of record fielded has arrived.
    the nation they assign. Show it only if Bram's profile is already up.
 4. **Ada declares it.** The form is pre-filled from the observation. She
    picks the unit from the deployment's list, sets nation **ATL**, enters a
-   serial, and leaves the baseline at none: the lab has no baseline for this
-   variant. Submit: **201** (measured 2026-10-15, rev 171). The
+   serial, and picks the lab's baseline for that variant from the list: the
+   declaration assigns the baseline. The hub's CM service checks the asset
+   against it (`initialized against declared baseline … (declaration; …)`
+   in its log), and the asset keeps that baseline across an upgrade
+   (measured 2026-10-16, rev 177). Its configuration state reads a major
+   discrepancy against that baseline; do not promise a compliant reading.
+   Submit: **201** (measured 2026-10-15, rev 171, without a baseline). The
    declaration reached HQ's store in **1 s**. The first labelled sample came
    at **+11 s**, because the label cache holds for 10 s. The row leaves the
    panel.
