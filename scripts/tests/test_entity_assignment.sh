@@ -400,6 +400,16 @@ expect_fail n-badcode "sensorIngest.nationStamping.rules[r1].nation" sensorInges
   '  nationStamping: { rules: [{ name: r1, nation: atl, match: { country: [1] } }] }'
 expect_fail n-badover "sensorIngest.nationStamping.overrides" sensorIngest: \
   '  nationStamping: { overrides: { "dis:1:1:1": ATLA } }'
+expect_fail n-exempt-case "must be three capital letters or \"exempt\"" sensorIngest:   '  nationStamping: { overrides: { "dis:1:1:1": EXEMPT } }'
+expect_fail n-exempt-suffix "must be three capital letters or \"exempt\"" sensorIngest:   '  nationStamping: { overrides: { "dis:1:1:1": exempt2 } }'
+cat > "$M/nation-exempt.yaml" <<'YAML'
+sensorIngest:
+  nationStamping:
+    overrides: { "dis:1:1:1": exempt, "dis:7:1:42": ATL }
+YAML
+helm template t "$CHART" -f "$M/nation-exempt.yaml" > "$M/nation-exempt-render.yaml" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -qF '\"dis:1:1:1\":\"exempt\"' "$M/nation-exempt-render.yaml"   && pass "9e: an exempt override renders into DIS_NATION_RULES"   || fail "9e: exempt override rc=$rc or not in DIS_NATION_RULES"
+
 expect_fail n-badkey "sensorIngest.nationStamping.overrides" sensorIngest: \
   '  nationStamping: { overrides: { "dis:1:1": ATL } }'
 expect_fail n-dupname "name \"r1\" is used twice" sensorIngest: \

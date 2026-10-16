@@ -160,8 +160,8 @@
 {{- if not (regexMatch "^dis:[0-9]+:[0-9]+:[0-9]+$" ($okey | toString)) }}
 {{- fail (printf "sensorIngest.nationStamping.overrides: malformed id %q -- must match dis:<site>:<application>:<entity>" $okey) }}
 {{- end }}
-{{- if not (regexMatch "^[A-Z]{3}$" ($oval | toString)) }}
-{{- fail (printf "sensorIngest.nationStamping.overrides: nation %q for id %q must be three capital letters" $oval $okey) }}
+{{- if not (or (regexMatch "^[A-Z]{3}$" ($oval | toString)) (eq ($oval | toString) "exempt")) }}
+{{- fail (printf "sensorIngest.nationStamping.overrides: nation %q for id %q must be three capital letters or \"exempt\"" $oval $okey) }}
 {{- end }}
 {{- end }}
 {{- $seenNationNames := list }}

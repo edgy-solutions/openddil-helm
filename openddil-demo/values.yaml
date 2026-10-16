@@ -597,7 +597,10 @@ sensorIngest:
   # a nation, and wins over `rules`; `rules` are {name, nation, match} with
   # `match` one of geofence, marking, country (same shapes as above, no
   # ids), first match wins, kind 1 only. Like assignment, the stamp is
-  # sticky per entity. A nation is three capital letters. Names must
+  # sticky per entity. A nation is three capital letters. An override of
+  # the string `exempt` keeps that entity out of every rule (never stamped);
+  # null is not accepted, since Helm gives null a special meaning in values
+  # (it removes a key merged over a chart default), so use the string. Names must
   # be unique and ids well formed. Rendered as DIS_NATION_RULES on every
   # sidecar, and only when overrides or rules is non-empty.
   #
