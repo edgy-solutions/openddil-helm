@@ -183,6 +183,40 @@ jobs:
           red "fielding when:" "over-declared: t-logistics-sim asset-fielding" \
             -- python scripts/check-produces-declarations.py --rendered /tmp/fielded-empty.yaml
 
+      # The deployment-layer users (releasability.deploymentLayer.usersPromotedYaml / realmUsersJson): the
+      # render proof, against the shipped realm template from the demo checkout above. Exit 2 (no python with
+      # PyYAML) fails the step too: a skip here would read as green while checking nothing.
+      - name: Deployment-layer users render test
+        env:
+          REALM: ${{ github.workspace }}/produces-repos/openddil-demo/policy/realm-openddil.json
+        run: bash scripts/tests/test_deployment_layer_users.sh
+
+      # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
+      # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments
+      # swapped (overlay merged into, realm read as the overlay).
+      - name: Deployment-layer users red-check
+        env:
+          REALM: ${{ github.workspace }}/produces-repos/openddil-demo/policy/realm-openddil.json
+        run: |
+          plant() { # label, expected line, chart copy
+            if CHART="$3" bash scripts/tests/test_deployment_layer_users.sh > /tmp/dlu-red.log 2>&1; then
+              cat /tmp/dlu-red.log; echo "RED CHECK FAILED ($1): the plant passed"; exit 1; fi
+            grep -qF -- "$2" /tmp/dlu-red.log || { cat /tmp/dlu-red.log; echo "RED CHECK FAILED ($1): failed, but without $2"; exit 1; }
+            echo "red-check green ($1): $2"
+          }
+          cp -r openddil-demo /tmp/dlu-clash
+          sed -i 's#raise SystemExit("FATAL: username %r is used by more than one realm user after the merge" % name)#pass#' \
+            /tmp/dlu-clash/files/merge-realm-users.py
+          cmp -s openddil-demo/files/merge-realm-users.py /tmp/dlu-clash/files/merge-realm-users.py \
+            && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          plant "clash refusal removed" "FAIL R3 username clash with a bundle user is refused" /tmp/dlu-clash
+          cp -r openddil-demo /tmp/dlu-args
+          sed -i 's#"/bundle-realm/realm-openddil.json", "/subst/realm-users-overlay.json"\]#"/subst/realm-users-overlay.json", "/bundle-realm/realm-openddil.json"]#' \
+            /tmp/dlu-args/templates/releasability.yaml
+          cmp -s openddil-demo/templates/releasability.yaml /tmp/dlu-args/templates/releasability.yaml \
+            && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          plant "merge arguments swapped" "FAIL R1 merge container runs the script on the staged realm" /tmp/dlu-args
+
       # Does the render actually carry the DIS entity allow-list that
       # sensorIngest.entityAssignment (values.yaml) declares?
       # templates/edge.yaml's own render-time validation already refuses a
