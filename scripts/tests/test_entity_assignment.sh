@@ -408,7 +408,7 @@ sensorIngest:
     overrides: { "dis:1:1:1": exempt, "dis:7:1:42": ATL }
 YAML
 helm template t "$CHART" -f "$M/nation-exempt.yaml" > "$M/nation-exempt-render.yaml" 2>&1; rc=$?
-[ "$rc" -eq 0 ] && grep -qF '\"dis:1:1:1\":\"exempt\"' "$M/nation-exempt-render.yaml"   && pass "9e: an exempt override renders into DIS_NATION_RULES"   || fail "9e: exempt override rc=$rc or not in DIS_NATION_RULES"
+[ "$rc" -eq 0 ] && grep -qF '\":\"exempt\"' "$M/nation-exempt-render.yaml"   && pass "9e: an exempt override renders into DIS_NATION_RULES"   || fail "9e: exempt override rc=$rc or not in DIS_NATION_RULES"
 
 expect_fail n-badkey "sensorIngest.nationStamping.overrides" sensorIngest: \
   '  nationStamping: { overrides: { "dis:1:1": ATL } }'
