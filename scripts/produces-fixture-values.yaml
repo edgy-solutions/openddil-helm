@@ -1,0 +1,20 @@
+releasability:
+  enabled: true
+tierNode:
+  enabled: true
+  tiers: [region-east]
+cmReports:
+  enabled: true
+egress:
+  routes:
+    - {name: g13-a, source_topic: g13-src, destination: "system:g13-a", sink_topic: g13-sink-a}
+    - {name: g13-b, source_topic: g13-src, destination: "system:g13-b", sink_topic: g13-sink-b}
+  assembler:
+    enabled: true
+    config:
+      - {name: g13-a1, trigger_topic: g13-t1, output_topic: g13-out}
+      - {name: g13-a2, trigger_topic: g13-t2, output_topic: g13-out}
+  intake:
+    enabled: true
+    config:
+      - {name: g13-i1, onward_topic: g13-onward}

@@ -1,0 +1,8 @@
+edgy-solutions/openddil-tactical-agents
+edgy-solutions/openddil-cm-service
+edgy-solutions/openddil-logistics-fusion-service
+edgy-solutions/openddil-sensor-ingest
+edgy-solutions/openddil-projector
+edgy-solutions/openddil-logistics-sim
+edgy-solutions/openddil-stack
+edgy-solutions/openddil-demo

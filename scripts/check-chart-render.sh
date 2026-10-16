@@ -1182,142 +1182,23 @@ if missing or malformed:
 print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well-formed produces-topics annotation")
 ' || fail=1
 
-# --- guard 13: each declaration covers what its workload writes ------------
+# --- guard 13: each declaration equals what its workload can write ---------
 # THE DEFECT MODELLED: guard 12 passes on ANY well-formed annotation, so a
 # workload that declares one topic but writes four is invisible until a
-# live census halts on the other three. This guard renders a fixture with
-# two extra egress routes, two assembler entries (one duplicate output) and
-# one intake entry, then checks each workload's declaration is a SUPERSET
-# of what it writes:
-#   faust-edge-<e>         the app's four send targets (code defaults in the
-#                          app, pinned here) + its two table changelogs
-#   redpanda-connect-<e>   raw-sensor-stream, effector-events, munition-tracks, ingress-dlq
-#   cm-service / fusion    their state topic + tactical-events
-#   egress-gate-c2         every route's sink_topic (c2's + the fixture's)
-#   egress-assembler       every entry's output_topic
-#   egress-intake          every entry's onward_topic
-#   tier-cm / tier-fusion  their state topic + tactical-events, tier broker
-#   tier-cm-intake         cm-events, tier broker
-#   cm-intake (hub)        cm-events, hub broker
-#   sensor-ingest-<e>      ingress-dis-raw
-#   logistics-sim          asset-element-telemetry on each edge (the chart
-#                          default element_publish_tier is edge), plus
-#                          asset-element-inventory + parts-availability, hq
-#   faust-regional-<r>     fan-in, the three region-* outputs and its table
-#                          changelog, the emitted-partials table changelog and
-#                          the aggregator's sweep-tick topic, on the tier
-#                          broker when <r> is a tier, else on hq (names as
-#                          measured on a live broker)
+# live census halts on the other three -- and a pinned table of what each
+# workload writes, kept in this repo, drifts from the code it describes
+# (the aggregator's two topics were missing from it until a live broker
+# showed them). The declarations are now checked against the producing
+# repos' own produces.yaml manifests, each expanded with the workload's
+# rendered env and mounted config, as a set equality in both directions
+# (over- and under-declared), on the default render and on a fixture render
+# that adds extra egress routes, assembler entries and an intake entry
+# (scripts/produces-fixture-values.yaml). The repos come from
+# scripts/produces-repos.txt, read as sibling checkouts or from
+# $PRODUCES_REPOS_ROOT; a missing manifest is a FAIL, not a skip.
 echo
-echo "guard 13: each produces-topics declaration covers what its workload writes"
-G13_VALUES="$(mktemp)"
-cat > "$G13_VALUES" <<'G13'
-releasability:
-  enabled: true
-tierNode:
-  enabled: true
-  tiers: [region-east]
-cmReports:
-  enabled: true
-egress:
-  routes:
-    - {name: g13-a, source_topic: g13-src, destination: "system:g13-a", sink_topic: g13-sink-a}
-    - {name: g13-b, source_topic: g13-src, destination: "system:g13-b", sink_topic: g13-sink-b}
-  assembler:
-    enabled: true
-    config:
-      - {name: g13-a1, trigger_topic: g13-t1, output_topic: g13-out}
-      - {name: g13-a2, trigger_topic: g13-t2, output_topic: g13-out}
-  intake:
-    enabled: true
-    config:
-      - {name: g13-i1, onward_topic: g13-onward}
-G13
-render -f "$G13_VALUES" | "$PY" -c '
-import sys, yaml
-docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-decl = {}
-for d in docs:
-    if d.get("kind") not in ("Deployment", "StatefulSet"):
-        continue
-    md = d.get("metadata") or {}
-    v = (md.get("annotations") or {}).get("openddil.io/produces-topics")
-    decl[md.get("name", "")] = set((v or "").split())
-FAUST_EDGE_SENDS = ["telemetry-latest-state", "asset-telemetry-windows",
-                    "tactical-events", "derived-sustainment"]
-FAUST_EDGE_TABLES = ["asset_state", "prognostics_accumulators"]
-CONNECT_SENDS = ["raw-sensor-stream", "effector-events", "munition-tracks", "ingress-dlq"]
-TIERS = {"region-east"}
-want = {}
-for name in decl:
-    if "-faust-edge-" in name:
-        e = name.split("-faust-edge-", 1)[1]
-        want[name] = {f"{e}/{t}" for t in FAUST_EDGE_SENDS} | \
-                     {f"{e}/openddil-{e}-{t}-changelog" for t in FAUST_EDGE_TABLES}
-    elif "-redpanda-connect-" in name:
-        e = name.split("-redpanda-connect-", 1)[1]
-        want[name] = {f"{e}/{t}" for t in CONNECT_SENDS}
-    elif name.endswith("-cm-service"):
-        want[name] = {"hq/asset-cm-state", "hq/tactical-events"}
-    elif name.endswith("-logistics-fusion-service"):
-        want[name] = {"hq/asset-logistics-status", "hq/tactical-events"}
-    elif name.endswith("-egress-gate-c2"):
-        want[name] = {"hq/g13-sink-a", "hq/g13-sink-b"}
-    elif name.endswith("-egress-assembler"):
-        want[name] = {"hq/g13-out"}
-    elif name.endswith("-egress-intake"):
-        want[name] = {"hq/g13-onward"}
-    elif "-tier-cm-intake-" in name:
-        t = name.split("-tier-cm-intake-", 1)[1]
-        want[name] = {f"{t}/cm-events"}
-    elif name.endswith("-cm-intake"):
-        want[name] = {"hq/cm-events"}
-    elif "-sensor-ingest-" in name:
-        e = name.split("-sensor-ingest-", 1)[1]
-        want[name] = {f"{e}/ingress-dis-raw"}
-    elif name.endswith("-logistics-sim"):
-        edges = {n.split("-faust-edge-", 1)[1] for n in decl if "-faust-edge-" in n}
-        want[name] = {f"{e}/asset-element-telemetry" for e in edges} |                      {"hq/asset-element-inventory", "hq/parts-availability"}
-    elif "-faust-regional-" in name:
-        r = name.split("-faust-regional-", 1)[1]
-        b = r if r in TIERS else "hq"
-        r_us = r.replace("-", "_")
-        table = "region_" + r_us + "_assets_latest"
-        want[name] = {f"{b}/{r}-fan-in", f"{b}/region-fleet-summary",
-                      f"{b}/region-top-factors", f"{b}/region-wear-trends",
-                      f"{b}/region-{r}-aggregator-{table}-changelog",
-                      f"{b}/region-{r}-aggregator-region_{r_us}_emitted_partials-changelog",
-                      f"{b}/region-{r}-aggregator-sweep-tick"}
-    elif "-tier-cm-" in name:
-        t = name.split("-tier-cm-", 1)[1]
-        want[name] = {f"{t}/asset-cm-state", f"{t}/tactical-events"}
-    elif "-tier-fusion-" in name:
-        t = name.split("-tier-fusion-", 1)[1]
-        want[name] = {f"{t}/asset-logistics-status", f"{t}/tactical-events"}
-kinds = {"faust-edge", "redpanda-connect", "cm-service", "logistics-fusion-service",
-         "egress-gate-c2", "egress-assembler", "egress-intake",
-         "tier-cm-intake-", "tier-cm-", "tier-fusion-", "-cm-intake$",
-         "faust-regional-region-east", "faust-regional-region-west",
-         "sensor-ingest-", "-logistics-sim$"}
-# A trailing "$" anchors at the end of the name: the hub cm-intake is a
-# substring of every tier-cm-intake-<t>, so plain "in" could not tell
-# whether the hub one rendered.
-seen = {k for k in kinds for n in want
-        if (n.endswith(k[:-1]) if k.endswith("$") else k in n)}
-fail = False
-if seen != kinds:
-    print("  FAIL: fixture did not render: " + ", ".join(sorted(kinds - seen)) + " -- this guard proved nothing for them")
-    fail = True
-for name in sorted(want):
-    short = want[name] - decl[name]
-    if short:
-        print(f"  FAIL: {name} writes but does not declare: {sorted(short)}")
-        fail = True
-if fail:
-    sys.exit(1)
-print(f"  ok   : {len(want)} workload(s), every declaration covers its writes")
-' || fail=1
-rm -f "$G13_VALUES"
+echo "guard 13: each produces-topics declaration equals what its workload can write"
+"$PY" "$(dirname "$0")/check-produces-declarations.py" || fail=1
 
 # --- guard 14: exercise control renders only when enabled, and validates ---
 # its adapter. Mirrors control.py's own startup refusal (empty adapter, or

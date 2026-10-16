@@ -41,6 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Red-check 1 finds the pre-0.1.135 chart by commit message.
+          fetch-depth: 0
 
       # Pass 4 of the mirror check asks whether the images deployed OUTSIDE
       # the chart are mirrored too -- dis-sim, from that repo's k8s manifest.
@@ -59,6 +62,58 @@ jobs:
           repository: ${{ github.repository_owner }}/openddil-customer-bundle-example
           path: openddil-customer-bundle-example
 
+      # The producing repos' produces.yaml manifests, for the produces-declarations check (guard 13). Like the
+      # customer-bundle checkout above, each lands in a subdirectory of the workspace (actions/checkout cannot
+      # write outside it); PRODUCES_REPOS_ROOT tells the script to look there instead of at ../. Default
+      # branches only. The list is scripts/produces-repos.txt; keep the two in step.
+      - name: Checkout openddil-tactical-agents (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-tactical-agents
+          path: produces-repos/openddil-tactical-agents
+
+      - name: Checkout openddil-cm-service (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-cm-service
+          path: produces-repos/openddil-cm-service
+
+      - name: Checkout openddil-logistics-fusion-service (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-logistics-fusion-service
+          path: produces-repos/openddil-logistics-fusion-service
+
+      - name: Checkout openddil-sensor-ingest (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-sensor-ingest
+          path: produces-repos/openddil-sensor-ingest
+
+      - name: Checkout openddil-projector (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-projector
+          path: produces-repos/openddil-projector
+
+      - name: Checkout openddil-logistics-sim (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-logistics-sim
+          path: produces-repos/openddil-logistics-sim
+
+      - name: Checkout openddil-stack (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-stack
+          path: produces-repos/openddil-stack
+
+      - name: Checkout openddil-demo (produces.yaml)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/openddil-demo
+          path: produces-repos/openddil-demo
+
       - uses: azure/setup-helm@v4
         with:
           version: "v3.16.2"
@@ -74,7 +129,59 @@ jobs:
 
       # The guards lint cannot express.
       - name: Render integrity guards
+        env:
+          PRODUCES_REPOS_ROOT: ${{ github.workspace }}/produces-repos
         run: ./scripts/check-chart-render.sh
+
+      # A check nobody has watched fail is a check nobody has tested. Three plants, each of which must exit
+      # non-zero AND print the name it should: (1) the chart before 0.1.135 (the aggregator's changelog and
+      # sweep-tick topics undeclared), (2) a stray topic in an annotation, (3) a workload key missing from a
+      # manifest.
+      - name: Produces declarations red-check
+        env:
+          PRODUCES_REPOS_ROOT: ${{ github.workspace }}/produces-repos
+        run: |
+          red() { # label, expected-name..., then "--" and the command
+            local label=$1; shift; local want=(); while [ "$1" != "--" ]; do want+=("$1"); shift; done; shift
+            if "$@" > /tmp/red.log 2>&1; then cat /tmp/red.log; echo "RED CHECK FAILED ($label): the plant passed"; exit 1; fi
+            for w in "${want[@]}"; do
+              grep -qF -- "$w" /tmp/red.log || { cat /tmp/red.log; echo "RED CHECK FAILED ($label): failed, but without naming $w"; exit 1; }
+            done
+            echo "red-check green ($label): failed naming ${want[*]}"
+          }
+          # 1. under-declared: the chart one commit before 0.1.135
+          rev=$(git log --format=%H -n1 --grep='^chart 0.1.135: faust-regional declares')
+          [ -n "$rev" ] || { echo "RED CHECK FAILED: the 0.1.135 commit is not in this checkout's history"; exit 1; }
+          mkdir /tmp/old-chart && git archive "${rev}^" openddil-demo | tar -x -C /tmp/old-chart
+          red "under-declared" \
+            "region_region_east_emitted_partials-changelog" "region-region-east-aggregator-sweep-tick" \
+            "region_region_west_emitted_partials-changelog" "region-region-west-aggregator-sweep-tick" \
+            -- python scripts/check-produces-declarations.py --chart /tmp/old-chart/openddil-demo
+          # 2. over-declared: a stray topic added to one annotation of the fixture render
+          helm template t ./openddil-demo -f scripts/produces-fixture-values.yaml > /tmp/fixture.yaml
+          sed 's#openddil.io/produces-topics: "edge-01/link-heartbeat"#openddil.io/produces-topics: "edge-01/link-heartbeat edge-01/stray-topic"#' /tmp/fixture.yaml > /tmp/fixture-stray.yaml
+          cmp -s /tmp/fixture.yaml /tmp/fixture-stray.yaml && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          red "over-declared" "over-declared: t-projector-edge-01 stray-topic" \
+            -- python scripts/check-produces-declarations.py --rendered /tmp/fixture-stray.yaml
+          # 3. unmanifested: cm-service's key removed from a scratch copy of the manifests
+          mkdir /tmp/scratch-root
+          for r in $(sed 's#.*/##' scripts/produces-repos.txt); do
+            mkdir "/tmp/scratch-root/$r"
+            cp "$PRODUCES_REPOS_ROOT/$r/produces.yaml" "$PRODUCES_REPOS_ROOT/$r/produces_manifest.py" "/tmp/scratch-root/$r/"
+          done
+          echo 'workloads: {}' > /tmp/scratch-root/openddil-cm-service/produces.yaml
+          PRODUCES_REPOS_ROOT=/tmp/scratch-root red "unmanifested" "t-cm-service" "t-tier-cm-region-east" \
+            -- python scripts/check-produces-declarations.py --rendered /tmp/fixture.yaml
+          # 4. the `when:` config form: a render that fields one asset (the annotation then carries asset-fielding)
+          #    with the logistics-sim ConfigMap's fielding records emptied and the annotation left alone
+          printf 'logisticsSim:\n  config:\n    fielding:\n      records:\n        - {site: edge-01}\n' > /tmp/fielded.yaml
+          helm template t ./openddil-demo -f scripts/produces-fixture-values.yaml -f /tmp/fielded.yaml > /tmp/fielded-render.yaml
+          python scripts/check-produces-declarations.py --rendered /tmp/fielded-render.yaml > /dev/null \
+            || { echo "RED CHECK FAILED: the fielded render itself does not pass"; exit 1; }
+          sed '/^      records:$/{N;s/.*/      records: []/}' /tmp/fielded-render.yaml > /tmp/fielded-empty.yaml
+          cmp -s /tmp/fielded-render.yaml /tmp/fielded-empty.yaml && { echo "plant target not found: the red-check would test nothing"; exit 1; }
+          red "fielding when:" "over-declared: t-logistics-sim asset-fielding" \
+            -- python scripts/check-produces-declarations.py --rendered /tmp/fielded-empty.yaml
 
       # Does the render actually carry the DIS entity allow-list that
       # sensorIngest.entityAssignment (values.yaml) declares?
