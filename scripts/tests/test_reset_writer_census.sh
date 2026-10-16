@@ -70,6 +70,7 @@ reset_fixtures() {
   CENSUS_QUIESCED=(); QSTATE_QUIESCED=(); QSTATE_REPLICAS=()
   SCALES_ARMED=false; SCALES_RESTORED=false
   : > "$M/scale.log"
+  rm -f "$M/rollout.log"
   : > "$M/desc_calls.log"
 }
 
@@ -143,6 +144,9 @@ kubectl() {
       ;;
     "scale "*)
       echo "kubectl $argstr" >> "$M/scale.log"
+      ;;
+    "rollout restart "*)
+      echo "kubectl $argstr" >> "$M/rollout.log"
       ;;
   esac
   return 0
@@ -218,12 +222,11 @@ grep -qF "kubectl scale deploy -n openddil good-writer --replicas=0" "$M/scale.l
   && pass "2: good-writer scaled to 0" || fail "2: good-writer was not scaled to 0"
 grep -qF "kubectl scale deploy -n openddil faust-edge-01 --replicas=0" "$M/scale.log" \
   && pass "2: faust-edge-01 scaled to 0" || fail "2: faust-edge-01 was not scaled to 0"
-grep -qF "kubectl scale deploy -n openddil good-writer --replicas=3" "$M/scale.log" \
-  && pass "2: good-writer restored to its captured replicas (3), by phase 9" \
-  || fail "2: good-writer was not restored to 3"
-grep -qF "kubectl scale deploy -n openddil faust-edge-01 --replicas=1" "$M/scale.log" \
-  && pass "2: faust-edge-01 restored to its captured replicas (1), by phase 5" \
-  || fail "2: faust-edge-01 was not restored to 1"
+n=$(grep -cxF "kubectl scale deploy -n openddil good-writer --replicas=3" "$M/scale.log")
+[ "$n" -eq 1 ]   && pass "2: good-writer restored to its captured replicas (3) exactly once, by phase 9"   || fail "2: good-writer restored to 3 $n time(s), expected exactly 1"
+n=$(grep -cxF "kubectl scale deploy -n openddil faust-edge-01 --replicas=1" "$M/scale.log")
+[ "$n" -eq 1 ]   && pass "2: faust-edge-01 restored to its captured replicas (1) exactly once, by phase 5"   || fail "2: faust-edge-01 restored to 1 $n time(s), expected exactly 1"
+{ [ ! -e "$M/rollout.log" ] || ! grep -q "faust-edge-01" "$M/rollout.log"; }   && pass "2: faust-edge-01 was not rollout-restarted"   || fail "2: faust-edge-01 was rollout-restarted: $(cat "$M/rollout.log")"
 
 # ===========================================================================
 # case 3 — a declared writer still advancing after the quiesce halts, naming
