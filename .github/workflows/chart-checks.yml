@@ -222,12 +222,12 @@ jobs:
       - name: Link traffic and tier tree render test
         run: bash scripts/tests/test_link_traffic_render.sh
 
-      # One plant: the tier tree helper with every parent forced to root. The test must exit non-zero AND print
-      # the tiers check it breaks.
+      # One plant: the tier tree helper with every parent forced to root (the declared tree, not the uplink
+      # tree, would fail the same check). The test must exit non-zero AND print the tiers check it breaks.
       - name: Tier tree red-check
         run: |
           cp -r openddil-demo /tmp/ltr-parent
-          sed -i 's#"parent" .parent "hasChildren"#"parent" "root" "hasChildren"#' /tmp/ltr-parent/templates/_helpers.tpl
+          sed -i 's#(ternary "root" ($p.host | toString)#(ternary "root" "root"#' /tmp/ltr-parent/templates/_helpers.tpl
           cmp -s openddil-demo/templates/_helpers.tpl /tmp/ltr-parent/templates/_helpers.tpl \
             && { echo "plant target not found: the red-check would test nothing"; exit 1; }
           if CHART=/tmp/ltr-parent bash scripts/tests/test_link_traffic_render.sh > /tmp/ltr-red.log 2>&1; then

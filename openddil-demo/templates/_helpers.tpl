@@ -1722,16 +1722,26 @@ decides whether that file is rendered at all, so the two cannot disagree.
 {{- end }}
 
 {{/*
-openddil.hqTierTreeJson -- the whole tier tree as a JSON array of
-{id, parent, hasChildren}, one entry per openddil.tierList entry, in tierList
-order; "[]" when there are no tiers. `parent` is passed through exactly as
-tierList gives it (not normalised). Read by the hub frontend's deployment.json
-so the HQ theater can draw the chart's tiers.
+openddil.hqTierTreeJson -- the uplink tree as a JSON array of
+{id, parent, hasChildren}, in tierList order; "[]" when there are no tiers.
+Read by the hub frontend's deployment.json so the HQ theater draws one edge
+per uplink.
+
+Only the tiers that run an uplink are entries: an edge, or a tier-managed
+tier -- the same filter as openddil.childTierIds and openddil.uplinkLinks.
+`parent` is the EFFECTIVE parent (openddil.effectiveParent), with HQ written
+as "root". A region with no tier node has no uplink and no link row, so it
+is not an entry, and an edge declared under it is drawn under HQ, where its
+bridge actually lands.
 */}}
 {{- define "openddil.hqTierTreeJson" -}}
+{{- $root := . -}}
 {{- $out := list -}}
-{{- range (include "openddil.tierList" . | fromYamlArray) }}
-{{- $out = append $out (dict "id" (.id | toString) "parent" .parent "hasChildren" (.hasChildren | default false)) }}
+{{- range (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if or (eq .kind "edge") (include "openddil.isTierManaged" (dict "id" .id "root" $root)) }}
+{{- $p := include "openddil.effectiveParent" (dict "tier" . "root" $root) | fromYaml -}}
+{{- $out = append $out (dict "id" (.id | toString) "parent" (ternary "root" ($p.host | toString) (eq ($p.host | toString) "hq")) "hasChildren" (.hasChildren | default false)) }}
+{{- end }}
 {{- end }}
 {{- toJson $out -}}
 {{- end }}

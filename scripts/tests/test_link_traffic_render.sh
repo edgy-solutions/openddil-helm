@@ -156,11 +156,18 @@ gotg="$(childlinks "$TMP/g.yaml" | "$PY" -c 'import sys,json; c=json.load(sys.st
 ok "G childLinks rendered with releasability off" "$([ "$gotg" = "ok" ] && echo 0 || echo 1)" "got=$gotg"
 
 # ---- H -------------------------------------------------------------------
-# hub deployment.json `tiers`: the whole tier tree, {id,parent,hasChildren} in
-# tierList order (parent as tierList gives it). Omitted when there are no tiers.
+# hub deployment.json `tiers`: the uplink tree, {id,parent,hasChildren} in
+# tierList order. Only tiers that run an uplink (an edge, or a tier-managed
+# tier); parent is the effective parent, HQ written "root". region-b has no
+# tier node, so it is not drawn and edge-c (declared under it) is drawn
+# under HQ, where its bridge lands. Omitted when there are no tiers.
 cat > "$TMP/h.yaml" <<'YAML'
+tierNode:
+  enabled: true
+  tiers: [region-a]
 regions:
   - id: region-a
+  - id: region-b
 edges:
   - id: edge-a
     region: region-a
@@ -169,7 +176,7 @@ edges:
     region: region-a
     udpPort: 62041
   - id: edge-c
-    parent: root
+    region: region-b
     udpPort: 62042
 YAML
 helm template t "$CHART" -f "$TMP/h.yaml" > "$TMP/h.out" 2>"$TMP/h.err" || { echo "FAIL H render failed"; cat "$TMP/h.err"; FAIL=1; }
@@ -178,6 +185,13 @@ goth="$(childlinks "$TMP/h.out" | "$PY" -c 'import sys,json; t=json.load(sys.std
 ok "H tiers rendered with parents" "$([ "$goth" = "$want" ] && echo 0 || echo 1)" "got=$goth"
 gotn="$(childlinks "$TMP/h.out" | "$PY" -c 'import sys,json; t=json.load(sys.stdin).get("tiers") or []; print(",".join(e["id"] for e in t))')"
 ok "H tiers in tierList order (edges then regions)" "$([ "$gotn" = "edge-a,edge-b,edge-c,region-a" ] && echo 0 || echo 1)" "got=$gotn"
+# The drawn edges into HQ are exactly HQ's child links (the header's rows).
+gotc="$(childlinks "$TMP/h.out" | "$PY" -c '
+import sys,json
+d=json.load(sys.stdin)
+a=sorted(e["id"] for e in d.get("tiers") or [] if e["parent"]=="root"); b=sorted(e["id"] for e in d.get("childLinks") or [])
+print("ok" if a==b else "bad tiers=%s childLinks=%s" % (a,b))')"
+ok "H tiers under HQ == childLinks" "$([ "$gotc" = "ok" ] && echo 0 || echo 1)" "got=$gotc"
 printf 'edges: []\nregions: []\ntiers: []\n' > "$TMP/h0.yaml"
 helm template t "$CHART" -f "$TMP/h0.yaml" > "$TMP/h0.out" 2>"$TMP/h0.err" || { echo "FAIL H0 render failed"; head -5 "$TMP/h0.err"; FAIL=1; }
 goth0="$(childlinks "$TMP/h0.out" | "$PY" -c '
