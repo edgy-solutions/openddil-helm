@@ -329,7 +329,7 @@ out="$("$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
   || fail "9a: checker rc=$rc -- $out"
 
 # the checker must catch tampered renders in rules mode
-sed '0,/DIS_FALLBACK_EDGE/{n;s/edge-03/edge-01/}' "$M/rules-render.yaml" > "$M/tamper-fb.yaml"
+sed '/DIS_FALLBACK_EDGE/{n;s/edge-03/edge-01/;:a;n;ba}' "$M/rules-render.yaml" > "$M/tamper-fb.yaml"
 cmp -s "$M/rules-render.yaml" "$M/tamper-fb.yaml" && fail "9a: fallback tamper planted nothing"
 out="$(CHECK_ENTITY_ASSIGNMENT_RENDER_FILE="$M/tamper-fb.yaml" "$CHECK" "$CHART" -f "$M/rules.yaml" 2>&1)"; rc=$?
 [ "$rc" -eq 1 ] && grep -q "DIS_FALLBACK_EDGE" <<<"$out" && pass "9a: one sidecar with a different fallback edge fails the check" \
