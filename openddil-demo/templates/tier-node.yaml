@@ -1271,6 +1271,9 @@ spec:
             - name: bundle-shared
               mountPath: /baselines
               subPath: baselines
+            {{- with (include "openddil.baselinesLayerMount" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
@@ -1287,6 +1290,9 @@ spec:
         - name: cm-fault-codes
           configMap:
             name: {{ $root.Release.Name }}-cm-fault-codes
+        {{- end }}
+        {{- with (include "openddil.baselinesLayerVolume" $root) }}
+        {{- . | nindent 8 }}
         {{- end }}
 {{- if not $tier.hasChildren }}
 ---
@@ -1593,6 +1599,9 @@ spec:
               value: "9080"
             - name: CM_BASELINES_DIR
               value: /baselines
+            {{- with (include "openddil.baselinesLayerCmEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL
@@ -1611,9 +1620,15 @@ spec:
             - name: bundle-shared
               mountPath: /baselines
               subPath: baselines
+            {{- with (include "openddil.baselinesLayerMount" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- with (include "openddil.baselinesLayerVolume" $root) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

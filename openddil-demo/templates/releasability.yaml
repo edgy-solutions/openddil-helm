@@ -598,6 +598,9 @@ spec:
             - name: bundle-shared
               mountPath: /baselines
               subPath: baselines
+            {{- with (include "openddil.baselinesLayerMount" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
             - name: cm-fault-codes
               mountPath: /etc/openddil
@@ -614,6 +617,9 @@ spec:
         - name: cm-fault-codes
           configMap:
             name: {{ $root.Release.Name }}-cm-fault-codes
+        {{- end }}
+        {{- with (include "openddil.baselinesLayerVolume" $root) }}
+        {{- . | nindent 8 }}
         {{- end }}
 {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---

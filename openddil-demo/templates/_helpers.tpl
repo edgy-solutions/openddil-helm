@@ -2300,6 +2300,59 @@ every edge is tier-managed. Takes the chart root.
 {{- end }}
 
 {{/*
+openddil.baselinesLayerName -- the deployment's baselines ConfigMap name
+(values `baselinesLayer.configMap`), or "" when unset. Takes the chart
+root. A non-empty value must be a DNS-1123 subdomain or the render fails.
+*/}}
+{{- define "openddil.baselinesLayerName" -}}
+{{- $n := ((.Values.baselinesLayer | default dict).configMap | default "") -}}
+{{- if $n -}}
+{{- if not (and (le (len $n) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $n)) -}}
+{{- fail (printf "baselinesLayer.configMap %q is not a valid DNS-1123 subdomain name" $n) -}}
+{{- end -}}
+{{- $n -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.baselinesLayerDirs -- the baseline directory list for a PEP
+(OPENDDIL_BASELINES_DIRS) or cm-service (CM_BASELINES_DIRS).
+*/}}
+{{- define "openddil.baselinesLayerDirs" -}}
+{{- if include "openddil.baselinesLayerName" . -}}/baselines:/baselines-overlay{{- else -}}/baselines{{- end -}}
+{{- end }}
+
+{{/*
+openddil.baselinesLayerVolume / ...Mount / ...CmEnv -- the pod volume, the
+read-only mount and the cm-service env for the baselines layer. Each is
+empty when baselinesLayer.configMap is unset. Names are fixed
+(cm-baselines-overlay, /baselines-overlay) so an out-of-chart patch that
+adds the same names merges onto these.
+*/}}
+{{- define "openddil.baselinesLayerVolume" -}}
+{{- with (include "openddil.baselinesLayerName" .) -}}
+- name: cm-baselines-overlay
+  configMap:
+    name: {{ . }}
+{{- end -}}
+{{- end }}
+
+{{- define "openddil.baselinesLayerMount" -}}
+{{- if include "openddil.baselinesLayerName" . -}}
+- name: cm-baselines-overlay
+  mountPath: /baselines-overlay
+  readOnly: true
+{{- end -}}
+{{- end }}
+
+{{- define "openddil.baselinesLayerCmEnv" -}}
+{{- if include "openddil.baselinesLayerName" . -}}
+- name: CM_BASELINES_DIRS
+  value: {{ include "openddil.baselinesLayerDirs" . | quote }}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.arrivalsPepEnv -- the env block every PEP gets for the arrivals
 routes. Takes (dict "root" $root "url" <intake URL or ""> "edges" <csv>
 "owningTier" <id>). Roles and units come from values `arrivals`.
@@ -2318,7 +2371,7 @@ routes. Takes (dict "root" $root "url" <intake URL or ""> "edges" <csv>
 - name: OPENDDIL_RELEASABILITY_FILE
   value: /ontology/releasability.yaml
 - name: OPENDDIL_BASELINES_DIRS
-  value: /baselines
+  value: {{ include "openddil.baselinesLayerDirs" .root }}
 {{- end }}
 
 {{/*

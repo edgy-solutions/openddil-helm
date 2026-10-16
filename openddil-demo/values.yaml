@@ -700,6 +700,29 @@ faustRegional:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
 
+# --- Baselines layer --------------------------------------------------------
+# A deployment's own baselines, layered over the runtime bundle's set
+# (/baselines). Serves two components: every PEP (the arrivals form offers
+# the baselines it can read, OPENDDIL_BASELINES_DIRS) and every cm-service
+# (fills an asset's installed/mod status on BaselineAssigned only when its
+# loader finds the baseline, CM_BASELINES_DIRS). When set, each gets a
+# read-only mount of the ConfigMap at /baselines-overlay (volume
+# cm-baselines-overlay) and the dir list /baselines:/baselines-overlay.
+#   - The chart does not create the ConfigMap; it is deployment data. The
+#     value must be a DNS-1123 subdomain name or the render fails.
+#   - It is mounted not-optional: a missing ConfigMap holds the pods in
+#     ContainerCreating, so a `--wait` upgrade fails loudly.
+#   - A change to its content needs a rollout restart of the PEPs and
+#     cm-services (no checksum rides a ConfigMap the chart does not own).
+#   - Later directories add to earlier ones. cm-service keys baselines by
+#     platform_variant: the same platform_variant in two files, in the same
+#     or different directories, is a hard load error (the pod will not
+#     start); there is no precedence. A PEP lists baseline_ids per
+#     platform_variant and silently ignores a repeated baseline_id.
+#     Overlay files must therefore add new variants, not replace bundle ones.
+baselinesLayer:
+  configMap: ""   # name of a ConfigMap the deployment owns, holding baseline YAMLs (same format as the bundle's)
+
 # --- HQ services ------------------------------------------------------------
 cmService:
   # Stall detection -> LIVENESS. /healthz/live on the metrics port answers 503
@@ -721,15 +744,9 @@ cmService:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
   port: 9080
-  # Customer overlays that want to layer additional baseline YAMLs on
-  # top of the OSS set (the runtime-bundle's contracts/baselines) do so
-  # via the standard overlay-patch pattern -- a post-install Job in the
-  # customer chart `kubectl patch`es this Deployment to add a
-  # /baselines-overlay volumeMount + CM_BASELINES_DIRS env. This chart
-  # stays customer-agnostic; no knob lives here. Same pattern the
-  # customer-overlay bundle uses for the frontend + projector overlays. See
-  # openddil-customer-bundle-customer-overlay/chart/templates/
-  # hook-patch-cm-service.yaml for the canonical example.
+  # Additional baselines come from the top-level `baselinesLayer` value.
+  # A patch that adds the same volume/mount/env names
+  # (cm-baselines-overlay, /baselines-overlay) is redundant but harmless.
 
 # The first write path into the CM event log: an authenticated report
 # becomes one CmEvent on the tier's cm-events topic. Disabled by default so

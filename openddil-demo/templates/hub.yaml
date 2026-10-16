@@ -424,17 +424,17 @@ spec:
             timeoutSeconds: 5
           {{- end }}
           env:
-            # cm-service multi-directory baseline support (CM_BASELINES_DIRS)
-            # is intentionally NOT wired here. Customer overlays that want to
-            # layer additional baselines follow the same overlay-patch pattern
-            # the frontend + projector overlays use: a post-install Job in
-            # the customer chart `kubectl patch`es this Deployment to add a
-            # /baselines-overlay volumeMount + CM_BASELINES_DIRS env. Keeps
-            # the OSS chart customer-agnostic. See
-            # openddil-customer-bundle-customer-overlay/chart/templates/
-            # hook-patch-cm-service.yaml for the canonical example.
+            # cm-service multi-directory baseline support: when
+            # baselinesLayer.configMap is set, CM_BASELINES_DIRS adds
+            # /baselines-overlay (the deployment's own ConfigMap) after
+            # /baselines. A patch that adds the same volume/mount/env names
+            # (cm-baselines-overlay, /baselines-overlay) is redundant but
+            # harmless.
             - name: CM_BASELINES_DIR
               value: "/baselines"
+            {{- with (include "openddil.baselinesLayerCmEnv" .) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             - name: CM_KAFKA_BROKERS
               value: {{ $hqBroker | quote }}
             - name: CM_HTTP_PORT
@@ -458,11 +458,17 @@ spec:
             - name: bundle-shared
               mountPath: /baselines
               subPath: baselines
+            {{- with (include "openddil.baselinesLayerMount" .) }}
+            {{- . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.cmService.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- with (include "openddil.baselinesLayerVolume" .) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
