@@ -1359,6 +1359,41 @@ is_heartbeat_table() {
   return 1
 }
 
+# Declared heartbeat topics: "<glob>=<cadence seconds>". The aggregator's Faust
+# timer (REGIONAL_HEARTBEAT_INTERVAL_S, default 30) writes one record per
+# cadence to *-aggregator-sweep-tick; phase 5 restarts it after phase 4's
+# trim, so the topic writes before phase 8 by construction. verify_topics
+# scores such a topic as log_start == the trim mark phase 4 recorded, and
+# writes (hw - mark) <= ceil((now - AGGREGATOR_RESTORED_EPOCH) / cadence) + 1.
+# RESET_HEARTBEAT_TOPICS (space-separated entries) replaces the default.
+HEARTBEAT_TOPICS=("*-aggregator-sweep-tick=30")
+if [ -n "${RESET_HEARTBEAT_TOPICS+x}" ]; then
+  read -r -a HEARTBEAT_TOPICS <<<"$RESET_HEARTBEAT_TOPICS"
+fi
+for _hb in ${HEARTBEAT_TOPICS[@]+"${HEARTBEAT_TOPICS[@]}"}; do
+  case "$_hb" in
+    *=*) ;;
+    *) echo "reset-scenario: HALT: malformed heartbeat topic entry '$_hb' (want <glob>=<cadence seconds>)" >&2; exit 2 ;;
+  esac
+  case "${_hb##*=}" in
+    ''|*[!0-9]*|0) echo "reset-scenario: HALT: malformed heartbeat topic entry '$_hb' (cadence must be a positive integer)" >&2; exit 2 ;;
+  esac
+done
+unset _hb
+
+# heartbeat_topic_cadence TOPIC -- cadence of the first matching entry; 1 if none.
+heartbeat_topic_cadence() {
+  local e
+  for e in ${HEARTBEAT_TOPICS[@]+"${HEARTBEAT_TOPICS[@]}"}; do
+    # shellcheck disable=SC2254
+    case "$1" in ${e%=*}) echo "${e##*=}"; return 0 ;; esac
+  done
+  return 1
+}
+
+declare -A TRIM_MARK=()       # key "pod|topic|partition" -> offset phase 4 left log_start at
+AGGREGATOR_RESTORED_EPOCH=""  # set once by phase5_aggregator after the last Faust deploy is restored
+
 # pg_query POD SQL — every call reads $POSTGRES_USER / $POSTGRES_DB from the
 # POD'S OWN ENVIRONMENT AT RUNTIME. Never hardcoded: hq's container runs
 # POSTGRES_USER=postgres, the tier instances run POSTGRES_USER=openddil, and
@@ -3277,6 +3312,7 @@ trim_topic_to_hw() {
     if [ "$logstart" = "$hw" ]; then
       printf '  %-28s %-30s p%-3s already at hw=%s — nothing to trim\n' \
         "$pod" "$topic" "$part" "$hw"
+      TRIM_MARK["$pod|$topic|$part"]="$hw"
       continue
     fi
     # JUDGMENT CALL 9 — `rpk topic trim-prefix` PROMPTS ("Confirm deletion
@@ -3288,7 +3324,8 @@ trim_topic_to_hw() {
     maybe_run "trim $topic partition $part on $pod: log_start $logstart -> $hw" \
       kubectl exec -n "$NS" "$pod" -c redpanda -- \
       timeout "${RPK_CMD_TIMEOUT:-60}" \
-      rpk topic trim-prefix "$topic" --offset "$hw" --partitions "$part" --no-confirm || rc=1
+      rpk topic trim-prefix "$topic" --offset "$hw" --partitions "$part" --no-confirm \
+      && TRIM_MARK["$pod|$topic|$part"]="$hw" || rc=1
   done < <(topic_partitions "$pod" "$topic")
   return "$rc"
 }
@@ -3536,6 +3573,9 @@ phase5_aggregator() {
     fi
     maybe_run "rollout restart $d" kubectl rollout restart deploy -n "$NS" "$d"
   done
+  # Heartbeat-topic bound (verify_topics) counts cadences from here: every
+  # Faust deployment has now been scaled back or restarted.
+  AGGREGATOR_RESTORED_EPOCH=$(date +%s)
 }
 
 # ===========================================================================
@@ -3903,8 +3943,8 @@ verify_stores() {
 }
 
 verify_topics() {
-  echo "--- topics: predicted log_start == high_watermark on every partition (kept declaration topics: log_start UNCHANGED) ---"
-  local pod topic part logstart hw base
+  echo "--- topics: predicted log_start == high_watermark on every partition (kept declaration topics: log_start UNCHANGED; heartbeat topics: log_start == trim mark and writes since mark <= ceil(elapsed/cadence)+1) ---"
+  local pod topic part logstart hw base cadence mark label writes bound
   for pod in "${REDPANDA_PODS[@]}"; do
     while read -r topic; do
       [ -z "$topic" ] && continue
@@ -3919,6 +3959,29 @@ verify_topics() {
           else
             report "topics $pod/$topic/p$part (log_start UNCHANGED, $KEPT_NOTE)" "$base" "$logstart"
           fi
+          continue
+        fi
+        if cadence="$(heartbeat_topic_cadence "$topic")"; then
+          mark="${TRIM_MARK[$pod|$topic|$part]:-}"
+          label="topics $pod/$topic/p$part (heartbeat, log_start == trim mark)"
+          if [ -z "$mark" ]; then
+            report "$label" "<mark>" "UNMEASURED"
+            continue
+          fi
+          report "$label" "$mark" "$logstart"
+          writes=$((hw - mark))
+          if [ -z "${AGGREGATOR_RESTORED_EPOCH:-}" ]; then
+            report "topics $pod/$topic/p$part (heartbeat, writes <= bound, cadence ${cadence}s)" "<=bound" "UNMEASURED"
+            continue
+          fi
+          bound=$(( ( $(date +%s) - AGGREGATOR_RESTORED_EPOCH + cadence - 1 ) / cadence + 1 ))
+          label="topics $pod/$topic/p$part (heartbeat, writes <= bound $bound, cadence ${cadence}s)"
+          if [ "$writes" -le "$bound" ]; then
+            report "$label" "<=$bound" "<=$bound"
+          else
+            report "$label" "<=$bound" "$writes"
+          fi
+          printf '  %-55s writes since trim mark=%s (informational)\n' "topics $pod/$topic/p$part" "$writes"
           continue
         fi
         report "topics $pod/$topic/p$part" "$hw" "$logstart"
