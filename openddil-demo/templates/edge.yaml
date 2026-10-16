@@ -37,9 +37,70 @@
 {{- $existingIds := get $entityIdsByEdge $assignedEdge | default list }}
 {{- $entityIdsByEdge = set $entityIdsByEdge $assignedEdge (append $existingIds $entityId | sortAlpha) }}
 {{- end }}
+{{- /* sensorIngest.unassignedEdge -- the fallback edge: its sidecar admits
+   every entity not assigned to another edge (DIS_DENIED_ENTITY_IDS). */ -}}
+{{- $unassignedEdge := $root.Values.sensorIngest.unassignedEdge | default "" }}
+{{- if and (gt (len $entityAssignment) 0) (eq $unassignedEdge "") }}
+{{- fail "sensorIngest.unassignedEdge: required once sensorIngest.entityAssignment is non-empty -- an entity on no list would be dropped at every edge, so a true arrival could never be seen" }}
+{{- end }}
+{{- if and (eq (len $entityAssignment) 0) (ne $unassignedEdge "") }}
+{{- fail (printf "sensorIngest.unassignedEdge: %q is set but sensorIngest.entityAssignment is empty -- it has no meaning there, every sidecar already admits all entities" $unassignedEdge) }}
+{{- end }}
+{{- if and (ne $unassignedEdge "") (not (has $unassignedEdge $validEdgeIds)) }}
+{{- fail (printf "sensorIngest.unassignedEdge: %q is not in edges[]" $unassignedEdge) }}
+{{- end }}
+{{- /* sensorIngest.nonAssetSources -- (site, application[, kind]) sources
+   that are not sensors; dropped and counted at every sidecar. */ -}}
+{{- $nonAssetSources := $root.Values.sensorIngest.nonAssetSources | default list }}
+{{- $nonAssetTokens := list }}
+{{- $nonAssetWide := list }}
+{{- range $nonAssetSources }}
+{{- $nas := (toString .site) }}
+{{- $naa := (toString .application) }}
+{{- if or (not (regexMatch "^[0-9]{1,5}$" $nas)) (gt (int $nas) 65535) (not (regexMatch "^[0-9]{1,5}$" $naa)) (gt (int $naa) 65535) }}
+{{- fail (printf "sensorIngest.nonAssetSources: site %q / application %q must each be an integer 0-65535" $nas $naa) }}
+{{- end }}
+{{- $nak := "" }}
+{{- if hasKey . "kind" }}
+{{- if not (kindIs "invalid" .kind) }}
+{{- $nak = (toString .kind) }}
+{{- if or (not (regexMatch "^[0-9]{1,3}$" $nak)) (gt (int $nak) 255) }}
+{{- fail (printf "sensorIngest.nonAssetSources: kind %q (source %s:%s) must be an integer 0-255" $nak $nas $naa) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not (.name | default "" | toString) }}
+{{- fail (printf "sensorIngest.nonAssetSources: source %s:%s has no name" $nas $naa) }}
+{{- end }}
+{{- $nat := printf "%d:%d" (int $nas) (int $naa) }}
+{{- if ne $nak "" }}
+{{- $nat = printf "%s:%d" $nat (int $nak) }}
+{{- else }}
+{{- $nonAssetWide = append $nonAssetWide $nat }}
+{{- end }}
+{{- if has $nat $nonAssetTokens }}
+{{- fail (printf "sensorIngest.nonAssetSources: source %s is listed twice" $nat) }}
+{{- end }}
+{{- $nonAssetTokens = append $nonAssetTokens $nat }}
+{{- end }}
+{{- range $entityAssignment }}
+{{- $eparts := splitList ":" (.id | toString) }}
+{{- $esrc := printf "%d:%d" (int (index $eparts 1)) (int (index $eparts 2)) }}
+{{- if has $esrc $nonAssetWide }}
+{{- fail (printf "sensorIngest.entityAssignment: id %q comes from source %s, which is declared in sensorIngest.nonAssetSources -- an asset cannot come from a non-asset source" .id $esrc) }}
+{{- end }}
+{{- end }}
+{{- /* Fallback edge's deny list: ids assigned to every OTHER edge. */ -}}
+{{- $deniedAtFallback := list }}
+{{- range $entityAssignment }}
+{{- if ne .edge $unassignedEdge }}
+{{- $deniedAtFallback = append $deniedAtFallback .id }}
+{{- end }}
+{{- end }}
+{{- $deniedAtFallback = $deniedAtFallback | sortAlpha }}
 {{- if gt (len $entityAssignment) 0 }}
 {{- range $validEdgeIds }}
-{{- if not (hasKey $entityIdsByEdge .) }}
+{{- if and (not (hasKey $entityIdsByEdge .)) (ne . $unassignedEdge) }}
 {{- fail (printf "sensorIngest.entityAssignment: edge %q has no entries while the list is non-empty -- a sidecar given no list admits every entity it hears, so this edge would be wide open while its neighbours are scoped" .) }}
 {{- end }}
 {{- end }}
@@ -158,12 +219,26 @@ spec:
             - name: INGEST_SPOOL_STALL_S
               value: {{ $root.Values.sensorIngest.spool.stallSeconds | quote }}
             {{- end }}
-            {{- if hasKey $entityIdsByEdge $edge.id }}
+            {{- if and (ne $unassignedEdge "") (eq $edge.id $unassignedEdge) }}
+            {{- if gt (len $deniedAtFallback) 0 }}
+            # Fallback edge (sensorIngest.unassignedEdge, values.yaml): admits
+            # every entity not assigned to another edge, so it denies exactly
+            # the ids the other edges own. Sorted, comma-joined.
+            - name: DIS_DENIED_ENTITY_IDS
+              value: {{ $deniedAtFallback | join "," | quote }}
+            {{- end }}
+            {{- else if hasKey $entityIdsByEdge $edge.id }}
             # Per-edge DIS entity allow-list (sensorIngest.entityAssignment,
             # values.yaml). Comma-joined, sorted ids; the sidecar image
             # reads this to admit only these entities on its UDP port.
             - name: DIS_ADMITTED_ENTITY_IDS
               value: {{ get $entityIdsByEdge $edge.id | join "," | quote }}
+            {{- end }}
+            {{- if gt (len $nonAssetTokens) 0 }}
+            # Sources on this sensor net that are not sensors
+            # (sensorIngest.nonAssetSources): dropped and counted here.
+            - name: DIS_NON_ASSET_SOURCES
+              value: {{ $nonAssetTokens | sortAlpha | join "," | quote }}
             {{- end }}
           ports:
             - name: dis-udp

@@ -513,6 +513,41 @@ sensorIngest:
   #     - { id: "dis:1:1:2", edge: edge-01 }
   #     - { id: "dis:2:1:7", edge: edge-02 }
   entityAssignment: []
+  # The fallback edge: the edge whose sidecar admits every entity NOT
+  # assigned to another edge. Required once entityAssignment is non-empty
+  # (and rejected while it is empty -- every sidecar already admits all).
+  # Without it, an entity on no list would be dropped at every edge and a
+  # true arrival could never be seen. That edge's sidecar gets
+  # DIS_DENIED_ENTITY_IDS (the sorted, comma-joined ids assigned to every
+  # OTHER edge) instead of an admit list; it may have no entries of its own.
+  # The limit: this guarantees nothing about entities only a LISTED edge
+  # hears. A listed edge admits only its own ids, so an unlisted entity
+  # reaching only that edge is still dropped there. The fallback edge is
+  # only as good as the traffic that reaches it.
+  unassignedEdge: ""
+  # Sources on the sensor net that are not sensors: a stand-in adapter, a
+  # scenario controller. A LIST of {site, application, kind (optional),
+  # name}. DIS names a source by (site, application); `kind` narrows an
+  # entry to one entity kind (0-255) and matches Entity State only, while a
+  # kind-less entry drops every PDU from that source. site and application
+  # are integers 0-65535, `name` is required, and no (site, application,
+  # kind) may repeat. Every sensor-ingest Deployment, the fallback edge's
+  # included, gets DIS_NON_ASSET_SOURCES (sorted, `site:app[:kind]`) and
+  # drops those PDUs before any admit or deny check, counted per sidecar in
+  # dis_pdus_filtered_total{reason="non_asset_source"}.
+  #
+  # Nothing is ever ignored by entity number: a real surprise arrival comes
+  # from a sensor application, so it always lands at the fallback edge as
+  # undeclared instead of vanishing. An entityAssignment id whose site and
+  # application match a kind-less entry here is rejected at render time --
+  # an asset cannot come from a non-asset source. Empty (the default)
+  # renders no env.
+  #
+  # Example:
+  #   nonAssetSources:
+  #     - { site: 1, application: 900, name: stand-in-adapter }
+  #     - { site: 1, application: 901, kind: 3, name: scenario-controller }
+  nonAssetSources: []
 
 redpandaConnect:
   # DIS entity kinds per ingress path (ADR-0049). `asset`: kinds that may

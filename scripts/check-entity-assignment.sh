@@ -25,11 +25,21 @@
 # mentions the key does not touch whatever an earlier file set. If no -f
 # file sets it, the chart's own values.yaml default applies.
 #
-# WHAT THIS CHECKS (all three must hold):
-#   1. the union of every rendered DIS_ADMITTED_ENTITY_IDS == the map's ids
-#   2. no id is rendered into more than one sidecar
-#   3. every sensor-ingest Deployment carries the env iff the map is
-#      non-empty (empty map -> no sidecar carries it; non-empty -> all do)
+# WHAT THIS CHECKS (all must hold). The fallback edge is
+# sensorIngest.unassignedEdge, read from the same files, last wins; it is
+# the one sidecar that carries a deny list instead of an admit list.
+#   1. the union of every rendered DIS_ADMITTED_ENTITY_IDS == the ids
+#      assigned to the non-fallback edges
+#   2. no id is rendered into more than one admit list
+#   3. every non-fallback sensor-ingest Deployment carries the admit env iff
+#      the map is non-empty (empty map -> no sidecar carries any admit or
+#      deny env; non-empty -> every listed edge does)
+#   4. the fallback edge carries no DIS_ADMITTED_ENTITY_IDS, and its
+#      DIS_DENIED_ENTITY_IDS == the ids assigned to the other edges (absent
+#      when that set is empty -- its own entries, if any, are not denied)
+#   5. no other edge carries DIS_DENIED_ENTITY_IDS
+#   6. every sidecar's DIS_NON_ASSET_SOURCES agrees with
+#      sensorIngest.nonAssetSources (absent iff the list is empty)
 #
 # TESTABILITY
 # -----------
@@ -103,6 +113,30 @@ value_file_paths = sys.argv[3:]
 ENTITY_RE = re.compile(r"^dis:[0-9]+:[0-9]+:[0-9]+$")
 
 
+def read_key(path, key, default):
+    """(present, value) for sensorIngest.<key>; see read_entity_assignment."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        print(f"NOT RUN: values file not found: {path}", file=sys.stderr)
+        sys.exit(3)
+    sensor = doc.get("sensorIngest")
+    if not isinstance(sensor, dict) or key not in sensor:
+        return False, None
+    return True, (sensor[key] or default)
+
+
+def merged_key(key, default):
+    present, value = read_key(chart_values_path, key, default)
+    value = value if present else default
+    for path in value_file_paths:
+        p, v = read_key(path, key, default)
+        if p:
+            value = v
+    return value
+
+
 def read_entity_assignment(path):
     """(present, value). `present` is False when the file does not set
     sensorIngest.entityAssignment at all -- that must not be confused with
@@ -134,7 +168,21 @@ for entry in entity_map:
               file=sys.stderr)
         sys.exit(3)
 
-expected_ids = {entry["id"] for entry in entity_map}
+unassigned_edge = merged_key("unassignedEdge", "")
+non_asset = merged_key("nonAssetSources", [])
+
+
+def source_token(src):
+    t = f"{int(src['site'])}:{int(src['application'])}"
+    if src.get("kind") is not None:
+        t += f":{int(src['kind'])}"
+    return t
+
+
+expected_sources = ",".join(sorted(source_token(x) for x in non_asset))
+fallback_suffix = f"-sensor-ingest-{unassigned_edge}" if unassigned_edge else None
+# ids owned by a listed (non-fallback) edge
+expected_ids = {e["id"] for e in entity_map if e["edge"] != unassigned_edge}
 
 with open(render_path, "r", encoding="utf-8") as f:
     docs = [d for d in yaml.safe_load_all(f) if d]
@@ -157,14 +205,28 @@ if not sensor_deploys:
     print("NOT RUN: the render produced no sensor-ingest Deployments.", file=sys.stderr)
     sys.exit(3)
 
-rendered = {}  # name -> (has_env, set(ids))
+rendered = {}  # name -> (has_env, set(ids)); non-fallback edges only
+fallback = {}  # name -> (admit raw, deny raw)
+sources_seen = {}
+fail = False
 for name, c in sensor_deploys:
     env = {e.get("name"): e.get("value") for e in (c.get("env") or [])}
     raw = env.get("DIS_ADMITTED_ENTITY_IDS")
+    sources_seen[name] = env.get("DIS_NON_ASSET_SOURCES")
+    if fallback_suffix and name.endswith(fallback_suffix):
+        fallback[name] = (raw, env.get("DIS_DENIED_ENTITY_IDS"))
+        continue
+    if env.get("DIS_DENIED_ENTITY_IDS") is not None:
+        print(f"FAIL: {name} carries DIS_DENIED_ENTITY_IDS but is not the "
+              f"fallback edge (sensorIngest.unassignedEdge={unassigned_edge!r})")
+        fail = True
     ids = set(raw.split(",")) if raw else set()
     rendered[name] = (raw is not None, ids)
 
-fail = False
+if fallback_suffix and not fallback:
+    print(f"NOT RUN: no sensor-ingest Deployment for unassignedEdge "
+          f"{unassigned_edge!r}.", file=sys.stderr)
+    sys.exit(3)
 
 rendered_union = set()
 for _name, (_has_env, ids) in rendered.items():
@@ -199,6 +261,27 @@ for name, (has_env, _ids) in sorted(rendered.items()):
     if not map_nonempty and has_env:
         print(f"FAIL: {name} carries DIS_ADMITTED_ENTITY_IDS although "
               f"sensorIngest.entityAssignment is empty")
+        fail = True
+
+for name, (admit_raw, deny_raw) in sorted(fallback.items()):
+    if admit_raw is not None:
+        print(f"FAIL: fallback {name} carries DIS_ADMITTED_ENTITY_IDS; it must "
+              f"carry a deny list (or nothing)")
+        fail = True
+    got = set(deny_raw.split(",")) if deny_raw else set()
+    if got != expected_ids:
+        print(f"FAIL: fallback {name} DIS_DENIED_ENTITY_IDS {sorted(got)} != "
+              f"ids assigned to the other edges {sorted(expected_ids)}")
+        fail = True
+    if not expected_ids and deny_raw is not None:
+        print(f"FAIL: fallback {name} carries an empty DIS_DENIED_ENTITY_IDS; "
+              f"it must be absent when no other edge has ids")
+        fail = True
+
+for name, got_sources in sorted(sources_seen.items()):
+    if (got_sources or "") != expected_sources:
+        print(f"FAIL: {name} DIS_NON_ASSET_SOURCES {got_sources!r} != "
+              f"{expected_sources!r} from sensorIngest.nonAssetSources")
         fail = True
 
 if fail:
