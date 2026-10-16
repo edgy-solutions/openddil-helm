@@ -2089,6 +2089,13 @@ exerciseControl:
     declareUnmeasured: []      # each -> "--declare-unmeasured <name>"; mode: full only
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
+    # false (default) keeps a person's act: the asset_declaration and asset_correlation
+    # tables and the asset-declarations topic that feeds them are neither deleted nor
+    # trimmed, and the reset verifies them UNCHANGED. asset_fielding and its topic are
+    # still cleared (source state, re-published by the logistics system of record).
+    # true -> RESET_CLEAR_DECLARATIONS=1 clears the declarations too. A declaration is
+    # never cleared unless the deployment chose to; any non-boolean value fails the render.
+    clearExerciseDeclarations: false
     activeDeadlineSeconds: 1800
     terminationGracePeriodSeconds: 180   # TERM waits out an in-flight exec (<=60 s), then the scale-downs are restored
     ttlSecondsAfterFinished: 86400

@@ -289,8 +289,8 @@ for f in capture_pass destination_stable fully_trimmed; do :; done
 # --- 5. the stores SQL -------------------------------------------------------------------
 SQL="$(quick_stores_sql pgpod)"
 got="$(printf '%s\n' "$SQL" | grep -oE 'DELETE FROM [a-z_]+' | awk '{print $3}' | sort | tr '\n' ' ')"
-want="$(printf '%s\n' "${TABLES[@]}" | sort | tr '\n' ' ')"
-[ "$got" = "$want" ] && pass "5: the SQL deletes from exactly the TABLES set (${#TABLES[@]} tables)" || fail "5: SQL tables differ: got [$got] want [$want]"
+want="$(for _t in "${TABLES[@]}"; do is_kept_table "$_t" || printf '%s\n' "$_t"; done | sort | tr '\n' ' ')"
+[ "$got" = "$want" ] && pass "5: the SQL deletes from exactly the TABLES set minus KEPT_TABLES (${#TABLES[@]} tables)" || fail "5: SQL tables differ: got [$got] want [$want]"
 printf '%s\n' "$SQL" | grep -qi 'truncate' && fail "5: SQL contains TRUNCATE" || pass "5: no TRUNCATE"
 printf '%s\n' "$SQL" | grep -qi 'audit_log' && fail "5: SQL names audit_log" || pass "5: no audit_log"
 printf '%s\n' "$SQL" | grep -qi 'egress_delivered_events' && fail "5: SQL names the delivery ledger" || pass "5: no egress_delivered_events"

@@ -150,6 +150,12 @@ block renders while resetJob is off.
 {{- if $rj.haltBeforePhase }}
 {{- $env = append $env (dict "name" "RESET_HALT_BEFORE_PHASE" "value" (toString $rj.haltBeforePhase)) }}
 {{- end }}
+{{- $clearDecl := $rj.clearExerciseDeclarations }}
+{{- if kindIs "invalid" $clearDecl }}{{- $clearDecl = false }}{{- end }}
+{{- if not (kindIs "bool" $clearDecl) }}
+{{- fail (printf "exerciseControl.resetJob.clearExerciseDeclarations must be true or false, got %q" (toString $clearDecl)) }}
+{{- end }}
+{{- $env = append $env (dict "name" "RESET_CLEAR_DECLARATIONS" "value" (ternary "1" "0" $clearDecl)) }}
 {{- $jobLabels := merge (include "openddil.labels" $root | fromYaml) (include "openddil.selectorLabels" (dict "component" "exercise-reset" "root" $root) | fromYaml) }}
 {{- $podSpec := dict
       "restartPolicy" "Never"

@@ -202,6 +202,14 @@ USAGE
              when set to a phase number (2, 3, 3b, 4 ... 10), the run halts
              at the start of that phase with exit 2, exactly like any
              refusal. No effect when unset.
+    RESET_CLEAR_DECLARATIONS  whether the reset also clears exercise
+             declarations (a person's act, ADR-0050). Unset, "" or "0" (the
+             default) KEEPS them: the asset_declaration and asset_correlation
+             tables are not deleted, the asset-declarations topic is neither
+             trimmed nor policy-trimmed, and phase 8 verifies them UNCHANGED
+             against the phase-1 baseline. asset_fielding and its topic are
+             still cleared. "1" clears them too. Any other value halts before
+             anything is mutated. Both full and --quick runs honour it.
 
 FLAGS
   --dry-run          Print every mutating command; execute none. Reads
@@ -1290,6 +1298,49 @@ EXCLUDED_TABLES=(audit_log egress_delivered_events)  # ADR-0029 decision log
 # record of what was already sent, or a re-delivery on the next run would
 # look like a first delivery. delete_table() refuses both the same way.
 
+# Exercise declarations are a person's act (ADR-0050): someone looked at an
+# observed entity and said what it is. A reset keeps them unless the
+# deployment chose otherwise (RESET_CLEAR_DECLARATIONS=1). This is the one
+# place that decides what is kept; every site that deletes a table or trims a
+# topic reads these arrays. asset_fielding / asset-fielding are source state
+# and are always cleared. An invalid value keeps (the safe side) here and is
+# refused by check_clear_declarations() before main mutates anything.
+CLEAR_DECLARATIONS=false
+CLEAR_DECLARATIONS_BAD=""
+case "${RESET_CLEAR_DECLARATIONS:-}" in
+  ""|0) ;;
+  1) CLEAR_DECLARATIONS=true ;;
+  *) CLEAR_DECLARATIONS_BAD="${RESET_CLEAR_DECLARATIONS}" ;;
+esac
+KEPT_TABLES=()
+KEPT_TOPICS=()
+if ! $CLEAR_DECLARATIONS; then
+  KEPT_TABLES=(asset_declaration asset_correlation)
+  KEPT_TOPICS=(asset-declarations)
+fi
+KEPT_NOTE="kept: clearExerciseDeclarations=false"
+
+is_kept_table() {
+  local k
+  for k in ${KEPT_TABLES[@]+"${KEPT_TABLES[@]}"}; do [ "$k" = "$1" ] && return 0; done
+  return 1
+}
+is_kept_topic() {
+  local k
+  for k in ${KEPT_TOPICS[@]+"${KEPT_TOPICS[@]}"}; do [ "$k" = "$1" ] && return 0; done
+  return 1
+}
+# check_clear_declarations -- called first in main, before any mutation.
+check_clear_declarations() {
+  if [ -n "$CLEAR_DECLARATIONS_BAD" ]; then
+    halt_reset "RESET_CLEAR_DECLARATIONS has the invalid value '$CLEAR_DECLARATIONS_BAD' (allowed: unset, empty, 0, 1)" \
+      "nothing was mutated"
+  fi
+}
+clear_declarations_banner() {
+  echo "clear_exercise_declarations: $CLEAR_DECLARATIONS"
+}
+
 # Declared heartbeats: deleted in phase 6 like every table above, but NOT
 # predicted 0 in phase 8. edge_buffer_status is one row the projector upserts
 # every EDGE_BUFFER_PROBE_INTERVAL_S (2s, openddil-projector
@@ -1349,6 +1400,11 @@ delete_table() {
         "$table on $pod untouched; tables already deleted in phase 6 stay deleted"
     fi
   done
+  if is_kept_table "$table"; then
+    echo "REFUSING to delete from $table — it is in KEPT_TABLES ($KEPT_NOTE)." >&2
+    halt_reset "refused to delete from $table on $pod: it is in KEPT_TABLES ($KEPT_NOTE)" \
+      "$table on $pod untouched; tables already deleted in phase 6 stay deleted"
+  fi
   maybe_run "DELETE FROM $table on $pod" \
     kubectl exec -n "$NS" "$pod" -c postgres -- sh -c \
     "psql -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \"DELETE FROM ${table};\""
@@ -1684,6 +1740,7 @@ declare -A BASE_RESTATE_SCHED # key "pod" -> scheduled invocation count
 declare -A BASE_ELECTRIC_HANDLE # key electric_instance(pod) -> shape handle before the reset (must CHANGE after)
 declare -A BASE_ELECTRIC_ROWS   # key electric_instance(pod) -> shape row count before the reset
 declare -A BASE_TOPIC_HW      # key "pod|topic|partition" -> high watermark
+declare -A BASE_KEPT_LOGSTART # key "pod|topic|partition" -> log-start offset, KEPT_TOPICS only (re-checked unchanged in phase 8)
 declare -A ORIG_REPLICAS      # key deployment name -> replica count before quiesce (producers only, phase 2)
 
 # Per-kind captured state for the DERIVED quiesce set (work item 3) —
@@ -1758,7 +1815,11 @@ phase1_baseline() {
       if pg_table_exists "$pod" "$table"; then
         cnt="$(pg_count "$pod" "$table")"
         BASE_STORE_COUNT["$pod|$table"]="$cnt"
-        printf '  %-28s %-28s %s\n' "$pod" "$table" "$cnt"
+        if is_kept_table "$table"; then
+          printf '  %-28s %-28s %s   (%s — recorded to confirm UNCHANGED in phase 8)\n' "$pod" "$table" "$cnt" "$KEPT_NOTE"
+        else
+          printf '  %-28s %-28s %s\n' "$pod" "$table" "$cnt"
+        fi
       else
         printf '  %-28s %-28s (table not present, skipped)\n' "$pod" "$table"
       fi
@@ -1804,6 +1865,11 @@ phase1_baseline() {
       while read -r part logstart hw; do
         [ -z "$part" ] && continue
         BASE_TOPIC_HW["$pod|$topic|$part"]="$hw"
+        if is_kept_topic "$topic"; then
+          BASE_KEPT_LOGSTART["$pod|$topic|$part"]="$logstart"
+          printf '  %-28s %-30s p%-3s log_start=%-8s hw=%-8s (%s — recorded to confirm UNCHANGED in phase 8)\n' "$pod" "$topic" "$part" "$logstart" "$hw" "$KEPT_NOTE"
+          continue
+        fi
         printf '  %-28s %-30s p%-3s log_start=%-8s hw=%s\n' "$pod" "$topic" "$part" "$logstart" "$hw"
       done < <(topic_partitions "$pod" "$topic")
     done < <(broker_topics "$pod")
@@ -2831,7 +2897,7 @@ write_exercise_reset_record() {
   done
   declared_json="[${declared_json}]"
   kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
-    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json}" \
+    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -3145,6 +3211,10 @@ phase4_capture_pass() {
     while read -r topic; do
       [ -z "$topic" ] && continue
       is_internal_topic "$topic" && continue
+      if is_kept_topic "$topic"; then
+        echo "  $pod/$topic: not captured, not trimmed, not policy-trimmed ($KEPT_NOTE)"
+        continue
+      fi
 
       policy="$(topic_policy "$pod" "$topic")"
       capdir="$TOPIC_CAPTURE_DIR/$pod"
@@ -3483,6 +3553,10 @@ phase6_stores() {
   local pod table
   for pod in "${POSTGRES_PODS[@]}"; do
     for table in "${TABLES[@]}"; do
+      if is_kept_table "$table"; then
+        printf '  %-28s %-28s skipped (%s)\n' "$pod" "$table" "$KEPT_NOTE"
+        continue
+      fi
       if pg_table_exists "$pod" "$table"; then
         delete_table "$pod" "$table"
       else
@@ -3792,12 +3866,21 @@ report() {
 }
 
 verify_stores() {
-  echo "--- stores: predicted 0 rows (audit_log predicted UNCHANGED) ---"
+  echo "--- stores: predicted 0 rows (audit_log, and kept declaration tables, predicted UNCHANGED) ---"
   local pod table cnt base
   for pod in "${POSTGRES_PODS[@]}"; do
     for table in "${TABLES[@]}"; do
       if pg_table_exists "$pod" "$table"; then
-        if is_heartbeat_table "$table"; then
+        if is_kept_table "$table"; then
+          cnt="$(pg_count "$pod" "$table")"
+          base="${BASE_STORE_COUNT[$pod|$table]:-}"
+          if [ -z "$base" ]; then
+            printf '  %-55s no phase-1 baseline recorded (ran with --verify-only?) actual=%s\n' \
+              "stores $pod/$table (UNCHANGED?, $KEPT_NOTE)" "$cnt"
+          else
+            report "stores $pod/$table (UNCHANGED, $KEPT_NOTE)" "$base" "$cnt"
+          fi
+        elif is_heartbeat_table "$table"; then
           cnt="$(pg_query "$pod" "SELECT count(*) FROM $table WHERE updated_at < '$RUN_STARTED_AT'::timestamptz" || true)"
           report "stores $pod/$table (heartbeat, rows older than boundary)" "0" "${cnt:-UNMEASURED}"
         else
@@ -3820,14 +3903,24 @@ verify_stores() {
 }
 
 verify_topics() {
-  echo "--- topics: predicted log_start == high_watermark on every partition ---"
-  local pod topic part logstart hw
+  echo "--- topics: predicted log_start == high_watermark on every partition (kept declaration topics: log_start UNCHANGED) ---"
+  local pod topic part logstart hw base
   for pod in "${REDPANDA_PODS[@]}"; do
     while read -r topic; do
       [ -z "$topic" ] && continue
       is_internal_topic "$topic" && continue
       while read -r part logstart hw; do
         [ -z "$part" ] && continue
+        if is_kept_topic "$topic"; then
+          base="${BASE_KEPT_LOGSTART[$pod|$topic|$part]:-}"
+          if [ -z "$base" ]; then
+            printf '  %-55s no phase-1 baseline recorded (ran with --verify-only?) actual log_start=%s\n' \
+              "topics $pod/$topic/p$part (log_start UNCHANGED?, $KEPT_NOTE)" "$logstart"
+          else
+            report "topics $pod/$topic/p$part (log_start UNCHANGED, $KEPT_NOTE)" "$base" "$logstart"
+          fi
+          continue
+        fi
         report "topics $pod/$topic/p$part" "$hw" "$logstart"
       done < <(topic_partitions "$pod" "$topic")
     done < <(broker_topics "$pod")
@@ -4361,6 +4454,7 @@ QUICK_T0=0
 
 quick_banner() {
   echo "QUICK RESET: state cleared, NOT MEASURED. Skipped: $(quick_skipped_list). No exercise reset record was written."
+  clear_declarations_banner
 }
 
 quick_end_banner() {
@@ -4396,6 +4490,10 @@ quick_list_targets() {
     while read -r topic; do
       [ -z "$topic" ] && continue
       is_internal_topic "$topic" && continue
+      if is_kept_topic "$topic"; then
+        echo "  $pod/$topic: not trimmed, not policy-trimmed ($KEPT_NOTE)"
+        continue
+      fi
       QUICK_TARGETS+=("$pod|$topic")
       QUICK_BROKER_TOPICS["$pod"]="${QUICK_BROKER_TOPICS[$pod]:-} $topic"
     done < <(broker_topics "$pod")
@@ -4689,6 +4787,10 @@ quick_stores_sql() {
   echo 'DECLARE n bigint; total bigint := 0; tables_n int := 0;'
   echo 'BEGIN'
   for table in "${TABLES[@]}"; do
+    if is_kept_table "$table"; then
+      echo "  -- $table: skipped ($KEPT_NOTE)"
+      continue
+    fi
     echo "  IF to_regclass('public.${table}') IS NOT NULL THEN DELETE FROM ${table}; GET DIAGNOSTICS n = ROW_COUNT; total := total + n; tables_n := tables_n + 1; RAISE NOTICE 'RESET_TABLE ${table} %', n; END IF;"
   done
   echo "  RAISE NOTICE 'RESET_TOTAL % %', total, tables_n;"
@@ -4704,11 +4806,12 @@ quick_stores() {
       "No table is touched; every projector table keeps its pre-reset rows."
     return 0
   fi
-  local pod sql out rc line total tables_n
+  local pod sql out rc line total tables_n kt
   for pod in "${POSTGRES_PODS[@]}"; do
     quick_refuse_excluded "$pod"
     sql="$(quick_stores_sql "$pod")"
-    echo "-> DELETE FROM ${#TABLES[@]} candidate table(s) on $pod, ONE psql"
+    echo "-> DELETE FROM $(( ${#TABLES[@]} - ${#KEPT_TABLES[@]} )) candidate table(s) on $pod, ONE psql"
+    for kt in ${KEPT_TABLES[@]+"${KEPT_TABLES[@]}"}; do echo "  $pod/$kt: skipped ($KEPT_NOTE)"; done
     if $DRY_RUN; then
       echo "   [dry-run] would run: kubectl exec -i -n $NS $pod -c postgres -- sh -c 'psql ...' with this SQL on stdin:"
       printf '%s\n' "$sql"
@@ -4764,6 +4867,7 @@ run_reset_sequence() {
   RESET_RUN=true
   trap 'on_reset_exit' EXIT
   if $QUICK; then run_quick_sequence; fi   # exits; never reaches the full sequence
+  clear_declarations_banner
   run_phase "1 baseline" phase1_baseline
 
   # --- pre-flight (SPEC-consumer-declarations.md Part B item 5): every live
@@ -4851,6 +4955,8 @@ fi
 # ===========================================================================
 # main
 # ===========================================================================
+check_clear_declarations   # halts on an invalid RESET_CLEAR_DECLARATIONS, before anything mutates
+
 if $BASELINE_ONLY; then
   phase1_baseline
   exit 0
