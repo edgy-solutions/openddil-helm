@@ -17,6 +17,10 @@
 # lab-declared-unlabelled.yaml. A missing path or an id declared in both
 # files exits 3.
 #
+# A declared-unlabelled entry means "unlabelled unless a declaration exists in
+# that store". The gate reads asset_declaration before trusting the file: an id
+# with a declaration row there is expected labelled and its excuse is inactive.
+#
 # NOT RUN IS ITS OWN VERDICT. Until 2026-09-29 a gate that could not answer
 # exited 1 like a gate that found leaks, and the every-store summary said
 # "AT LEAST ONE STORE FAILS" after checking no store at all (the self-call
@@ -422,6 +426,9 @@ is_declared_empty() {
 # count; every other unlabelled value fails exactly as before. The excused
 # assets are named on the verdict line, and a declared asset that is NOT
 # unlabelled in a store it is declared for FAILS the gate (stale excuse).
+# An entry means "unlabelled unless a declaration exists in that store": the
+# gate reads asset_declaration first, and an id with a row there leaves the
+# excuse list for this store.
 #
 # SCOPED TO ONE CLUSTER: the file's `context:` must equal this run's context.
 # Parse one declared-unlabelled file. $1 = file, $2 = "scope" (print the ids in
@@ -517,6 +524,52 @@ for id in $DECLARED_UNLABELLED; do
   fi
   DU_SQL="${DU_SQL:+$DU_SQL,}'$id'"
 done
+
+# DECLARATION STATE. An entry above means "unlabelled unless a declaration
+# exists in THIS store". Read asset_declaration for the declared ids before
+# the table scan; an id with a row there is expected to be labelled, so it
+# leaves the excuse list for this store (DECLARED_UNLABELLED, then DU_SQL,
+# which every later reader -- the per-table subtraction, the region-rollup and
+# phantom-partial correlates, the stale check -- reads) and any unlabelled
+# value it still has is an ordinary finding.
+if [ -n "$DU_SQL" ]; then
+  decl_q="SELECT to_regclass('public.asset_declaration') IS NOT NULL;"
+  decl_has="$(q "$decl_q" </dev/null)"
+  case "$decl_has" in
+    t)
+      decl_q="SELECT asset_id FROM asset_declaration WHERE asset_id IN ($DU_SQL);"
+      decl_ids="$(q "$decl_q" </dev/null)"
+      if [ -n "$decl_ids" ] && printf '%s\n' "$decl_ids" | grep -qvE '^[A-Za-z0-9:._-]+$'; then
+        echo "asset_declaration query returned something other than an id list: $decl_ids" >&2
+        echo "  query: $decl_q" >&2
+        echo "GATE NOT RUN." >&2
+        exit 3
+      fi
+      du_pruned=""
+      for id in $DECLARED_UNLABELLED; do
+        if grep -qxF -- "$id" <<<"$decl_ids"; then
+          echo "  declared-unlabelled: $id HAS A DECLARATION in this store — expected labelled, excuse inactive"
+        else
+          du_pruned="${du_pruned:+$du_pruned$'\n'}$id"
+        fi
+      done
+      DECLARED_UNLABELLED="$du_pruned"
+      DU_SQL=""
+      for id in $DECLARED_UNLABELLED; do
+        DU_SQL="${DU_SQL:+$DU_SQL,}'$id'"
+      done
+      ;;
+    f)
+      echo "  asset_declaration: absent in this store — no declarations"
+      ;;
+    *)
+      echo "asset_declaration probe returned neither t nor f: $decl_has" >&2
+      echo "  query: $decl_q" >&2
+      echo "GATE NOT RUN." >&2
+      exit 3
+      ;;
+  esac
+fi
 
 # The key column a table's rows are named by: asset_id, else subject, else
 # region_id, else empty. Shared by the declared-unlabelled subtraction and
