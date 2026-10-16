@@ -445,7 +445,7 @@ metadata:
     {{- include "openddil.labels" $root | nindent 4 }}
 data:
   restate.toml: |
-{{- include "openddil.tierRestateToml" (dict "tier" $tier "broker" $broker) | nindent 4 }}
+{{- include "openddil.tierRestateToml" (dict "tier" $tier "broker" $broker "root" $root) | nindent 4 }}
 ---
 # ===========================================================================
 # tier-restate-{{ $tier.id }} — durable-workflow substrate
@@ -499,7 +499,7 @@ spec:
         # that feed it. See the template for the failure that produced this
         # rule: a tuple-hash misses the first change outside the tuple, and
         # presents as green everywhere with nothing moved.
-        checksum/restate-config: {{ include "openddil.tierRestateToml" (dict "tier" $tier "broker" $broker) | sha256sum }}
+        checksum/restate-config: {{ include "openddil.tierRestateToml" (dict "tier" $tier "broker" $broker "root" $root) | sha256sum }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:

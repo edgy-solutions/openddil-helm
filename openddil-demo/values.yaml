@@ -330,6 +330,13 @@ restate:
   ingressPort: 8080
   adminPort: 9070
 
+  # Completed-invocation journal retention. The server default keeps every
+  # completed invocation's journal for 1d; subscription-fed handlers complete
+  # about ten per second per server, so a release without the upgrade wipe
+  # carries a day of them in RocksDB. "" omits the line and falls back to the
+  # server default.
+  journalRetention: "1h"
+
   # ephemeralOnUpgrade — when true, a Helm pre-install/pre-upgrade hook
   # (hook-restate-wipe.yaml) scales EVERY restate-server to 0 and deletes
   # its PVC before applying chart changes — the root's and all three
