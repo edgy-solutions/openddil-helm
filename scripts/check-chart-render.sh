@@ -1204,8 +1204,10 @@ print(f"  ok   : {checked} known Kafka-producing workload(s), all declare a well
 #                          default element_publish_tier is edge), plus
 #                          asset-element-inventory + parts-availability, hq
 #   faust-regional-<r>     fan-in, the three region-* outputs and its table
-#                          changelog, on the tier broker when <r> is a tier,
-#                          else on hq (names as measured on a live broker)
+#                          changelog, the emitted-partials table changelog and
+#                          the aggregator's sweep-tick topic, on the tier
+#                          broker when <r> is a tier, else on hq (names as
+#                          measured on a live broker)
 echo
 echo "guard 13: each produces-topics declaration covers what its workload writes"
 G13_VALUES="$(mktemp)"
@@ -1279,10 +1281,13 @@ for name in decl:
     elif "-faust-regional-" in name:
         r = name.split("-faust-regional-", 1)[1]
         b = r if r in TIERS else "hq"
-        table = "region_" + r.replace("-", "_") + "_assets_latest"
+        r_us = r.replace("-", "_")
+        table = "region_" + r_us + "_assets_latest"
         want[name] = {f"{b}/{r}-fan-in", f"{b}/region-fleet-summary",
                       f"{b}/region-top-factors", f"{b}/region-wear-trends",
-                      f"{b}/region-{r}-aggregator-{table}-changelog"}
+                      f"{b}/region-{r}-aggregator-{table}-changelog",
+                      f"{b}/region-{r}-aggregator-region_{r_us}_emitted_partials-changelog",
+                      f"{b}/region-{r}-aggregator-sweep-tick"}
     elif "-tier-cm-" in name:
         t = name.split("-tier-cm-", 1)[1]
         want[name] = {f"{t}/asset-cm-state", f"{t}/tactical-events"}

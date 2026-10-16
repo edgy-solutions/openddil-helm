@@ -1463,6 +1463,27 @@ include "openddil.faustRegionalAggregatorTable" $region.id
 {{- end }}
 
 {{/*
+openddil.faustRegionalEmittedTable -- the aggregator's second Faust table: the
+partials it has already emitted. CODE DEFAULT baked into the faust-regional
+app's own table definition, named from the SAME region id value as
+openddil.faustRegionalAggregatorTable (hyphens become underscores). Usage:
+include "openddil.faustRegionalEmittedTable" $region.id
+*/}}
+{{- define "openddil.faustRegionalEmittedTable" -}}
+{{- printf "region_%s_emitted_partials" (. | replace "-" "_") -}}
+{{- end }}
+
+{{/*
+openddil.faustRegionalSweepTickTopic -- the aggregator's own sweep-tick topic:
+its 30 s timer sends to it and the sweep agent consumes it. CODE DEFAULT of the
+app, named from the aggregator app id ("region-<id>-aggregator"). Usage:
+include "openddil.faustRegionalSweepTickTopic" $regionAggregatorAppId
+*/}}
+{{- define "openddil.faustRegionalSweepTickTopic" -}}
+{{- printf "%s-sweep-tick" . -}}
+{{- end }}
+
+{{/*
 openddil.tierProjectorGroupIds -- a tier projector's consumer-group ids, as a
 space-separated list (SPEC-consumer-declarations.md Part A).
 

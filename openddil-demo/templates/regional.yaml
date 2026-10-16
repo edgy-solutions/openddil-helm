@@ -56,9 +56,12 @@
        aggregator's own broker, for the aggregator to read.
        region-fleet-summary / region-top-factors / region-wear-trends are
        CODE DEFAULTS (the aggregator's own topic names), not chart values.
-       The changelog is the aggregator's one Faust Table
-       (openddil.faustRegionalAggregatorTable), named from the SAME
-       $region.id this whole file already keys on. */ -}}
+       The aggregator keeps two Faust Tables
+       (openddil.faustRegionalAggregatorTable and
+       openddil.faustRegionalEmittedTable), named from the SAME
+       $region.id this whole file already keys on; both changelogs are
+       declared, plus its own sweep-tick topic
+       (openddil.faustRegionalSweepTickTopic). */ -}}
 {{- $regionFanInTopic := include "openddil.regionFanInTopic" $region.id }}
 {{- $regionAggregatorAppId := printf "region-%s-aggregator" $region.id }}
 {{- $regionalProduces := list
@@ -67,6 +70,8 @@
     (printf "%s/region-top-factors" $aggHqBrokerId)
     (printf "%s/region-wear-trends" $aggHqBrokerId)
     (printf "%s/%s" $aggHqBrokerId (include "openddil.faustChangelogTopic" (dict "appId" $regionAggregatorAppId "table" (include "openddil.faustRegionalAggregatorTable" $region.id))))
+    (printf "%s/%s" $aggHqBrokerId (include "openddil.faustChangelogTopic" (dict "appId" $regionAggregatorAppId "table" (include "openddil.faustRegionalEmittedTable" $region.id))))
+    (printf "%s/%s" $aggHqBrokerId (include "openddil.faustRegionalSweepTickTopic" $regionAggregatorAppId))
   }}
 apiVersion: apps/v1
 kind: Deployment
