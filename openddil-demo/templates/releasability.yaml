@@ -149,10 +149,10 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (ternary (list) (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml ""))) $root.Values.releasability.liveReload.enabled)) | sha256sum | quote }}
-        {{- if and $root.Values.releasability.deploymentLayer.usersYaml (not $root.Values.releasability.liveReload.enabled) }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
-        checksum/ontology-deployment: {{ list $root.Values.releasability.deploymentLayer.releasabilityYaml $root.Values.releasability.deploymentLayer.usersYaml | toJson | sha256sum | quote }}
+        checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
         {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -215,15 +215,16 @@ spec:
                 ls /bundle/demo/policy/*.yaml >&2
                 exit 1
               fi
-              {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
-              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml): a
-              # whole replacement for the shipped users.yaml, honored only for
-              # the "users" variant; any other variant keeps its shipped file.
-              # The missing-variant refusal above still ran against the shipped
-              # tree.
-              if [ "$OPENDDIL_POLICY_VARIANT" = "users" ] && [ -f /ontology-deployment/users.yaml ]; then
-                src=/ontology-deployment/users.yaml
-                echo "entitlements: users (deployment layer)"
+              {{- if include "openddil.usersLayerActive" $root }}
+              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml and
+              # .usersPromotedYaml): each is a whole replacement for the
+              # shipped file of the same name, honored only for its own
+              # variant ("users", "users-promoted"); any other variant keeps
+              # its shipped file. A variant switched at runtime with
+              # `kubectl set env` re-runs this, so it picks the matching key.
+              if { [ "$OPENDDIL_POLICY_VARIANT" = "users" ] || [ "$OPENDDIL_POLICY_VARIANT" = "users-promoted" ]; } && [ -f "/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml" ]; then
+                src="/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml"
+                echo "entitlements: ${OPENDDIL_POLICY_VARIANT} (deployment layer)"
               else
                 echo "entitlements: ${OPENDDIL_POLICY_VARIANT} (shipped)"
               fi
@@ -264,7 +265,7 @@ spec:
               mountPath: /destinations-deployment
               readOnly: true
             {{- end }}
-            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            {{- if include "openddil.usersLayerActive" $root }}
             - name: ontology-deployment
               mountPath: /ontology-deployment
               readOnly: true
@@ -347,10 +348,10 @@ spec:
               echo "policy-sync: every ${OPENDDIL_POLICY_SYNC_INTERVAL_S}s, variant ${OPENDDIL_POLICY_VARIANT}"
               while true; do
                 sync_one /destinations-deployment/data.yaml /shared/policy/openddil/destinations_deployment/data.yaml destinations_deployment
-                {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
-                if [ "$OPENDDIL_POLICY_VARIANT" = "users" ]; then
-                  sync_one /ontology-deployment/users.yaml /shared/policy/openddil/data.yaml users
-                fi
+                {{- if include "openddil.usersLayerActive" $root }}
+                case "$OPENDDIL_POLICY_VARIANT" in
+                  users|users-promoted) sync_one "/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml" /shared/policy/openddil/data.yaml "$OPENDDIL_POLICY_VARIANT" ;;
+                esac
                 {{- end }}
                 sleep "$OPENDDIL_POLICY_SYNC_INTERVAL_S"
               done
@@ -364,7 +365,7 @@ spec:
               mountPath: /destinations-deployment
               readOnly: true
             {{- end }}
-            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            {{- if include "openddil.usersLayerActive" $root }}
             - name: ontology-deployment
               mountPath: /ontology-deployment
               readOnly: true
@@ -383,7 +384,7 @@ spec:
             name: {{ $root.Release.Name }}-destinations-deployment
             optional: true
         {{- end }}
-        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        {{- if include "openddil.usersLayerActive" $root }}
         - name: ontology-deployment
           configMap:
             name: {{ $root.Release.Name }}-ontology-deployment
@@ -758,6 +759,17 @@ data:
 {{- include "openddil.keycloakExternalClients" $root }}
 {{- end }}
 
+{{- $realmUsers := include "openddil.realmUsersOverlay" $root }}
+{{- if $realmUsers }}
+  # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson),
+  # merged into the bundle realm's users by the merge-realm-users init
+  # container. Present only when the value is set.
+  realm-users-overlay.json: |
+    {{- $realmUsers | nindent 4 }}
+  merge-realm-users.py: |
+    {{- .Files.Get "files/merge-realm-users.py" | nindent 4 }}
+{{- end }}
+
   substitutions.sh: |
     set -eu
     # SPLICE THE PER-TIER CLIENTS IN AT THE MARKER, BEFORE SUBSTITUTING.
@@ -907,7 +919,7 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
         {{- /* sessionTtlSeconds is baked into the realm import (SSO lifetimes); without it here a TTL-only change never rolls Keycloak or re-imports the realm */}}
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -918,6 +930,24 @@ spec:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
           ) "root" $root) | nindent 8 }}
+        {{- if include "openddil.realmUsersOverlay" $root }}
+        # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson).
+        # Merged here, before prepare-realm, because merging JSON arrays is not
+        # something sed can do safely and the Keycloak image has no JSON tool.
+        # The stock python image the PEP runs in has one, and the merge script
+        # is stdlib-only, so nothing is built or installed. It rewrites only
+        # the "users" array of the staged realm copy; prepare-realm then
+        # splices, substitutes and guards as usual, so the placeholder guard
+        # covers overlay users too. Re-runs are idempotent (merge by id).
+        - name: merge-realm-users
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
+          command: ["python", "-I", "/subst/merge-realm-users.py", "/bundle-realm/realm-openddil.json", "/subst/realm-users-overlay.json"]
+          resources:
+            {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
+          volumeMounts:
+            - { name: subst,         mountPath: /subst, readOnly: true }
+            - { name: bundle-shared, mountPath: /bundle-realm, subPath: bundle-realm }
+        {{- end }}
         - name: prepare-realm
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.keycloak.image.repository "tag" $root.Values.releasability.keycloak.image.tag "digest" $root.Values.releasability.keycloak.image.digest "root" $root) }}
           command: ["sh", "/subst/substitutions.sh"]

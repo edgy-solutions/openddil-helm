@@ -2013,10 +2013,10 @@ spec:
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (ternary (list) (concat (list (toJson $root.Values.releasability.destinations)) (ternary (list $root.Values.releasability.deploymentLayer.usersYaml) (list) (ne $root.Values.releasability.deploymentLayer.usersYaml ""))) $root.Values.releasability.liveReload.enabled)) | sha256sum | quote }}
-        {{- if and $root.Values.releasability.deploymentLayer.usersYaml (not $root.Values.releasability.liveReload.enabled) }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
-        checksum/ontology-deployment: {{ list $root.Values.releasability.deploymentLayer.releasabilityYaml $root.Values.releasability.deploymentLayer.usersYaml | toJson | sha256sum | quote }}
+        checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
         {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -2062,13 +2062,16 @@ spec:
                 ls /bundle/demo/policy/*.yaml >&2
                 exit 1
               fi
-              {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
-              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml): a
-              # whole replacement for the shipped users.yaml, honored only for
-              # the "users" variant; any other variant keeps its shipped file.
-              if [ "$OPENDDIL_POLICY_VARIANT" = "users" ] && [ -f /ontology-deployment/users.yaml ]; then
-                src=/ontology-deployment/users.yaml
-                echo "tier {{ $tier.id }} entitlements: users (deployment layer)"
+              {{- if include "openddil.usersLayerActive" $root }}
+              # DEPLOYMENT LAYER (releasability.deploymentLayer.usersYaml and
+              # .usersPromotedYaml): each is a whole replacement for the
+              # shipped file of the same name, honored only for its own
+              # variant ("users", "users-promoted"); any other variant keeps
+              # its shipped file. A variant switched at runtime with
+              # `kubectl set env` re-runs this, so it picks the matching key.
+              if { [ "$OPENDDIL_POLICY_VARIANT" = "users" ] || [ "$OPENDDIL_POLICY_VARIANT" = "users-promoted" ]; } && [ -f "/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml" ]; then
+                src="/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml"
+                echo "tier {{ $tier.id }} entitlements: ${OPENDDIL_POLICY_VARIANT} (deployment layer)"
               else
                 echo "tier {{ $tier.id }} entitlements: ${OPENDDIL_POLICY_VARIANT} (shipped)"
               fi
@@ -2109,7 +2112,7 @@ spec:
               mountPath: /destinations-deployment
               readOnly: true
             {{- end }}
-            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            {{- if include "openddil.usersLayerActive" $root }}
             - name: ontology-deployment
               mountPath: /ontology-deployment
               readOnly: true
@@ -2209,10 +2212,10 @@ spec:
               echo "policy-sync: every ${OPENDDIL_POLICY_SYNC_INTERVAL_S}s, variant ${OPENDDIL_POLICY_VARIANT}"
               while true; do
                 sync_one /destinations-deployment/data.yaml /shared/policy/openddil/destinations_deployment/data.yaml destinations_deployment
-                {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
-                if [ "$OPENDDIL_POLICY_VARIANT" = "users" ]; then
-                  sync_one /ontology-deployment/users.yaml /shared/policy/openddil/data.yaml users
-                fi
+                {{- if include "openddil.usersLayerActive" $root }}
+                case "$OPENDDIL_POLICY_VARIANT" in
+                  users|users-promoted) sync_one "/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml" /shared/policy/openddil/data.yaml "$OPENDDIL_POLICY_VARIANT" ;;
+                esac
                 {{- end }}
                 sleep "$OPENDDIL_POLICY_SYNC_INTERVAL_S"
               done
@@ -2226,7 +2229,7 @@ spec:
               mountPath: /destinations-deployment
               readOnly: true
             {{- end }}
-            {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+            {{- if include "openddil.usersLayerActive" $root }}
             - name: ontology-deployment
               mountPath: /ontology-deployment
               readOnly: true
@@ -2246,7 +2249,7 @@ spec:
             name: {{ $root.Release.Name }}-destinations-deployment
             optional: true
         {{- end }}
-        {{- if $root.Values.releasability.deploymentLayer.usersYaml }}
+        {{- if include "openddil.usersLayerActive" $root }}
         - name: ontology-deployment
           configMap:
             name: {{ $root.Release.Name }}-ontology-deployment

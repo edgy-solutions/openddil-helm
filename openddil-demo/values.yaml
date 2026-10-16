@@ -1756,16 +1756,42 @@ releasability:
   #                      is true (Connect labels by it either way).
   #   usersYaml          the full entitlements corpus topaz loads. It applies
   #                      ONLY when policyVariant is "users"; a different
-  #                      variant (for example users-promoted) keeps its own
+  #                      variant (for example users-promoted, see below) keeps its own
   #                      shipped file and is NOT replaced. With
   #                      releasability.enabled false there is no topaz, so
   #                      it has no reader.
   #
-  # A change to either string rolls every pod that reads it (checksum
-  # annotation; for topaz it is folded into checksum/policy as well).
+  #   usersPromotedYaml  the same for the "users-promoted" variant: the full
+  #                      corpus topaz loads when policyVariant is
+  #                      "users-promoted", including when switched at runtime
+  #                      with `kubectl set env ... OPENDDIL_POLICY_VARIANT=
+  #                      users-promoted`. The two keys are independent; each
+  #                      replaces only its own variant's shipped file.
+  #   realmUsersJson     a JSON array of Keycloak user objects, ADDED to or
+  #                      OVERRIDING the bundle realm's users at import. A user
+  #                      whose `id` matches a bundle user replaces it entirely
+  #                      (so a deployment can rename operator.atlantia by
+  #                      supplying id 11111111-1111-4111-8111-111111111111
+  #                      with a new username); a new `id` is appended; bundle
+  #                      users not mentioned are kept. Each element needs `id`
+  #                      and `username`; the render fails on anything else,
+  #                      and the pod fails if a username repeats after the
+  #                      merge. The id is the join key into the corpus above,
+  #                      so keep it. Needs releasability.keycloak.enabled;
+  #                      merged by an init container in the stock python
+  #                      image (releasability.pep.image). Use --set-file.
+  #                      Example:
+  #                        [{"id": "11111111-1111-4111-8111-111111111111",
+  #                          "username": "operator.atl-hq", "enabled": true}]
+  #
+  # A change to any string rolls every pod that reads it (checksum
+  # annotation; for topaz it is folded into checksum/policy as well; for
+  # Keycloak, into its checksum/policy).
   deploymentLayer:
     releasabilityYaml: ""
     usersYaml: ""
+    usersPromotedYaml: ""
+    realmUsersJson: ""
     # A mapping of DIS entity type string ->
     # {beams, erp_dbm, erp_tolerance_db, silence_after_s}, merged by the DIS
     # sidecar over dis_condition.yaml's (empty) emission.baselines. Per

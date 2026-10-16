@@ -2473,3 +2473,76 @@ spec:
         - protocol: TCP
           port: 4198
 {{- end }}
+
+{{/*
+True when the deployment layer carries a topaz entitlements corpus
+(usersYaml and/or usersPromotedYaml). Takes the chart root. Gates the
+ontology-deployment mount in the topaz pods; the ConfigMap itself renders
+under its own condition (ontology-deployment.yaml).
+*/}}
+{{- define "openddil.usersLayerActive" -}}
+{{- if or .Values.releasability.deploymentLayer.usersYaml .Values.releasability.deploymentLayer.usersPromotedYaml -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The `.extra` list for a topaz pod's checksum/policy, as JSON (decode with
+fromJsonArray). Takes the chart root. Topaz has no hot reload, so every file
+the policy-loader can pick from the deployment layer is hashed here; with
+liveReload on, the policy-sync sidecar carries them instead and the list is
+empty. Each layer string joins only when set, so a deployment that sets
+neither renders the same list as before they existed.
+*/}}
+{{- define "openddil.topazPolicyExtra" -}}
+{{- $l := .Values.releasability.deploymentLayer -}}
+{{- $x := list -}}
+{{- if not .Values.releasability.liveReload.enabled -}}
+{{- $x = list (toJson .Values.releasability.destinations) -}}
+{{- if $l.usersYaml }}{{ $x = append $x $l.usersYaml }}{{ end -}}
+{{- if $l.usersPromotedYaml }}{{ $x = append $x $l.usersPromotedYaml }}{{ end -}}
+{{- end -}}
+{{- toJson $x -}}
+{{- end }}
+
+{{/*
+checksum/ontology-deployment for a topaz pod (liveReload off, a users layer
+set): both layer strings as before, plus usersPromotedYaml only when set so
+a usersYaml-only deployment keeps its value. Takes the chart root.
+*/}}
+{{- define "openddil.topazLayerChecksum" -}}
+{{- $l := .Values.releasability.deploymentLayer -}}
+{{- $x := list $l.releasabilityYaml $l.usersYaml -}}
+{{- if $l.usersPromotedYaml }}{{ $x = append $x $l.usersPromotedYaml }}{{ end -}}
+{{- $x | toJson | sha256sum -}}
+{{- end }}
+
+{{/*
+releasability.deploymentLayer.realmUsersJson, validated, as compact JSON (so
+a whitespace-only edit does not roll Keycloak). Takes the chart root. Renders
+"" when unset or an empty array. Refuses at render time: text that is not a
+JSON array, an element that is not an object with a string id and username,
+a repeated id, a repeated username. Uniqueness against the bundle's own users
+is checked at merge time (files/merge-realm-users.py), where the bundle file
+is readable.
+*/}}
+{{- define "openddil.realmUsersOverlay" -}}
+{{- $raw := .Values.releasability.deploymentLayer.realmUsersJson -}}
+{{- if $raw -}}
+{{- if not (kindIs "string" $raw) -}}{{- fail "releasability.deploymentLayer.realmUsersJson must be a string holding a JSON array (use --set-file)" -}}{{- end -}}
+{{- if not (regexMatch "^\\s*\\[" $raw) -}}{{- fail "releasability.deploymentLayer.realmUsersJson must be a JSON array of Keycloak user objects" -}}{{- end -}}
+{{- $arr := fromJsonArray $raw -}}
+{{- /* fromJsonArray reports a parse error as a one-element list holding the message */ -}}
+{{- if and (eq (len $arr) 1) (kindIs "string" (index $arr 0)) (regexMatch "^(invalid character|unexpected end|json:)" (index $arr 0)) -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson is not valid JSON: %v" (index $arr 0)) -}}{{- end -}}
+{{- $ids := dict -}}
+{{- $names := dict -}}
+{{- range $i, $u := $arr -}}
+{{- if not (kindIs "map" $u) -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson[%d] is not an object" $i) -}}{{- end -}}
+{{- if not (and (kindIs "string" $u.id) $u.id) -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson[%d] needs a non-empty string \"id\"" $i) -}}{{- end -}}
+{{- if not (and (kindIs "string" $u.username) $u.username) -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson[%d] needs a non-empty string \"username\"" $i) -}}{{- end -}}
+{{- if hasKey $ids $u.id -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson repeats id %s" $u.id) -}}{{- end -}}
+{{- if hasKey $names $u.username -}}{{- fail (printf "releasability.deploymentLayer.realmUsersJson repeats username %s" $u.username) -}}{{- end -}}
+{{- $_ := set $ids $u.id true -}}
+{{- $_ := set $names $u.username true -}}
+{{- end -}}
+{{- if $arr }}{{ toJson $arr }}{{ end -}}
+{{- end -}}
+{{- end }}

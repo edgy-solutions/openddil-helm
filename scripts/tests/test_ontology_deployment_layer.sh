@@ -145,7 +145,7 @@ elif mode == "L3":
         c = loader(d, "policy-loader")
         s = script(c)
         check("L3 %s policy-loader mounts the layer" % n, any(m["name"] == "ontology-deployment" and m["mountPath"] == "/ontology-deployment" for m in c["volumeMounts"]) and "ontology-deployment" in vols(d))
-        check("L3 %s copies it for variant users" % n, "/ontology-deployment/users.yaml" in s and "(deployment layer)" in s)
+        check("L3 %s copies it for variant users" % n, "/ontology-deployment/${OPENDDIL_POLICY_VARIANT}.yaml" in s and "(deployment layer)" in s)
         check("L3 %s checksum/policy differs from L1" % n, ann(d).get("checksum/policy") != ann(w1[n]).get("checksum/policy"))
     for n in w1:
         if n in topaz: continue
