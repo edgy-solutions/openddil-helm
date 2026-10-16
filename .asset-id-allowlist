@@ -5,4 +5,5 @@ scripts/check-entity-assignment.sh	ENTITY_RE = re.compile	validation: the same s
 scripts/tests/test_entity_assignment.sh	malformed id "dis:1:1"	validation: test asserts the check names the offending id
 scripts/tests/test_entity_assignment.sh	is assigned to more than one edge (edge-01 and edge-02)	validation: test asserts the check names the offending id
 scripts/tests/test_entity_assignment.sh	grep -q "dis:2:1:7"	validation: test asserts the check names the offending id
-scripts/tests/test_entity_assignment.sh	dis:3:1:9' is rendered	validation: test asserts the check names the offending id
+scripts/tests/test_entity_assignment.sh	dis:1:1:1' is rendered	validation: test asserts the check names the offending id
+scripts/tests/test_entity_assignment.sh	grep -qF 'value: "dis:1:1:1,dis:1:1:2,dis:2:1:7"'	validation: test asserts the fallback edge's rendered deny list
