@@ -11,6 +11,12 @@
 #          1 (78 from the cluster guard, 2 for a bad argument, 126/127 for a
 #          self-call that could not execute) means the same thing.
 #
+# Environment: OPENDDIL_DECLARED_UNLABELLED_EXTRA=<path> names an optional
+# second declared-unlabelled file (a private, deployment-local file kept
+# outside this repository), same format and same context rule as
+# lab-declared-unlabelled.yaml. A missing path or an id declared in both
+# files exits 3.
+#
 # NOT RUN IS ITS OWN VERDICT. Until 2026-09-29 a gate that could not answer
 # exited 1 like a gate that found leaks, and the every-store summary said
 # "AT LEAST ONE STORE FAILS" after checking no store at all (the self-call
@@ -114,6 +120,17 @@ EXPECTED_EMPTY="${OPENDDIL_EXPECTED_EMPTY:-$(cd "$(dirname "$0")/../.." 2>/dev/n
 # Where the deployment declares assets it keeps unlabelled on purpose (a lab
 # fixture). Scoped to one kube-context inside the file; see its header.
 DECLARED_UNLABELLED_FILE="${OPENDDIL_DECLARED_UNLABELLED:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lab-declared-unlabelled.yaml}"
+# OPTIONAL second declared-unlabelled file: a private, deployment-local file
+# kept outside this repository. Same format and same `context:` rule as
+# lab-declared-unlabelled.yaml (a context mismatch ignores the whole file).
+# Unset or empty = no second file, and nothing changes. When set, the path
+# must exist (else exit 3, GATE NOT RUN), and an id declared in both files is
+# a config error (exit 3).
+DECLARED_UNLABELLED_FILE_EXTRA="${OPENDDIL_DECLARED_UNLABELLED_EXTRA:-}"
+if [ -n "$DECLARED_UNLABELLED_FILE_EXTRA" ] && [ ! -f "$DECLARED_UNLABELLED_FILE_EXTRA" ]; then
+  echo "OPENDDIL_DECLARED_UNLABELLED_EXTRA names '$DECLARED_UNLABELLED_FILE_EXTRA', which is not a file. GATE NOT RUN." >&2
+  exit 3
+fi
 
 # --- which store? -----------------------------------------------------------
 # ONE GATE PER STORE, AND EVERY TIER HAS ONE.
@@ -238,7 +255,7 @@ if [ "$ALL_TIERS" -eq 1 ]; then
   # in a per-store section someone may have scrolled past.
   if [ "$n_declared" -gt 0 ]; then
     echo "$n_declared declared unlabelled asset(s), excused by declaration: $declared_ids"
-    echo "  ($DECLARED_UNLABELLED_FILE)"
+    echo "  ($DECLARED_UNLABELLED_FILE${DECLARED_UNLABELLED_FILE_EXTRA:+, $DECLARED_UNLABELLED_FILE_EXTRA})"
   else
     echo "0 declared unlabelled assets."
   fi
@@ -407,38 +424,87 @@ is_declared_empty() {
 # unlabelled in a store it is declared for FAILS the gate (stale excuse).
 #
 # SCOPED TO ONE CLUSTER: the file's `context:` must equal this run's context.
-DECLARED_UNLABELLED=""
-if [ -f "$DECLARED_UNLABELLED_FILE" ]; then
-  du_ctx="$(sed -n 's/^context:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$DECLARED_UNLABELLED_FILE" | head -1)"
-  if [ "$du_ctx" = "$CTX" ]; then
-    DECLARED_UNLABELLED="$(sed -n '/^declared_unlabelled:/,$p' "$DECLARED_UNLABELLED_FILE" | awk -v store="$THIS_STORE" -v tier="$TIER" -v kind="$TIER_KIND" '
-      /^  "[^"]+":[[:space:]]*$/ {
-        if (id != "") emit()
-        id = $1; gsub(/"/, "", id); sub(/:$/, "", id); scopes = ""
-        next
-      }
-      /^    stores:[[:space:]]*\[/ {
-        scopes = $0
-        sub(/^[^[]*\[/, "", scopes); sub(/\].*$/, "", scopes); gsub(/[ \t"]/, "", scopes)
-        next
-      }
-      END { if (id != "") emit() }
-      function emit(   n, a, i) {
-        if (scopes == "") { print id; return }
-        n = split(scopes, a, ",")
-        for (i = 1; i <= n; i++)
-          if (a[i] == store || (tier != "" && a[i] == tier) \
-              || (kind != "" && a[i] == kind)) { print id; return }
-      }')"
-    echo "  declared-unlabelled: $(printf '%s' "${DECLARED_UNLABELLED:-NONE in scope}" | tr '\n' ' ')"
-    echo "                  (from $DECLARED_UNLABELLED_FILE, context $du_ctx)"
+# Parse one declared-unlabelled file. $1 = file, $2 = "scope" (print the ids in
+# scope for THIS store) or "all" (print every declared id, scope ignored; used
+# only to catch an id declared in both files at any store). One awk block
+# serves both files so they cannot disagree about the format.
+du_parse() {
+  sed -n '/^declared_unlabelled:/,$p' "$1" | awk -v mode="$2" -v store="$THIS_STORE" -v tier="$TIER" -v kind="$TIER_KIND" '
+    /^  "[^"]+":[[:space:]]*$/ {
+      if (id != "") emit()
+      id = $1; gsub(/"/, "", id); sub(/:$/, "", id); scopes = ""
+      next
+    }
+    /^    stores:[[:space:]]*\[/ {
+      scopes = $0
+      sub(/^[^[]*\[/, "", scopes); sub(/\].*$/, "", scopes); gsub(/[ \t"]/, "", scopes)
+      next
+    }
+    END { if (id != "") emit() }
+    function emit(   n, a, i) {
+      if (mode == "all" || scopes == "") { print id; return }
+      n = split(scopes, a, ",")
+      for (i = 1; i <= n; i++)
+        if (a[i] == store || (tier != "" && a[i] == tier) \
+            || (kind != "" && a[i] == kind)) { print id; return }
+    }'
+}
+
+# Gate one declared-unlabelled file on its context and report it. $1 = file,
+# $2 = variable to receive its in-scope ids, $3 = variable to receive its full
+# declared set (both set only when the file's context matches this run).
+du_load() {
+  local file="$1" ctx ids
+  if [ -f "$file" ]; then
+    ctx="$(sed -n 's/^context:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$file" | head -1)"
+    if [ "$ctx" = "$CTX" ]; then
+      ids="$(du_parse "$file" scope)"
+      printf -v "$2" '%s' "$ids"
+      printf -v "$3" '%s' "$(du_parse "$file" all)"
+      echo "  declared-unlabelled: $(printf '%s' "${ids:-NONE in scope}" | tr '\n' ' ')"
+      echo "                  (from $file, context $ctx)"
+    else
+      echo "  declared-unlabelled: NONE — $file is for context"
+      echo "                  '${ctx:-<unset>}', this run is '$CTX'; the whole file is ignored."
+    fi
   else
-    echo "  declared-unlabelled: NONE — $DECLARED_UNLABELLED_FILE is for context"
-    echo "                  '${du_ctx:-<unset>}', this run is '$CTX'; the whole file is ignored."
+    echo "  declared-unlabelled: NONE — no $file"
   fi
-else
-  echo "  declared-unlabelled: NONE — no $DECLARED_UNLABELLED_FILE"
+}
+
+DECLARED_UNLABELLED=""
+DU_ALL_MAIN=""
+du_load "$DECLARED_UNLABELLED_FILE" DECLARED_UNLABELLED DU_ALL_MAIN
+DU_EXTRA_IDS=""
+if [ -n "$DECLARED_UNLABELLED_FILE_EXTRA" ]; then
+  DU_ALL_EXTRA=""
+  du_load "$DECLARED_UNLABELLED_FILE_EXTRA" DU_EXTRA_IDS DU_ALL_EXTRA
+  # An id declared in both files is a config error, checked on the full sets
+  # so it is caught at every store, before any SQL runs.
+  du_dup=""
+  while read -r id; do
+    [ -n "$id" ] && grep -qxF -- "$id" <<<"$DU_ALL_MAIN" && du_dup="$du_dup $id"
+  done <<<"$DU_ALL_EXTRA"
+  if [ -n "$du_dup" ]; then
+    echo "declared-unlabelled id(s) declared in BOTH files:$du_dup" >&2
+    echo "  $DECLARED_UNLABELLED_FILE and $DECLARED_UNLABELLED_FILE_EXTRA. GATE NOT RUN." >&2
+    exit 3
+  fi
+  DECLARED_UNLABELLED="$(printf '%s\n%s\n' "$DECLARED_UNLABELLED" "$DU_EXTRA_IDS" | sed '/^$/d')"
 fi
+
+# The file that declared id $1, and its reason text. Looks in the extra file
+# only for ids it declared.
+du_file_for() {
+  if [ -n "$DU_EXTRA_IDS" ] && grep -qxF -- "$1" <<<"$DU_EXTRA_IDS"; then
+    echo "$DECLARED_UNLABELLED_FILE_EXTRA"
+  else
+    echo "$DECLARED_UNLABELLED_FILE"
+  fi
+}
+du_reason() {
+  sed -n "/^  \"$1\":/,/^  \"/p" "$(du_file_for "$1")" | sed -n '/reason:/,$p' | sed '1d;/^  "/d' | tr '\n' ' ' | tr -s ' '
+}
 echo
 # SQL list of the declared ids, for `key IN (...)`. Ids are checked against a
 # conservative charset first: they are spliced into SQL by hand.
@@ -1073,7 +1139,7 @@ for id in $DECLARED_UNLABELLED; do
 done
 if [ -n "$du_stale" ]; then
   echo "GATE FAILS: declared-unlabelled asset(s) NOT unlabelled in this store:$du_stale"
-  echo "  Declared in $DECLARED_UNLABELLED_FILE for this store, but no labelled"
+  echo "  Declared in $(for id in $du_stale; do du_file_for "$id"; done | sort -u | tr '\n' ' ')for this store, but no labelled"
   echo "  table here holds an unlabelled value for them. Either the asset"
   echo "  vanished (which a fixture must not do), it was labelled, or the"
   echo "  declaration's scope is wrong. Fix the cause or remove the row."
@@ -1211,7 +1277,7 @@ if [ "$du_n" -gt 0 ]; then
   echo "GATE PASSES: $populated populated table(s), zero undeclared unlabelled values."
   echo "  $du_n declared unlabelled asset(s) excused: $du_ids($du_values value(s))"
   echo "  $(printf '%s' "$du_ids" | tr ' ' '\n' | sed '/^$/d' | while read -r id; do
-          sed -n "/^  \"$id\":/,/^  \"/p" "$DECLARED_UNLABELLED_FILE" | sed -n '/reason:/,$p' | sed '1d;/^  "/d' | tr '\n' ' ' | tr -s ' '
+          du_reason "$id"
         done | cut -c1-200)"
 else
   echo "GATE PASSES: $populated populated table(s), zero unlabelled values."
