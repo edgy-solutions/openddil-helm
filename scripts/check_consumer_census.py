@@ -194,13 +194,38 @@ def require_cluster(ctx: str) -> None:
     like a guard.
     """
     root = pathlib.Path(__file__).resolve().parent.parent
-    expect = os.environ.get("OPENDDIL_EXPECT_CONTEXT", "").strip()
-    if not expect:
-        f = root / ".expected-context"
-        if f.is_file():
-            expect = f.read_text(encoding="utf-8").strip()
-
     err = lambda m: print(m, file=sys.stderr)
+
+    # .expected-context format and decision table: see lib/require-cluster.sh
+    # (the reference). Duplicated in check_tier_feed.py.
+    allowed: list[str] = []
+    barred: list[str] = []
+    f = root / ".expected-context"
+    if f.is_file():
+        for raw in f.read_text(encoding="utf-8").splitlines():
+            line = "".join(raw.split("#", 1)[0].split())
+            if not line:
+                continue
+            if line.startswith("!"):
+                if line[1:]:
+                    barred.append(line[1:])
+            else:
+                allowed.append(line)
+
+    expect = os.environ.get("OPENDDIL_EXPECT_CONTEXT", "").strip()
+    if expect:
+        if expect in barred:
+            err("REFUSING TO RUN: '" + expect + "' is barred by .expected-context.")
+            err("  Nothing has been read and nothing has been written.")
+            raise SystemExit(78)
+    elif len(allowed) == 1:
+        expect = allowed[0]
+    elif len(allowed) >= 2:
+        err("REFUSING TO RUN: this checkout allows " + str(len(allowed))
+            + " clusters (" + ", ".join(allowed) + ");")
+        err("  name the one for this run: OPENDDIL_EXPECT_CONTEXT=<one of them> ...")
+        err("  Nothing has been read and nothing has been written.")
+        raise SystemExit(78)
 
     if not expect:
         err("REFUSING TO RUN: no expected kube-context is declared.")
@@ -216,6 +241,11 @@ def require_cluster(ctx: str) -> None:
         err("REFUSING TO RUN: kubectl reports no current-context.")
         err("  Expected " + expect + ". An empty context matches nothing;")
         err("  it is a kubeconfig that cannot answer.")
+        raise SystemExit(78)
+
+    if ctx in barred:
+        err("REFUSING TO RUN: current context '" + ctx + "' is barred.")
+        err("  Nothing has been read and nothing has been written.")
         raise SystemExit(78)
 
     if ctx != expect:

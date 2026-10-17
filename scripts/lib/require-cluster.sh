@@ -35,18 +35,67 @@
 #   1. $OPENDDIL_EXPECT_CONTEXT      — for CI and one-off overrides
 #   2. <repo>/.expected-context      — operator states it once, locally
 #
+# .expected-context FORMAT: one entry per line; blank lines and # comments
+# (whole-line or trailing) are ignored; whitespace is trimmed. A plain line
+# is an ALLOWED context; a line "!<ctx>" is a BARRED context. A file holding
+# one plain line behaves as it always has.
+#
+#   - Exactly one allowed entry and no env: that entry is the expectation.
+#   - Two or more allowed entries and no env: REFUSED. With two labs in one
+#     checkout there is no implicit pick; a run must name its cluster with
+#     OPENDDIL_EXPECT_CONTEXT, so a fresh install cannot land on the lab that
+#     is busy with something else because it was listed first.
+#   - A barred context is refused even when OPENDDIL_EXPECT_CONTEXT names it
+#     and even when it is the current context: "!" outranks the env and the
+#     equality check. The env is otherwise not checked against the allowed
+#     list (CI, in-pod use and offline tests export synthetic names).
+#   - A file of only "!" lines declares no expectation.
+#
 # UNSET IS A REFUSAL, NOT A DEFAULT. If neither is present the script stops.
 # Defaulting to "whatever is current" would restore precisely the behaviour
 # this file exists to remove, while appearing to have a guard.
 # ===========================================================================
 
 openddil_require_cluster() {
-    local expect actual root
+    local expect actual root line
+    local -a allowed=() barred=()
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+    if [ -f "$root/.expected-context" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"
+            line="${line//[[:space:]]/}"   # context names hold no whitespace
+            [ -n "$line" ] || continue
+            if [ "${line:0:1}" = "!" ]; then
+                line="${line:1}"
+                if [ -n "$line" ]; then barred+=("$line"); fi
+            else
+                allowed+=("$line")
+            fi
+        done < "$root/.expected-context"
+    fi
+    _in_barred() {
+        local x
+        for x in ${barred[@]+"${barred[@]}"}; do
+            if [ "$x" = "$1" ]; then return 0; fi
+        done
+        return 1
+    }
+
     expect="${OPENDDIL_EXPECT_CONTEXT:-}"
-    if [ -z "$expect" ] && [ -f "$root/.expected-context" ]; then
-        expect="$(tr -d '[:space:]' < "$root/.expected-context")"
+    if [ -n "$expect" ]; then
+        if _in_barred "$expect"; then
+            echo "REFUSING TO RUN: '$expect' is barred by .expected-context." >&2
+            echo "  Nothing has been read and nothing has been written." >&2
+            exit 78
+        fi
+    elif [ "${#allowed[@]}" -eq 1 ]; then
+        expect="${allowed[0]}"
+    elif [ "${#allowed[@]}" -ge 2 ]; then
+        echo "REFUSING TO RUN: this checkout allows ${#allowed[@]} clusters ($(IFS=,; echo "${allowed[*]}" | sed 's/,/, /g'));" >&2
+        echo "  name the one for this run: OPENDDIL_EXPECT_CONTEXT=<one of them> $0 ..." >&2
+        echo "  Nothing has been read and nothing has been written." >&2
+        exit 78
     fi
 
     if [ -z "$expect" ]; then
@@ -75,6 +124,12 @@ openddil_require_cluster() {
         echo "REFUSING TO RUN: kubectl reports no current-context." >&2
         echo "  Expected '$expect'. An empty context is not a match for" >&2
         echo "  anything; it is a kubeconfig that cannot answer." >&2
+        exit 78
+    fi
+
+    if _in_barred "$actual"; then
+        echo "REFUSING TO RUN: current context '$actual' is barred." >&2
+        echo "  Nothing has been read and nothing has been written." >&2
         exit 78
     fi
 
