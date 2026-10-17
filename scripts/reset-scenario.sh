@@ -1384,6 +1384,8 @@ heartbeat_topic_cadence() {
   return 1
 }
 
+declare -A AGG_EMPTY_HW=()     # key "bpod|partition" -> region-fleet-summary hw seen EMPTY in phase 8; where the first post-reset rollup lands (phase 11)
+FIRST_ROLLUP_COUNT="" FIRST_ROLLUP_AT="" FIRST_ROLLUP_VERDICT="not measured" FIRST_ROLLUP_BROKER=""  # phase 11 result, for the reset record
 declare -A TRIM_MARK=()       # key "pod|topic|partition" -> offset phase 4 left log_start at
 AGGREGATOR_RESTORED_EPOCH=""  # set once by phase5_aggregator after the last Faust deploy is restored
 
@@ -2918,14 +2920,16 @@ write_exercise_reset_record() {
          "${RELEASE}-exercise-reset-record)"
     return 0
   fi
-  local at declared_json="" n
+  local at declared_json="" n fr_json fr_at
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
     declared_json="${declared_json:+$declared_json, }\"$n\""
   done
   declared_json="[${declared_json}]"
+  fr_at=null; [ -n "$FIRST_ROLLUP_AT" ] && fr_at="\"$FIRST_ROLLUP_AT\""
+  fr_json="{\"asset_count\": ${FIRST_ROLLUP_COUNT:-null}, \"observed_at\": $fr_at, \"predicted\": 1, \"verdict\": \"${FIRST_ROLLUP_VERDICT:-not measured}\"}"
   kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
-    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS}" \
+    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -4012,7 +4016,7 @@ verify_aggregator() {
   # correct reset. This check makes three readings instead: the projection
   # table is empty, the topic is empty (log_start == hw), and the aggregator
   # is alive (its sweep-tick heartbeat advances). The first-arrival rollup
-  # after the restart is measured elsewhere, not here.
+  # after the restart is measured by phase 11 (verify_first_rollup), not here.
   #
   # The liveness window stays above 2x the 30 s sweep-tick cadence: sampling a
   # 30 s emitter over 10 s is how check-advancing.sh once produced a false
@@ -4039,6 +4043,8 @@ verify_aggregator() {
       [ -z "$part" ] && continue
       found=true
       report "aggregator $bpod/region-fleet-summary/p$part (empty: log_start == hw)" "$hw" "$logstart"
+      # The empty partition's hw is where the first post-reset record lands.
+      [ "$logstart" = "$hw" ] && AGG_EMPTY_HW["$bpod|$part"]="$hw"
     done < <(topic_partitions "$bpod" "region-fleet-summary")
   done
   $found || report "aggregator region-fleet-summary (empty: log_start == hw)" "empty" "UNMEASURED"
@@ -4068,6 +4074,174 @@ verify_aggregator() {
     done < <(broker_topics "$bpod")
   done
   $hb_found || report "aggregator sweep-tick alive" ">=1" "UNMEASURED"
+}
+
+# ===========================================================================
+# PHASE 11 -- the first regional rollup after producers come back.
+#
+# JUDGMENT CALL 11 -- observed, never gating. This phase does not use `report`
+# and never sets OVERALL_FAIL, on MET, MISS, timeout or decode failure:
+#   - it observes live refill after producers are restored, and this script
+#     asserts zero at rest only;
+#   - a gate here would make the exercise restart depend on refill timing.
+# The prediction "1" holds when the first sweep after the restart sees exactly
+# one asset. A larger first count means more than one asset arrived inside one
+# 30 s sweep window, NOT residue: phase 8 already proved the topic empty and
+# the aggregator alive with zero emissions before producers returned.
+#
+# Phase 8 recorded each partition's empty hw (AGG_EMPTY_HW). Reading the topic
+# from that offset is immune to the table being overwritten every sweep and to
+# when this phase runs. One sweep = the records sharing the earliest
+# observed_at; values are raw RegionFleetSummary protos (asset_count = field 6,
+# observed_at = field 7, seconds = field 1).
+# ===========================================================================
+_first_rollup_decode() {
+  python3 -c '
+import sys, base64
+def varint(b, i):
+    r = 0; sh = 0
+    while True:
+        c = b[i]; i += 1
+        r |= (c & 0x7f) << sh; sh += 7
+        if not c & 0x80: return r, i
+def walk(b):
+    i = 0
+    while i < len(b):
+        k, i = varint(b, i); f, w = k >> 3, k & 7
+        if w == 0: v, i = varint(b, i)
+        elif w == 2:
+            n, i = varint(b, i); v = b[i:i+n]
+            if len(v) != n: raise ValueError("truncated")
+            i += n
+        elif w == 1: v = b[i:i+8]; i += 8
+        elif w == 5: v = b[i:i+4]; i += 4
+        else: raise ValueError("wire type %d" % w)
+        yield f, w, v
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    secs = 0; cnt = 0; reg = ""; seen = False
+    for f, w, v in walk(base64.b64decode(line)):
+        if f == 6 and w == 0: cnt = v
+        elif f == 1 and w == 2: reg = v.decode("utf-8", "replace")
+        elif f == 7 and w == 2:
+            seen = True
+            for f2, w2, v2 in walk(v):
+                if f2 == 1 and w2 == 0: secs = v2
+    if not seen: raise ValueError("no observed_at")
+    print(secs, cnt, reg)
+'
+}
+
+# _first_rollup_hw_sum BPOD -> hw summed over the marked partitions of BPOD.
+_first_rollup_hw_sum() {
+  local bpod="$1" part logstart hw sum=0
+  while read -r part logstart hw; do
+    [ -z "$part" ] && continue
+    [ -n "${AGG_EMPTY_HW["$bpod|$part"]:-}" ] || continue
+    sum=$((sum + hw))
+  done < <(topic_partitions "$bpod" "region-fleet-summary")
+  echo "$sum"
+}
+
+verify_first_rollup() {
+  echo
+  echo "=== PHASE 11: first rollup after producers returned (observed, not gating) ==="
+  local -a brokers=()
+  local key bpod b seen part logstart hw wait remaining start_epoch now_epoch
+  for key in "${!AGG_EMPTY_HW[@]}"; do
+    bpod="${key%%|*}"; seen=false
+    for b in ${brokers[@]+"${brokers[@]}"}; do [ "$b" = "$bpod" ] && seen=true; done
+    $seen || brokers+=("$bpod")
+  done
+  if [ "${#brokers[@]}" -eq 0 ]; then
+    echo "first rollup: no mark (phase 8 did not find region-fleet-summary empty on any broker)"
+    return 0
+  fi
+  if $DRY_RUN; then
+    echo "   [dry-run] would read region-fleet-summary from the phase 8 marks on: ${brokers[*]}"
+    return 0
+  fi
+  wait="${RESET_FIRST_ROLLUP_WAIT:-300}"
+  now_epoch="$(date -u +%s)"
+  start_epoch="$now_epoch"
+  if [ -n "${PHASE9_DONE_AT:-}" ]; then
+    start_epoch="$(date -u -d "$PHASE9_DONE_AT" +%s 2>/dev/null || echo "$now_epoch")"
+  fi
+  remaining=$((start_epoch + wait - now_epoch))
+
+  declare -A marksum=() adv=()
+  local any=false
+  for bpod in "${brokers[@]}"; do
+    marksum["$bpod"]=0
+    for key in "${!AGG_EMPTY_HW[@]}"; do
+      [ "${key%%|*}" = "$bpod" ] && marksum["$bpod"]=$((${marksum["$bpod"]} + ${AGG_EMPTY_HW["$key"]}))
+    done
+  done
+  while true; do
+    for bpod in "${brokers[@]}"; do
+      [ -n "${adv["$bpod"]:-}" ] && continue
+      hw="$(_first_rollup_hw_sum "$bpod")"
+      if [ "${hw:-0}" -gt "${marksum["$bpod"]}" ]; then adv["$bpod"]=1; any=true; fi
+    done
+    if $any; then
+      # one more poll so every class record of the first sweep is written
+      sleep 5
+      for bpod in "${brokers[@]}"; do
+        [ -n "${adv["$bpod"]:-}" ] && continue
+        hw="$(_first_rollup_hw_sum "$bpod")"
+        [ "${hw:-0}" -gt "${marksum["$bpod"]}" ] && adv["$bpod"]=1
+      done
+      break
+    fi
+    [ "$remaining" -le 0 ] && break
+    sleep 5
+    remaining=$((remaining - 5))
+  done
+  if ! $any; then
+    echo "first rollup: not measured in this run (no rollup by T+${wait}s after producers returned; expected where the feed resumes only with the exercise restart)"
+    return 0
+  fi
+
+  local k lines out min_secs n_cls sum_cnt at verdict
+  for bpod in "${brokers[@]}"; do
+    if [ -z "${adv["$bpod"]:-}" ]; then
+      echo "first rollup $bpod: not measured (no rollup yet)"
+      continue
+    fi
+    lines=""
+    while read -r part logstart hw; do
+      [ -z "$part" ] && continue
+      [ -n "${AGG_EMPTY_HW["$bpod|$part"]:-}" ] || continue
+      [ "$hw" -gt "${AGG_EMPTY_HW["$bpod|$part"]}" ] || continue
+      k=$((hw - ${AGG_EMPTY_HW["$bpod|$part"]})); [ "$k" -gt 20 ] && k=20
+      lines+="$(kubectl exec -n "$NS" "$bpod" -c redpanda -- \
+                  timeout "${RPK_CMD_TIMEOUT:-60}" \
+                  rpk topic consume region-fleet-summary -p "$part" -o "${AGG_EMPTY_HW["$bpod|$part"]}" -n "$k" \
+                  -f '%v{base64}\n' 2>/dev/null || true)"$'\n'
+    done < <(topic_partitions "$bpod" "region-fleet-summary")
+    if [ -z "${lines//[$'\n ']/}" ]; then
+      echo "first rollup $bpod: UNREADABLE (no record could be read back)"
+      [ -z "$FIRST_ROLLUP_COUNT" ] && FIRST_ROLLUP_VERDICT="UNREADABLE"
+      continue
+    fi
+    if ! out="$(printf '%s' "$lines" | _first_rollup_decode 2>&1)"; then
+      echo "first rollup $bpod: UNREADABLE (decode failed: $(printf '%s' "$out" | tail -1))"
+      [ -z "$FIRST_ROLLUP_COUNT" ] && FIRST_ROLLUP_VERDICT="UNREADABLE"
+      continue
+    fi
+    min_secs="$(printf '%s\n' "$out" | awk 'NF { if (m == "" || $1 < m) m = $1 } END { print m }')"
+    n_cls="$(printf '%s\n' "$out" | awk -v m="$min_secs" '$1 == m { n++ } END { print n + 0 }')"
+    sum_cnt="$(printf '%s\n' "$out" | awk -v m="$min_secs" '$1 == m { s += $2 } END { print s + 0 }')"
+    at="$(date -u -d "@$min_secs" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$min_secs")"
+    if [ "$sum_cnt" = 1 ]; then verdict=MET; else verdict=MISS; fi
+    echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt PREDICTED=1 -> $verdict"
+    # the record carries the first measured broker, a region-east one preferred
+    if [ -z "$FIRST_ROLLUP_COUNT" ] || { [[ "$bpod" == *region-east* ]] && ! [[ "$FIRST_ROLLUP_BROKER" == *region-east* ]]; }; then
+      FIRST_ROLLUP_COUNT="$sum_cnt"; FIRST_ROLLUP_AT="$at"; FIRST_ROLLUP_VERDICT="$verdict"; FIRST_ROLLUP_BROKER="$bpod"
+    fi
+  done
+  return 0
 }
 
 # _agg_topic_hw_sum POD TOPIC -- high watermarks summed over all partitions.
@@ -4413,7 +4587,7 @@ CURRENT_PHASE=""
 PHASES_DONE=()
 HALT_REASON=""
 HALT_DETAIL=()
-ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "3b writer census" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness")
+ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "3b writer census" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness" "11 first rollup")
 PHASE9_DONE_AT=""
 
 halt_reset() {
@@ -4902,7 +5076,7 @@ run_quick_sequence() {
 }
 
 # run_reset_sequence — the whole mutating run, in order: phase 1, pre-flight,
-# phases 2 through 10, the exercise reset record. Quick mode hands over to
+# phases 2 through 11, the exercise reset record. Quick mode hands over to
 # run_quick_sequence (its own, faster steps; no record). Kept as a function
 # (called once, from main) so a test can stub the phases and compare the
 # sequence.
@@ -4968,6 +5142,8 @@ run_reset_sequence() {
   # itself (failures map into OVERALL_FAIL instead), so this stays a bare
   # run_phase call like every other phase.
   run_phase "10 subscription liveness" phase10_subscription_liveness
+  # Observed, never gating (JUDGMENT CALL 11, above verify_first_rollup).
+  run_phase "11 first rollup" verify_first_rollup
   RUN_COMPLETED=true
   # A failed/halted reset never writes the record -- a halt never reaches this
   # line (halt_reset exits directly, above), and a completed-but-failing run
