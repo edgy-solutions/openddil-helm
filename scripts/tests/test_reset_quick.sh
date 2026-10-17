@@ -65,13 +65,13 @@ phase7_electric()               { echo "7" >> "$LOG"; }
 phase8_zero()                   { echo "8" >> "$LOG"; }
 phase9_restore_producers()      { echo "9" >> "$LOG"; }
 phase10_subscription_liveness() { echo "10" >> "$LOG"; }
-verify_first_rollup()           { echo "11" >> "$LOG"; }
+verify_first_rollup()           { echo "9b" >> "$LOG"; }
 write_exercise_reset_record()   { echo "record" >> "$LOG"; }
 
 seq_of() { tr '\n' ' ' < "$LOG" | sed 's/ $//'; }
 
 QUICK_SEQ="2 3 4 5 6 7 9"
-FULL_SEQ="1 preflight 2 3 3b 4 5 6 7 8 9 10 11 record"
+FULL_SEQ="1 preflight 2 3 3b 4 5 6 7 8 9 9b 10 record"
 
 # run_main QUICK DRY -> runs the real sequence in a subshell; out in $T/out
 run_main() {
@@ -85,7 +85,7 @@ run_main true false
 [ "$RC" -eq 0 ] && pass "A: quick exits 0" || fail "A: quick rc=$RC"
 [ "$(seq_of)" = "$QUICK_SEQ" ] && pass "A: sequence is exactly '$QUICK_SEQ'" \
   || fail "A: sequence was '$(seq_of)', expected '$QUICK_SEQ'"
-for p in 1 preflight 3b 8 10 11 record; do
+for p in 1 preflight 3b 8 9b 10 record; do
   grep -qx "$p" "$LOG" && fail "B: '$p' was called in quick mode" || pass "B: '$p' not called"
 done
 SKIPPED="1 baseline, pre-flight consumer assertion, 3b writer census windows, 4 capture and double read, 8 zero assertion, 10 subscription liveness"

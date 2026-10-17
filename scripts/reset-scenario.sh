@@ -1384,8 +1384,9 @@ heartbeat_topic_cadence() {
   return 1
 }
 
-declare -A AGG_EMPTY_HW=()     # key "bpod|partition" -> region-fleet-summary hw seen EMPTY in phase 8; where the first post-reset rollup lands (phase 11)
-FIRST_ROLLUP_COUNT="" FIRST_ROLLUP_AT="" FIRST_ROLLUP_VERDICT="not measured" FIRST_ROLLUP_BROKER=""  # phase 11 result, for the reset record
+declare -A AGG_EMPTY_HW=()     # key "bpod|partition" -> region-fleet-summary hw seen EMPTY in phase 8; where the first post-reset rollup lands (phase 9b)
+FIRST_ROLLUP_COUNT="" FIRST_ROLLUP_AT="" FIRST_ROLLUP_VERDICT="not measured" FIRST_ROLLUP_BROKER=""  # phase 9b result, for the reset record
+FIRST_ROLLUP_PREDICTED="" FIRST_ROLLUP_STORE_AFTER="" FIRST_ROLLUP_CLAUSE1=""
 declare -A TRIM_MARK=()       # key "pod|topic|partition" -> offset phase 4 left log_start at
 AGGREGATOR_RESTORED_EPOCH=""  # set once by phase5_aggregator after the last Faust deploy is restored
 
@@ -2920,14 +2921,15 @@ write_exercise_reset_record() {
          "${RELEASE}-exercise-reset-record)"
     return 0
   fi
-  local at declared_json="" n fr_json fr_at
+  local at declared_json="" n fr_json fr_at fr_c1
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
     declared_json="${declared_json:+$declared_json, }\"$n\""
   done
   declared_json="[${declared_json}]"
+  fr_c1=null; [ -n "$FIRST_ROLLUP_CLAUSE1" ] && fr_c1="\"$FIRST_ROLLUP_CLAUSE1\""
   fr_at=null; [ -n "$FIRST_ROLLUP_AT" ] && fr_at="\"$FIRST_ROLLUP_AT\""
-  fr_json="{\"asset_count\": ${FIRST_ROLLUP_COUNT:-null}, \"observed_at\": $fr_at, \"predicted\": 1, \"verdict\": \"${FIRST_ROLLUP_VERDICT:-not measured}\"}"
+  fr_json="{\"asset_count\": ${FIRST_ROLLUP_COUNT:-null}, \"observed_at\": $fr_at, \"predicted\": ${FIRST_ROLLUP_PREDICTED:-null}, \"store_after\": ${FIRST_ROLLUP_STORE_AFTER:-null}, \"clause1\": ${fr_c1}, \"verdict\": \"${FIRST_ROLLUP_VERDICT:-not measured}\"}"
   kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
     --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json}" \
     --dry-run=client -o yaml | kubectl apply -f -
@@ -4016,7 +4018,7 @@ verify_aggregator() {
   # correct reset. This check makes three readings instead: the projection
   # table is empty, the topic is empty (log_start == hw), and the aggregator
   # is alive (its sweep-tick heartbeat advances). The first-arrival rollup
-  # after the restart is measured by phase 11 (verify_first_rollup), not here.
+  # after the restart is measured by phase 9b (verify_first_rollup), not here.
   #
   # The liveness window stays above 2x the 30 s sweep-tick cadence: sampling a
   # 30 s emitter over 10 s is how check-advancing.sh once produced a false
@@ -4077,23 +4079,41 @@ verify_aggregator() {
 }
 
 # ===========================================================================
-# PHASE 11 -- the first regional rollup after producers come back.
+# PHASE 9b -- the first regional rollup after producers come back.
 #
-# JUDGMENT CALL 11 -- observed, never gating. This phase does not use `report`
-# and never sets OVERALL_FAIL, on MET, MISS, timeout or decode failure:
-#   - it observes live refill after producers are restored, and this script
-#     asserts zero at rest only;
-#   - a gate here would make the exercise restart depend on refill timing.
-# The prediction "1" holds when the first sweep after the restart sees exactly
-# one asset. A larger first count means more than one asset arrived inside one
-# 30 s sweep window, NOT residue: phase 8 already proved the topic empty and
-# the aggregator alive with zero emissions before producers returned.
+# The rule (arch ruling 2026-10-17): no rollup while the aggregator has seen
+# no asset, and the first rollup carries exactly the number of assets it has
+# seen by then, with that number read from the store at the same instant.
+# The rule is the count, not a literal 1.
+#
+# POSITION. This phase runs immediately after PHASE9_DONE_AT is recorded and
+# before phase 10, because on the lab assets arrive during phase 10 and a
+# store read after that is not "the same instant". Phase 10 still measures
+# since PHASE9_DONE_AT, so it is unaffected; its start moves later by at most
+# RESET_FIRST_ROLLUP_WAIT (default 300 s). Full mode only.
+#
+# HOW. Every RESET_FIRST_ROLLUP_POLL seconds (default 2) the phase reads each
+# marked broker's summed region-fleet-summary high watermark AND the region-east
+# store count (SELECT count(*) FROM telemetry_latest_state, one row per asset),
+# appending "epoch count" to a history. When a broker first advances it takes
+# one more poll, then decodes the first sweep. T = that sweep's observed_at.
+# PREDICTED = the store count from the last history entry with epoch <= T.
+# The next entry after T is printed as context. There is no first-seen column
+# in the store, so the count can only be read live, while polling.
+#
+# CLOCKS. T is the aggregator pod's clock; the history uses the runner's.
+# Skew of a few seconds moves which entry counts as "<= T".
+#
+# JUDGMENT CALL 11, amended 2026-10-17: observed for one more reset, then
+# scored. This phase does not use `report` and never sets OVERALL_FAIL, on
+# MET, MISS, VIOLATED, timeout or decode failure.
 #
 # Phase 8 recorded each partition's empty hw (AGG_EMPTY_HW). Reading the topic
 # from that offset is immune to the table being overwritten every sweep and to
 # when this phase runs. One sweep = the records sharing the earliest
 # observed_at; values are raw RegionFleetSummary protos (asset_count = field 6,
-# observed_at = field 7, seconds = field 1).
+# observed_at = field 7, seconds = field 1). Each asset sits in exactly one
+# class, so the sum over classes is the number of distinct assets.
 # ===========================================================================
 _first_rollup_decode() {
   python3 -c '
@@ -4144,11 +4164,25 @@ _first_rollup_hw_sum() {
   echo "$sum"
 }
 
+_first_rollup_now() { date -u +%s; }
+
+# _first_rollup_rfc EPOCH -> RFC3339 UTC
+_first_rollup_rfc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"; }
+
+# _first_rollup_store_read POD -> prints a count, or "ERR <why>"
+_first_rollup_store_read() {
+  local pod="$1" v
+  if [ -z "$pod" ]; then echo "ERR no region-east postgres pod"; return 0; fi
+  v="$(pg_query "$pod" "SELECT count(*) FROM telemetry_latest_state" 2>/dev/null || true)"
+  v="${v//[$'\r\n ']/}"
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; else echo "ERR no count returned by $pod"; fi
+}
+
 verify_first_rollup() {
   echo
-  echo "=== PHASE 11: first rollup after producers returned (observed, not gating) ==="
-  local -a brokers=()
-  local key bpod b seen part logstart hw wait remaining start_epoch now_epoch
+  echo "=== PHASE 9b: first rollup after producers returned (observed, not gating) ==="
+  local -a brokers=() hist=()
+  local key bpod b seen part logstart hw wait poll remaining spod now cnt
   for key in "${!AGG_EMPTY_HW[@]}"; do
     bpod="${key%%|*}"; seen=false
     for b in ${brokers[@]+"${brokers[@]}"}; do [ "$b" = "$bpod" ] && seen=true; done
@@ -4160,50 +4194,67 @@ verify_first_rollup() {
   fi
   if $DRY_RUN; then
     echo "   [dry-run] would read region-fleet-summary from the phase 8 marks on: ${brokers[*]}"
+    echo "   [dry-run] and the region-east telemetry_latest_state count every poll"
     return 0
   fi
   wait="${RESET_FIRST_ROLLUP_WAIT:-300}"
-  now_epoch="$(date -u +%s)"
-  start_epoch="$now_epoch"
-  if [ -n "${PHASE9_DONE_AT:-}" ]; then
-    start_epoch="$(date -u -d "$PHASE9_DONE_AT" +%s 2>/dev/null || echo "$now_epoch")"
-  fi
-  remaining=$((start_epoch + wait - now_epoch))
+  poll="${RESET_FIRST_ROLLUP_POLL:-2}"
+  remaining="$wait"
+  spod="$(printf '%s\n' ${POSTGRES_PODS[@]+"${POSTGRES_PODS[@]}"} | grep -E -- '-region-east(-[0-9]+)?$' | head -1 || true)"
 
-  declare -A marksum=() adv=()
-  local any=false
+  declare -A marksum=() adv=() advidx=()
+  local any=false last_err=""
   for bpod in "${brokers[@]}"; do
     marksum["$bpod"]=0
     for key in "${!AGG_EMPTY_HW[@]}"; do
       [ "${key%%|*}" = "$bpod" ] && marksum["$bpod"]=$((${marksum["$bpod"]} + ${AGG_EMPTY_HW["$key"]}))
     done
   done
-  while true; do
+  # one poll: store read (into the history), then every broker's hw
+  _fr_poll() {
+    now="$(_first_rollup_now)"
+    cnt="$(_first_rollup_store_read "$spod")"
+    if [[ "$cnt" == ERR* ]]; then last_err="${cnt#ERR }"; hist+=("$now ERR"); else hist+=("$now $cnt"); fi
     for bpod in "${brokers[@]}"; do
       [ -n "${adv["$bpod"]:-}" ] && continue
       hw="$(_first_rollup_hw_sum "$bpod")"
-      if [ "${hw:-0}" -gt "${marksum["$bpod"]}" ]; then adv["$bpod"]=1; any=true; fi
+      if [ "${hw:-0}" -gt "${marksum["$bpod"]}" ]; then adv["$bpod"]=1; advidx["$bpod"]="${#hist[@]}"; any=true; fi
     done
+  }
+  while true; do
+    _fr_poll
     if $any; then
       # one more poll so every class record of the first sweep is written
-      sleep 5
-      for bpod in "${brokers[@]}"; do
-        [ -n "${adv["$bpod"]:-}" ] && continue
-        hw="$(_first_rollup_hw_sum "$bpod")"
-        [ "${hw:-0}" -gt "${marksum["$bpod"]}" ] && adv["$bpod"]=1
-      done
+      # and the store has a reading after the rollup
+      sleep "$poll"
+      _fr_poll
       break
     fi
     [ "$remaining" -le 0 ] && break
-    sleep 5
-    remaining=$((remaining - 5))
+    sleep "$poll"
+    remaining=$((remaining - poll))
   done
+
+  local h e c max=-1 max_at="" nread=0
   if ! $any; then
-    echo "first rollup: not measured in this run (no rollup by T+${wait}s after producers returned; expected where the feed resumes only with the exercise restart)"
+    for h in "${hist[@]}"; do
+      read -r e c <<<"$h"
+      [ "$c" = ERR ] && continue
+      nread=$((nread + 1))
+      if [ "$c" -gt "$max" ]; then max="$c"; max_at="$e"; fi
+    done
+    if [ "$nread" -eq 0 ]; then
+      echo "first rollup: none in ${wait}s; UNREADABLE (store: ${last_err:-no reading})"
+    elif [ "$max" -eq 0 ]; then
+      echo "first rollup: none in ${wait}s and store=0 throughout: consistent with clause 1 (feed resumes with the exercise restart)"
+    else
+      echo "first rollup: MISS (store reached $max at $(_first_rollup_rfc "$max_at"), no rollup by T+${wait}s)"
+    fi
     return 0
   fi
 
   local k lines out min_secs n_cls sum_cnt at verdict
+  local pred before_n before_e after_n after_e idx all_zero clause1 i ctx
   for bpod in "${brokers[@]}"; do
     if [ -z "${adv["$bpod"]:-}" ]; then
       echo "first rollup $bpod: not measured (no rollup yet)"
@@ -4233,12 +4284,61 @@ verify_first_rollup() {
     min_secs="$(printf '%s\n' "$out" | awk 'NF { if (m == "" || $1 < m) m = $1 } END { print m }')"
     n_cls="$(printf '%s\n' "$out" | awk -v m="$min_secs" '$1 == m { n++ } END { print n + 0 }')"
     sum_cnt="$(printf '%s\n' "$out" | awk -v m="$min_secs" '$1 == m { s += $2 } END { print s + 0 }')"
-    at="$(date -u -d "@$min_secs" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$min_secs")"
-    if [ "$sum_cnt" = 1 ]; then verdict=MET; else verdict=MISS; fi
-    echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt PREDICTED=1 -> $verdict"
+    at="$(_first_rollup_rfc "$min_secs")"
+
+    pred=""; verdict=""; clause1=""; after_n=""
+    if [[ "$bpod" != *region-east* ]]; then
+      echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt (no store to compare)"
+      verdict="no store to compare"
+    else
+      # prediction: last history entry with epoch <= T; context: the next one
+      before_n=""; before_e=""; after_n=""; after_e=""
+      for h in "${hist[@]}"; do
+        read -r e c <<<"$h"
+        if [ "$e" -le "$min_secs" ]; then before_n="$c"; before_e="$e"
+        elif [ -z "$after_e" ]; then after_n="$c"; after_e="$e"; fi
+      done
+      # clause 1: every store read up to the advance was 0 -> violated
+      idx="${advidx["$bpod"]}"; all_zero=true; clause1=HELD
+      for ((i = 0; i < idx; i++)); do
+        read -r e c <<<"${hist[$i]}"
+        [ "$c" = 0 ] || all_zero=false
+      done
+      $all_zero && clause1=VIOLATED
+      if [ "$clause1" = HELD ]; then
+        for ((i = 0; i < idx; i++)); do
+          read -r e c <<<"${hist[$i]}"
+          [ "$c" = ERR ] && clause1=""
+        done
+      fi
+      if [ -z "$before_e" ]; then
+        verdict="not measured"
+        echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt not measured (rollup before the first store read)"
+      elif [ "$before_n" = ERR ]; then
+        verdict="UNREADABLE"
+        echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt UNREADABLE (store: ${last_err:-read failed})"
+      else
+        pred="$before_n"
+        if [ "$sum_cnt" = "$pred" ]; then verdict=MET; else verdict=MISS; fi
+        ctx="store before=${before_n}@$(_first_rollup_rfc "$before_e")"
+        if [ -n "$after_e" ] && [ "$after_n" != ERR ]; then
+          ctx+=" after=${after_n}@$(_first_rollup_rfc "$after_e")"
+        else
+          after_n=""; ctx+=" after=none"
+        fi
+        echo "first rollup $bpod: observed_at=$at classes=$n_cls asset_count=$sum_cnt PREDICTED=$pred -> $verdict"
+        echo "  $ctx"
+      fi
+      case "$clause1" in
+        HELD)     echo "  clause 1: no rollup while store=0: HELD" ;;
+        VIOLATED) echo "  clause 1: VIOLATED (rollup at $at while store=0)" ;;
+        *)        echo "  clause 1: not measured (store unreadable before the rollup)" ;;
+      esac
+    fi
     # the record carries the first measured broker, a region-east one preferred
     if [ -z "$FIRST_ROLLUP_COUNT" ] || { [[ "$bpod" == *region-east* ]] && ! [[ "$FIRST_ROLLUP_BROKER" == *region-east* ]]; }; then
       FIRST_ROLLUP_COUNT="$sum_cnt"; FIRST_ROLLUP_AT="$at"; FIRST_ROLLUP_VERDICT="$verdict"; FIRST_ROLLUP_BROKER="$bpod"
+      FIRST_ROLLUP_PREDICTED="$pred"; FIRST_ROLLUP_STORE_AFTER="$after_n"; FIRST_ROLLUP_CLAUSE1="$clause1"
     fi
   done
   return 0
@@ -4587,7 +4687,7 @@ CURRENT_PHASE=""
 PHASES_DONE=()
 HALT_REASON=""
 HALT_DETAIL=()
-ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "3b writer census" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "10 subscription liveness" "11 first rollup")
+ALL_PHASES=("1 baseline" "pre-flight" "2 quiesce" "3 restate" "3b writer census" "4 topics" "5 aggregator" "6 stores" "7 electric" "8 zero assertion" "9 restore" "9b first rollup" "10 subscription liveness")
 PHASE9_DONE_AT=""
 
 halt_reset() {
@@ -5076,7 +5176,7 @@ run_quick_sequence() {
 }
 
 # run_reset_sequence — the whole mutating run, in order: phase 1, pre-flight,
-# phases 2 through 11, the exercise reset record. Quick mode hands over to
+# phases 2 through 10 (9b included), the exercise reset record. Quick mode hands over to
 # run_quick_sequence (its own, faster steps; no record). Kept as a function
 # (called once, from main) so a test can stub the phases and compare the
 # sequence.
@@ -5135,6 +5235,10 @@ run_reset_sequence() {
          "only — confirming the reset holds under a live refill is" \
          "check-advancing.sh's job, not this script's; run it separately."
   fi
+  # Observed, never gating (JUDGMENT CALL 11, above verify_first_rollup). Runs
+  # right after PHASE9_DONE_AT so the store read is at the same instant as the
+  # first rollup; phase 10 measures since PHASE9_DONE_AT and is unaffected.
+  run_phase "9b first rollup" verify_first_rollup
   # Runs even if phase 8 failed — phase 8 is already `|| true` before phase 9
   # for the same reason (see its header); a failed zero assertion is still not
   # a reason to skip the one check that can see Restate's own dedup silently
@@ -5142,8 +5246,6 @@ run_reset_sequence() {
   # itself (failures map into OVERALL_FAIL instead), so this stays a bare
   # run_phase call like every other phase.
   run_phase "10 subscription liveness" phase10_subscription_liveness
-  # Observed, never gating (JUDGMENT CALL 11, above verify_first_rollup).
-  run_phase "11 first rollup" verify_first_rollup
   RUN_COMPLETED=true
   # A failed/halted reset never writes the record -- a halt never reaches this
   # line (halt_reset exits directly, above), and a completed-but-failing run
