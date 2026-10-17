@@ -505,6 +505,36 @@ if leaked:
 print(f"  ok   [7e]: hub carries releasedRecordsPanes; {len(tiers)} tier-frontend-config(s) do not")
 ' || fail=1
 
+# 7hq: frontend.hq reaches the hub's deployment.json as `hq` when set, is
+# absent when unset, and a half-written value fails the render.
+render --set-json 'frontend.hq={"lat":0.5,"lon":0.5,"label":"HQ Alpha"}' | "$PY" -c '
+import sys, yaml, json
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+hub = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
+if len(hub) != 1:
+    print("  FAIL [7hq]: want one hub frontend-deployment-config, got %d" % len(hub)); sys.exit(1)
+got = json.loads(hub[0]["data"]["deployment.json"]).get("hq")
+if got != {"lat": 0.5, "lon": 0.5, "label": "HQ Alpha"}:
+    print("  FAIL [7hq]: hub deployment.json hq = " + repr(got)); sys.exit(1)
+print("  ok   [7hq]: frontend.hq reaches the hub deployment.json")
+' || fail=1
+render | "$PY" -c '
+import sys, yaml, json
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+hub = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
+if len(hub) != 1:
+    print("  FAIL [7hq-unset]: want one hub frontend-deployment-config, got %d" % len(hub)); sys.exit(1)
+if "hq" in json.loads(hub[0]["data"]["deployment.json"]):
+    print("  FAIL [7hq-unset]: default hub deployment.json carries hq"); sys.exit(1)
+print("  ok   [7hq-unset]: no hq key when frontend.hq is unset")
+' || fail=1
+hq_err=$(helm template t "$CHART" --set-json 'frontend.hq={"lat":0.5}' 2>&1 >/dev/null); hq_status=$?
+if [ "$hq_status" -eq 0 ] || ! printf '%s' "$hq_err" | grep -q 'frontend.hq.lon must be a number'; then
+  echo "  FAIL [7hq-lon]: frontend.hq without lon did not fail the render with the message"; fail=1
+else
+  echo "  ok   [7hq-lon]: frontend.hq without lon fails the render"
+fi
+
 # 7f: the move panel's declared inputs (effectors.declaredLoad, movement) reach
 # the hub's and every tier's deployment.json unchanged, from one helper. The
 # default render carries them empty (7d); here a declared value must arrive

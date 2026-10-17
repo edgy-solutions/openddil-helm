@@ -1120,6 +1120,14 @@ frontend:
   #   fobs:
   #     - {edge_id: edge-01, region_id: region-east, lat: 0.0, lon: 0.0, label: "FOB One"}
   fobs: []
+  # Optional location of HQ on the HQ theater: {lat, lon, label?}. Rendered
+  # into the hub deployment.json as `hq` when set; the key is omitted when
+  # empty. lat and lon are required numbers when it is set (the render fails
+  # otherwise). Absent means HQ is drawn at the centre of the FOBs; the
+  # theater's framing is the same either way. Placeholder shape, synthetic
+  # coordinates:
+  #   hq: {lat: 0.5, lon: 0.5, label: "HQ Alpha"}
+  hq: {}
 
 # --- Per-link heartbeat and HQ link_status ----------------------------------
 # Every buffer monitor (projector-<edge>, tier-projector-<tier>) produces one

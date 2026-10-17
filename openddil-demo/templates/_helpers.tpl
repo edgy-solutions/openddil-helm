@@ -1767,12 +1767,12 @@ maps/list when undeclared. One definition for the hub and every tier.
 
 {{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
-deployment.json: any configured pane or FOB, releasability, any HQ child
+deployment.json: any configured pane, FOB or HQ location, releasability, any HQ child
 link (whose shape places its header row), or any declared move-panel input
 (movement units/standards, effector declared load). Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -1803,6 +1803,18 @@ browser can tell "declared empty" from "an older chart".
 {{- end -}}
 {{- if .Values.frontend.fobs -}}
 {{- $_ := set $d "fobs" .Values.frontend.fobs -}}
+{{- end -}}
+{{- /* Optional HQ location. Declared inputs are checked here, not left for the
+       browser to drop: a half-written hq would silently draw HQ at the FOB
+       centre. */ -}}
+{{- if .Values.frontend.hq -}}
+{{- range $k := list "lat" "lon" -}}
+{{- $v := get $.Values.frontend.hq $k -}}
+{{- if not (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) -}}
+{{- fail (printf "frontend.hq.%s must be a number (got %s): set frontend.hq to {lat: <number>, lon: <number>, label: <optional text>}, or leave frontend.hq empty to draw HQ at the centre of the FOBs" $k (ternary "nothing" (kindOf $v) (eq (kindOf $v) "invalid"))) -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set $d "hq" .Values.frontend.hq -}}
 {{- end -}}
 {{- /* Each direct child's SHAPE (not its name): a child that rolls up sits on
        the hub->HQ segment, a leaf child on a direct edge->HQ line. */ -}}
