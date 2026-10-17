@@ -436,10 +436,14 @@ something the logistics system of record fielded has arrived.
    While the lab's second arrival fixture runs at edge-01, withheld reads
    **2** and the HQ line for edge-01 reads `undeclared 1 · expected 2 (1
    overdue)`. That is the other entity; this beat leaves it alone.
-2. **Edge-03 view — the ARRIVALS panel** lists one row: `dis:1:1:1099`,
-   resolved variant **HMMWV-M1151A1**, no expected serial to match it to.
-   One action: **Declare**. `<dry run: the panel and form by eye at the hub;
-   measured so far through the same API the form calls>`.
+2. **Edge-03 view — the arrivals badge.** Arrivals are not assets, so they
+   are not in the asset column. Under the asset switcher's identity card a
+   badge reads `1 undeclared`. Click it: the switcher's **Arrivals 1** tab
+   lists one row, `dis:1:1:1099`, resolved variant **HMMWV-M1151A1**, with
+   no expected serial to match it to. One action: **Declare**. With nothing
+   undeclared or expected there is no badge and no tab. `<dry run: the badge,
+   tab and form by eye at the hub; measured so far through the same API the
+   form calls>`.
 3. **Optional, the refusal first.** Bram (`operator.borduria`) declaring it
    ATL is refused, **403** "originator_nation is not one this subject may
    declare" (measured 2026-10-15, rev 171). A declarer must be entitled to
@@ -455,7 +459,8 @@ something the logistics system of record fielded has arrived.
    Submit: **201** (measured 2026-10-15, rev 171, without a baseline). The
    declaration reached HQ's store in **1 s**. The first labelled sample came
    at **+11 s**, because the label cache holds for 10 s. The row leaves the
-   panel.
+   tab; with nothing left the badge and tab disappear and the switcher is
+   back on Fleet.
 5. **HQ — the asset is in the fleet.** HQ's labelled count went **20 → 21**,
    unlabelled **1 → 0**. ARRIVALS reads `edge-03  undeclared 0 · expected 0`
    (measured 2026-10-15, rev 172, with the declaration in place). **Read
