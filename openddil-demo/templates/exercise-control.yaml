@@ -122,8 +122,8 @@ block renders while resetJob is off.
 {{- if not (has $rjMode (list "quick" "full")) }}
 {{- fail (printf "exerciseControl.resetJob.mode must be \"quick\" or \"full\", got %q" (toString $rjMode)) }}
 {{- end }}
-{{- if and (eq $rjMode "quick") ($rj.declareUnmeasured | default list) }}
-{{- fail "exerciseControl.resetJob.declareUnmeasured is set, but the quick reset (--quick) refuses --declare-unmeasured; this setting needs exerciseControl.resetJob.mode: full" }}
+{{- if ($rj.declareUnmeasured | default list) }}
+{{- fail "exerciseControl.resetJob.declareUnmeasured is retired (chart 0.1.141): the regional rollup check no longer needs it; remove it from your values." }}
 {{- end }}
 {{- $cmd := list }}
 {{- $env := list }}
@@ -137,9 +137,6 @@ block renders while resetJob is off.
       (dict "name" "RESTART_SUBJECT" "value" "") }}
 {{- else }}
 {{- $cmd = list "bash" "/opt/openddil/scripts/restart-exercise.sh" "--release" $root.Release.Name "--namespace" $root.Release.Namespace }}
-{{- range $rj.declareUnmeasured | default list }}
-{{- $cmd = concat $cmd (list "--declare-unmeasured" (toString .)) }}
-{{- end }}
 {{- $cmd = concat $cmd ($rj.extraArgs | default list) }}
 {{- $env = list
       (dict "name" "OPENDDIL_EXPECT_CONTEXT" "value" (printf "in-cluster:%s" $root.Release.Namespace))

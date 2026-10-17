@@ -1356,7 +1356,7 @@ print("  ok   [14c2]: restart call list renders in order: " + str(paths))
 # render. That the control Deployment and NetworkPolicy are byte-identical to
 # the previous chart is proven by diffing two renders in the acceptance run,
 # not here.
-g14_reset_check() {  # $1 = mode (off|on|full|halt|declare); the rest are helm args
+g14_reset_check() {  # $1 = mode (off|on|full|halt); the rest are helm args
   local mode="$1"; shift
   render --namespace ns9 --set releasability.enabled=true \
          --set exerciseControl.enabled=true \
@@ -1473,12 +1473,6 @@ if mode == "halt":
         bad("RESET_HALT_BEFORE_PHASE is " + str(jenv.get("RESET_HALT_BEFORE_PHASE")))
     else:
         print("  ok   [14f]: haltBeforePhase=2 -> RESET_HALT_BEFORE_PHASE=\"2\"")
-else:
-    cmd = c0["command"]
-    if "--declare-unmeasured" not in cmd or cmd[cmd.index("--declare-unmeasured") + 1] != "a":
-        bad("command lacks --declare-unmeasured a: " + str(cmd))
-    else:
-        print("  ok   [14g]: declareUnmeasured=[a] -> --declare-unmeasured a")
 sys.exit(1 if fail else 0)
 ' || fail=1
 }
@@ -1486,13 +1480,19 @@ g14_reset_check off
 g14_reset_check on --set exerciseControl.resetJob.enabled=true
 g14_reset_check full --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=full
 g14_reset_check halt --set exerciseControl.resetJob.enabled=true --set-string exerciseControl.resetJob.haltBeforePhase=2
-g14_reset_check declare --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=full --set 'exerciseControl.resetJob.declareUnmeasured={a}'
 # 14e3/14e4: refusals at render time, naming the cause.
 G14N_OUT=$(mktemp)
+if helm template t "$CHART" --namespace ns9 --set releasability.enabled=true --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api --set exerciseControl.adapter.operations.pause.method=POST --set exerciseControl.adapter.operations.pause.path=/pause --set exerciseControl.resetJob.enabled=true --set exerciseControl.resetJob.mode=full --set 'exerciseControl.resetJob.declareUnmeasured={a}' >"$G14N_OUT" 2>&1; then
+  echo "  FAIL [14g]: mode=full with declareUnmeasured rendered"; fail=1
+elif grep -q 'declareUnmeasured is retired (chart 0.1.141)' "$G14N_OUT"; then
+  echo "  ok   [14g]: declareUnmeasured is retired: mode=full refuses it with the retirement message"
+else
+  echo "  FAIL [14g]: render failed but the message is not the retirement message"; fail=1
+fi
 if helm template t "$CHART" --namespace ns9 --set releasability.enabled=true --set exerciseControl.enabled=true --set exerciseControl.adapter.endpoint=https://example.invalid/api --set exerciseControl.adapter.operations.pause.method=POST --set exerciseControl.adapter.operations.pause.path=/pause --set exerciseControl.resetJob.enabled=true --set 'exerciseControl.resetJob.declareUnmeasured={a}' >"$G14N_OUT" 2>&1; then
   echo "  FAIL [14e3]: mode=quick with declareUnmeasured rendered"; fail=1
-elif grep -q -- '--declare-unmeasured' "$G14N_OUT" && grep -q 'mode: full' "$G14N_OUT"; then
-  echo "  ok   [14e3]: mode=quick with declareUnmeasured is refused, naming --declare-unmeasured and mode: full"
+elif grep -q 'declareUnmeasured is retired (chart 0.1.141)' "$G14N_OUT"; then
+  echo "  ok   [14e3]: mode=quick with declareUnmeasured is refused with the retirement message"
 else
   echo "  FAIL [14e3]: render failed but the message does not name the cause"; fail=1
 fi

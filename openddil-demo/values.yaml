@@ -2191,9 +2191,8 @@ exerciseControl:
   # By default (mode: quick) the button runs the quick reset: about a minute,
   # NOT MEASURED, no record, and the exercise is left paused; the operator
   # presses Resume or Restart when ready. mode: full runs the measured reset
-  # plus the gated restart (scripts/restart-exercise.sh); it is the only mode
-  # that accepts declareUnmeasured. Automation normally runs
-  # restart-exercise.sh from a shell instead of using this button. The Job runs
+  # plus the gated restart (scripts/restart-exercise.sh). Automation normally
+  # runs restart-exercise.sh from a shell instead of using this button. The Job runs
   # from the reset-runner image in its in-cluster mode: the same cluster guard
   # (the expected context is in-cluster:<release namespace>) and, in full mode,
   # the same halt semantics, with the restart going through control's own gate.
@@ -2207,7 +2206,6 @@ exerciseControl:
     # images. A non-empty `repository` is a full override, kept for
     # compatibility and used verbatim.
     image: {name: reset-runner, repository: "", tag: latest, digest: "", pullPolicy: IfNotPresent}
-    declareUnmeasured: []      # each -> "--declare-unmeasured <name>"; mode: full only
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
     # false (default) keeps a person's act: the asset_declaration and asset_correlation

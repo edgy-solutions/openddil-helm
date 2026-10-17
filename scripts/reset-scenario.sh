@@ -152,16 +152,11 @@ RED_CHECK_QUIESCE=false        # census-derived-quiesce red-check, see run_red_c
 WRITER_CENSUS_WINDOW_S=70       # phase 3b: must be >= 2x the longest timer cadence (30s aggregator heartbeat)
 WRITER_CENSUS_ONLY=false        # read-only writer census + declared/undeclared verdict, see run_writer_census_only
 
-# 2026-10-08: on one cluster every completed reset ends rc 1 for a single known
-# line: the aggregator rollup check reports ACTUAL=UNMEASURED (no fresh
-# region_fleet_summary row inside the window). Its cause is open. Because rc is
-# 1, a reset that measured every other line as zero cannot be told apart from a
-# failing one, and the exercise reset record (written only when OVERALL_FAIL=0)
-# is never written. The operator can declare THAT line unmeasured, by name, for
-# one run. A declared line is never a pass: it is printed as declared, listed in
-# the summary and in the record, and rc then reflects the measured lines only.
-# Accepted names live in this one variable.
-DECLARABLE_UNMEASURED="aggregator-region-fleet-summary"
+# --declare-unmeasured is retired: the regional rollup check now measures table
+# empty, topic empty and aggregator alive, so no line needs declaring. No names
+# are accepted; the machinery below stays so the reset record keeps its shape
+# (declared_unmeasured is always [] now).
+DECLARABLE_UNMEASURED=""
 DECLARED_UNMEASURED=()        # names given on the command line
 DECLARED_UNMEASURED_USED=()   # names whose declaration actually applied this run
 
@@ -292,14 +287,8 @@ FLAGS
                       scaling, no halt. For compose proofs and lab
                       pre-checks.
   --declare-unmeasured NAME
-                      Repeatable. Declare one known-unmeasured line by name
-                      for this run only. A declared line that comes back
-                      unmeasured is printed as DECLARED UNMEASURED (not a
-                      pass), listed in the final summary and in the exercise
-                      reset record, and does not set the failing exit code.
-                      A declaration never excuses a measured wrong value or a
-                      missing pod. Accepted names: aggregator-region-fleet-summary
-                      Any other name exits 2 before any phase runs.
+                      Retired. No names are accepted; any use exits 2 before
+                      any phase runs.
   --help              This text.
 
 Every --skip-* flag prints a loud warning naming the residue it leaves, and
@@ -331,10 +320,14 @@ while [ $# -gt 0 ]; do
     --declare-unmeasured)
       shift
       _dn="${1:-}"
+      if [ "$_dn" = "aggregator-region-fleet-summary" ]; then
+        echo "--declare-unmeasured aggregator-region-fleet-summary is retired: the regional rollup check now measures table empty, topic empty and aggregator alive. Drop the flag." >&2
+        exit 2
+      fi
       _ok=false
       for _a in $DECLARABLE_UNMEASURED; do [ "$_a" = "$_dn" ] && _ok=true; done
       if ! $_ok; then
-        echo "unknown --declare-unmeasured name: '${_dn}'. Accepted names: ${DECLARABLE_UNMEASURED// /, }" >&2
+        echo "unknown --declare-unmeasured name: '${_dn}'. No names are declarable (the flag is retired)." >&2
         exit 2
       fi
       DECLARED_UNMEASURED+=("$_dn")
@@ -4007,50 +4000,25 @@ verify_restate_once() {
   done
 }
 verify_aggregator() {
-  echo "--- aggregator: predicted a FRESH rollup arrives carrying asset_count=0 ---"
+  echo "--- aggregator: predicted table empty, topic empty, aggregator alive ---"
   # ==========================================================================
-  # JUDGMENT CALL 8 — found by the dry-run, and it invalidated the original
-  # check outright rather than merely breaking it.
+  # JUDGMENT CALL 8 — what a correct reset leaves behind for the regional rollup.
   #
-  # The original polled `rpk topic consume region-fleet-summary` and grepped the
-  # value for `"asset_count": N`. That can never match: region-fleet-summary
-  # carries PROTOBUF (openddil/regional/v1/region_fleet_summary.proto), not
-  # JSON. A live record off the lab is 93 bytes of wire format —
+  # The aggregator never sends a rollup over no assets: _emit_rollups in
+  # aggregator_app.py returns without sending when it holds no assets and no
+  # emitted partials (the cold-start return), because a rollup over nothing
+  # would be a made-up zero. The old prediction, "a fresh rollup arrives
+  # carrying asset_count=0", contradicted that code and could not pass on a
+  # correct reset. This check makes three readings instead: the projection
+  # table is empty, the topic is empty (log_start == hw), and the aggregator
+  # is alive (its sweep-tick heartbeat advances). The first-arrival rollup
+  # after the restart is measured elsewhere, not here.
   #
-  #   0a 0b "region-east"   field 1 (region_id)
-  #   10 05                 field 2 (nominal)         = 5
-  #   18 01                 field 3 (degraded)        = 1
-  #   30 06                 field 6 (asset_count)     = 6
-  #   3a 0c ...             field 7 (observed_at)
-  #
-  # — so the grep found nothing, `count` stayed empty, and the poll ran its full
-  # window and then declared UNMEASURED. The check would have reported a FAIL
-  # forever, on a correct reset, for a reason that had nothing to do with the
-  # aggregator. It was unfalsifiable, which is worse than absent.
-  #
-  # Rather than hand-roll a protobuf field walker in bash (wrong tool, and it
-  # would have to skip length-delimited fields correctly to stay right as the
-  # message grows), this reads the value where the REAL consumer has already
-  # decoded it: the projector UPSERTs each record into `region_fleet_summary`,
-  # whose `asset_count` column is that same field 6. That is a strictly stronger
-  # assertion than the topic read — it proves topic -> projector -> table, not
-  # just that bytes exist on a partition.
-  #
-  # FRESHNESS IS THE WHOLE TRICK. Phase 6 DELETEs this table, so "0 rows" alone
-  # proves only that the delete ran, not that the aggregator came back. The
-  # assertion is therefore: a row whose `updated_at` is later than this run's
-  # start exists, AND its asset_count is 0. That distinguishes the three cases
-  # the old check collapsed into one — no rollup arrived (UNMEASURED), a rollup
-  # arrived carrying the pre-reset count (FAIL, the §5 red-check), and a rollup
-  # arrived carrying 0 (PASS).
-  #
-  # THE WINDOW STAYS >2x THE EMIT PERIOD (call 3). The rollup is emitted by a 30s
-  # @app.timer (aggregator_app.py:160), not by input arrival, so 30s is its
-  # shortest possible advance interval by construction. The 90s default spans at
-  # least two emits. Do not lower it below 60s: sampling a 30s emitter over 10s
-  # is exactly how check-advancing.sh produced a false FROZEN.
+  # The liveness window stays above 2x the 30 s sweep-tick cadence: sampling a
+  # 30 s emitter over 10 s is how check-advancing.sh once produced a false
+  # FROZEN. Do not lower AGGREGATOR_POLL_TIMEOUT_SECONDS below 60.
   # ==========================================================================
-  local pod fresh maxcount elapsed=0
+  local pod cnt bpod topic part logstart hw found=false
   pod="$(printf '%s\n' "${POSTGRES_PODS[@]}" | grep -E -- '-region-east(-[0-9]+)?$' | head -1 || true)"
   if [ -z "$pod" ]; then
     # Fall back to the hub, which also carries the projection.
@@ -4059,45 +4027,57 @@ verify_aggregator() {
   if [ -z "$pod" ]; then
     echo "  no region-east or hq postgres pod discovered — cannot read region_fleet_summary"
     OVERALL_FAIL=1
-    return
+  else
+    cnt="$(pg_query "$pod" "SELECT count(*) FROM region_fleet_summary" || true)"
+    report "aggregator region_fleet_summary rows" "0" "${cnt:-UNMEASURED}"
   fi
-  echo "  reading the decoded projection on $pod (rows newer than $RUN_STARTED_AT)"
-  while [ "$elapsed" -lt "$AGGREGATOR_POLL_TIMEOUT_SECONDS" ]; do
-    fresh="$(pg_query "$pod" \
-      "SELECT count(*) FROM region_fleet_summary WHERE updated_at > '${RUN_STARTED_AT}'::timestamptz" || true)"
-    if [ -n "$fresh" ] && [ "$fresh" != "0" ]; then
-      maxcount="$(pg_query "$pod" \
-        "SELECT coalesce(max(asset_count),-1) FROM region_fleet_summary WHERE updated_at > '${RUN_STARTED_AT}'::timestamptz" || true)"
-      echo "  $fresh fresh rollup row(s) landed since the run started"
-      report "aggregator region_fleet_summary asset_count (max over fresh rows)" \
-        "0" "${maxcount:--1}"
-      if _is_declared_unmeasured aggregator-region-fleet-summary; then
-        echo "  note: aggregator-region-fleet-summary was declared unmeasured but was measured; the declaration was not used"
-      fi
-      return
-    fi
-    sleep "$AGGREGATOR_POLL_INTERVAL_SECONDS"
-    elapsed=$((elapsed + AGGREGATOR_POLL_INTERVAL_SECONDS))
+
+  # Reading 2: the topic is empty on every broker that carries it.
+  for bpod in "${REDPANDA_PODS[@]}"; do
+    broker_topics "$bpod" | grep -qx 'region-fleet-summary' || continue
+    while read -r part logstart hw; do
+      [ -z "$part" ] && continue
+      found=true
+      report "aggregator $bpod/region-fleet-summary/p$part (empty: log_start == hw)" "$hw" "$logstart"
+    done < <(topic_partitions "$bpod" "region-fleet-summary")
   done
-  if _is_declared_unmeasured aggregator-region-fleet-summary; then
-    printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> DECLARED UNMEASURED (not a pass)\n' \
-      "aggregator region_fleet_summary asset_count"
-  else
-    printf '  %-55s PREDICTED=0  ACTUAL=UNMEASURED  -> FAIL\n' \
-      "aggregator region_fleet_summary asset_count"
-  fi
-  echo "     no region_fleet_summary row with updated_at > ${RUN_STARTED_AT} appeared within" \
-       "${AGGREGATOR_POLL_TIMEOUT_SECONDS}s."
-  echo "     UNMEASURED, not zero: the prediction is 'a rollup arrives and carries 0', and an"
-  echo "     empty table does not verify it — phase 6 emptied it. Either the aggregator did not"
-  echo "     come back, the projector is not consuming, or the window was shorter than the 30s"
-  echo "     emit period."
-  if _is_declared_unmeasured aggregator-region-fleet-summary; then
-    echo "     declared by --declare-unmeasured aggregator-region-fleet-summary"
-    DECLARED_UNMEASURED_USED+=("aggregator-region-fleet-summary")
-  else
-    OVERALL_FAIL=1
-  fi
+  $found || report "aggregator region-fleet-summary (empty: log_start == hw)" "empty" "UNMEASURED"
+
+  # Reading 3: the sweep-tick heartbeat advances.
+  local hb_found=false first now adv elapsed
+  for bpod in "${REDPANDA_PODS[@]}"; do
+    while read -r topic; do
+      [ -z "$topic" ] && continue
+      case "$topic" in *-aggregator-sweep-tick) ;; *) heartbeat_topic_cadence "$topic" >/dev/null || continue ;; esac
+      hb_found=true
+      first="$(_agg_topic_hw_sum "$bpod" "$topic")"
+      now="$first"; elapsed=0
+      while [ "$elapsed" -lt "$AGGREGATOR_POLL_TIMEOUT_SECONDS" ]; do
+        sleep "$AGGREGATOR_POLL_INTERVAL_SECONDS"
+        elapsed=$((elapsed + AGGREGATOR_POLL_INTERVAL_SECONDS))
+        now="$(_agg_topic_hw_sum "$bpod" "$topic")"
+        [ $((now - first)) -ge 1 ] && break
+      done
+      adv=$((now - first))
+      printf '  %-55s advanced by %s in %ss (informational)\n' "aggregator $bpod/$topic" "$adv" "$elapsed"
+      if [ "$adv" -ge 1 ]; then
+        report "aggregator $bpod/$topic alive (sweep-tick advanced within ${AGGREGATOR_POLL_TIMEOUT_SECONDS}s)" ">=1" ">=1"
+      else
+        report "aggregator $bpod/$topic alive (sweep-tick advanced within ${AGGREGATOR_POLL_TIMEOUT_SECONDS}s)" ">=1" "$adv"
+      fi
+    done < <(broker_topics "$bpod")
+  done
+  $hb_found || report "aggregator sweep-tick alive" ">=1" "UNMEASURED"
+}
+
+# _agg_topic_hw_sum POD TOPIC -- high watermarks summed over all partitions.
+_agg_topic_hw_sum() {
+  local part logstart hw sum=0
+  while read -r part logstart hw; do
+    [ -z "$part" ] && continue
+    sum=$((sum + hw))
+  done < <(topic_partitions "$1" "$2")
+  echo "$sum"
 }
 
 verify_electric() {

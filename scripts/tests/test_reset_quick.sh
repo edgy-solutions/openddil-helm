@@ -130,7 +130,15 @@ refuse --quick --writer-census-only
 refuse --quick --red-check-topic-config
 refuse --quick --red-check-quiesce
 refuse --quick --red-check-electric
-refuse --quick --declare-unmeasured aggregator-region-fleet-summary
+# --declare-unmeasured is retired: the parser refuses it (rc 2) before the --quick check.
+: > "$T/kubectl.log"
+( export PATH="$T/bin:$PATH"; set -- --quick --declare-unmeasured aggregator-region-fleet-summary; . "$SCRIPT" ) > "$T/rout" 2> "$T/rerr"
+RC=$?
+if [ "$RC" -eq 2 ] && grep -q "is retired" "$T/rerr" && [ ! -s "$T/kubectl.log" ]    && ! grep -q "PHASE\|reset-scenario: namespace" "$T/rout"; then
+  pass "D: '--quick --declare-unmeasured ...' -> exit 2, retired, nothing run"
+else
+  fail "D: '--quick --declare-unmeasured ...' -> rc=$RC (expected 2, retired message)"; head -3 "$T/rerr"
+fi
 refuse --verify-only --quick
 
 # --- F: restart-exercise.sh refuses --quick -------------------------------------------------

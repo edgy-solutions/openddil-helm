@@ -54,11 +54,10 @@ kubectl -n openddil get cm openddil-exercise-reset-record -o jsonpath='{.data.re
 ```
 Fallback, from a laptop with the lab kubeconfig (same guards, same output):
 ```
-bash scripts/restart-exercise.sh --release openddil --namespace openddil \
-  --declare-unmeasured aggregator-region-fleet-summary
+bash scripts/restart-exercise.sh --release openddil --namespace openddil
 ```
-The one declared exception (on the Job too) is the region fleet summary aggregator; the output prints it as
-`DECLARED UNMEASURED`, never as a pass. Any other declaration needs a reason before the recording.
+No line is declared unmeasured any more: `--declare-unmeasured` is retired (chart 0.1.141). The regional rollup
+check reads three things (table empty, topic empty, aggregator alive) and the record's `declared_unmeasured` is `[]`.
 Pass (3): the Job completes (or the fallback exits 0); no `RESET HALTED` in the log; the record reads
 `"verdict": "PASS"` with `measured_zero_at` after the press. Pass (4): the last log line is
 `RESTART SENT (adapter 200)`. `RESTART NOT SENT`, `RESTART REFUSED` or `RESTART NOT ACCEPTED` means the exercise did
