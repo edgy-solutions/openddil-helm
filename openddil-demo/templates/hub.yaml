@@ -250,8 +250,9 @@ spec:
             # mechanism covered one of N" is the other defect of this batch
             # and applying its lesson selectively would be the same mistake
             # with a shorter fuse.
+            {{- /* Half the limit unless restate.rocksdbTotalMemory sets it explicitly. */}}
             - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
-              value: {{ include "openddil.halfMemoryBytes" .Values.restate.resources.limits.memory | quote }}
+              value: {{ include "openddil.rocksdbBudgetBytes" (dict "value" .Values.restate.rocksdbTotalMemory "limit" .Values.restate.resources.limits.memory "where" "root restate-server") | quote }}
           ports:
             - name: ingress
               containerPort: {{ .Values.restate.ingressPort }}

@@ -547,8 +547,9 @@ spec:
             # leaving the default in place and this comment describing a fix
             # that is not applied. (That failure mode has its own entry in
             # PRINCIPLES.md; it is not a hypothetical here.)
+            {{- /* Half the limit unless restate.rocksdbTotalMemory sets it explicitly. */}}
             - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
-              value: {{ include "openddil.halfMemoryBytes" $tn.restate.resources.limits.memory | quote }}
+              value: {{ include "openddil.rocksdbBudgetBytes" (dict "value" $root.Values.restate.rocksdbTotalMemory "limit" $tn.restate.resources.limits.memory "where" "tier restate") | quote }}
           ports:
             - containerPort: 8080
             - containerPort: 9070

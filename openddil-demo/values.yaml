@@ -337,6 +337,17 @@ restate:
   # server default.
   journalRetention: "1h"
 
+  # Total RocksDB memory per Restate server (block cache plus memtables).
+  # "" = half of that server's container memory limit (the 2026-09-17 fix).
+  # Set explicitly, it applies to EVERY server, root and tiers, and the
+  # render FAILS if it exceeds half of any server's limit.
+  # Why an explicit cap exists: the block cache is an LRU that fills to its
+  # cap whatever the live data size. Live SST is 15-100 Mi per server, so a
+  # smaller explicit cap reaches its plateau in hours instead of climbing
+  # toward half the limit; see the 2026-10-17 soak note in the tier sizing
+  # record (tierNode.restate).
+  rocksdbTotalMemory: ""
+
   # ephemeralOnUpgrade — when true, a Helm pre-install/pre-upgrade hook
   # (hook-restate-wipe.yaml) scales EVERY restate-server to 0 and deletes
   # its PVC before applying chart changes — the root's and all three
@@ -1676,6 +1687,14 @@ tierNode:
     # the one that kills the process.
     #
     # Nodes have headroom for it: 18-47% of ~8Gi at the time of the change.
+    #
+    # 2026-10-17 SOAK NOTE. A 24 h soak on rev 182 showed RSS climbing
+    # +15..+34 Mi/h on every server. The RocksDB block cache accounted for all
+    # of it except ~+3 Mi/h on hq and region-east. The cache is an LRU that
+    # fills toward the budget whatever the live data size (15-100 Mi of SST).
+    # The "no trend" line in the record above came from a 90-minute window,
+    # which cannot see that ramp; it was wrong to read it as a plateau.
+    # restate.rocksdbTotalMemory exists so the cap is chosen, not inherited.
     resources:
       requests: { cpu: 150m, memory: 512Mi }
       limits:   { cpu: 500m, memory: 2Gi }

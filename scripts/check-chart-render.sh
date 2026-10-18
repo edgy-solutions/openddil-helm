@@ -2792,6 +2792,57 @@ g15_fail_check() {
 g15_fail_check "entityKinds.track overlapping asset" "must not intersect" --set-string redpandaConnect.entityKinds.track=1
 g15_fail_check "entityKinds token out of range" "not an integer 0-255" --set-string redpandaConnect.entityKinds.track=256
 
+# 16: restate.rocksdbTotalMemory (tierNode.enabled, or no tier server renders). Empty = half of each server's own limit;
+# explicit = that value on EVERY server, and the render fails if it exceeds
+# half of any server's limit (tier checked against its own limit).
+echo "[16] restate rocksdb budget value"
+g16_check() {
+  local desc="$1" want="$2"; shift 2
+  helm template t "$CHART" --set tierNode.enabled=true "$@" 2>/dev/null | "$PY" -c '
+import sys, yaml
+want = sys.argv[1]
+n = 0
+for d in yaml.safe_load_all(sys.stdin):
+    if not d or d.get("kind") not in ("Deployment", "StatefulSet"):
+        continue
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        for e in c.get("env", []):
+            if e["name"] != "RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE":
+                continue
+            n += 1
+            lim = c["resources"]["limits"]["memory"]
+            b = int(lim[:-2]) * (1 << 30 if lim.endswith("Gi") else 1 << 20)
+            w = str(b // 2) if want == "half" else want
+            if e["value"] != w:
+                print("  FAIL [16]: " + d["metadata"]["name"] + " has " + e["value"] + ", want " + w + " (limit " + lim + ")")
+                sys.exit(1)
+if n < 2:
+    print("  FAIL [16]: saw " + str(n) + " restate container(s), want at least 2 (root and a tier)"); sys.exit(1)
+print("  ok   [16]: " + str(n) + " restate container(s) carry " + want)
+' "$want" || { echo "  FAIL [16]: $desc"; fail=1; }
+}
+g16_check "default is half of each limit" half
+g16_check "explicit 512Mi on every server" 536870912 --set-string restate.rocksdbTotalMemory=512Mi
+if helm template t "$CHART" --set tierNode.enabled=true --set-string restate.rocksdbTotalMemory=1Gi >/dev/null 2>&1; then
+  echo "  ok   [16]: rocksdbTotalMemory equal to half the limit renders"
+else
+  echo "  FAIL [16]: rocksdbTotalMemory=1Gi (equal to half of 2Gi) did not render"; fail=1
+fi
+g16_fail_check() {
+  local desc="$1" needle="$2"; shift 2
+  local err
+  if err=$(helm template t "$CHART" --set tierNode.enabled=true "$@" 2>&1 >/dev/null); then
+    echo "  FAIL [16]: $desc did not fail the render"; fail=1
+  elif ! printf '%s' "$err" | grep -q "$needle"; then
+    echo "  FAIL [16]: $desc failed, but did not name the reason (expected: $needle)"; fail=1
+  else
+    echo "  ok   [16]: $desc fails the render, naming the reason"
+  fi
+}
+g16_fail_check "rocksdbTotalMemory over half the limit" "exceeds half" --set-string restate.rocksdbTotalMemory=1536Mi
+g16_fail_check "rocksdbTotalMemory over half of the TIER limit" "exceeds half" --set-string restate.rocksdbTotalMemory=1Gi --set-string tierNode.restate.resources.limits.memory=1Gi
+g16_fail_check "rocksdbTotalMemory unparseable" "cannot parse" --set-string restate.rocksdbTotalMemory=lots
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
