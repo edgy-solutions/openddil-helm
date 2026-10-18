@@ -2882,7 +2882,8 @@ fi
 if helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test 2>/dev/null \
    | "$PY" -c '
 import sys, yaml
-ok = any(d and d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") for d in yaml.safe_load_all(sys.stdin))
+docs = list(yaml.safe_load_all(sys.stdin))  # read it all: an early exit SIGPIPEs helm, and pipefail fails the case
+ok = any(d and d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") for d in docs)
 sys.exit(0 if ok else 1)'; then
   echo "  ok   [17]: cortex alone (no panes, releasability off) still renders the hub deployment.json ConfigMap"
 else
