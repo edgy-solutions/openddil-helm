@@ -148,6 +148,28 @@ else
   fail "D: dry run -- apply ran or no line ($out / $(cat "$APPLY_LOG"))"
 fi
 
+# --- case E: the record carries the bulk cancel's counts ([] when none ran)
+DEPLOY_PRESENT=true
+OVERALL_FAIL=0
+RESTATE_BULK_CANCEL_JSON=()
+: > "$APPLY_LOG"
+write_exercise_reset_record >/dev/null 2>&1
+if grep -q '"restate_bulk_cancel": \[\]' "$APPLY_LOG"; then
+  pass "E1: no bulk cancel -- restate_bulk_cancel is []"
+else
+  fail "E1: no bulk cancel -- expected restate_bulk_cancel [] ($(cat "$APPLY_LOG"))"
+fi
+RESTATE_BULK_CANCEL_JSON=('{"pod": "rs-a-0", "confirmed_open": 10000, "open_before": 10000, "open_after": 200, "rounds": 21, "kill_rounds": 0, "seconds": 68}'
+                          '{"pod": "rs-b-0", "confirmed_open": 400, "open_before": 400, "open_after": 120, "rounds": 1, "kill_rounds": 1, "seconds": 3}')
+: > "$APPLY_LOG"
+write_exercise_reset_record >/dev/null 2>&1
+if grep -q '"restate_bulk_cancel": \[{"pod": "rs-a-0", "confirmed_open": 10000,.*}, {"pod": "rs-b-0", "confirmed_open": 400,.*"kill_rounds": 1, "seconds": 3}\]}' "$APPLY_LOG"; then
+  pass "E2: two drained pods -- both objects in the record, in order"
+else
+  fail "E2: two drained pods -- record lacks them ($(cat "$APPLY_LOG"))"
+fi
+RESTATE_BULK_CANCEL_JSON=()
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "test_reset_exercise_record: ALL PASS"

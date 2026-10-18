@@ -131,6 +131,8 @@ DRY_RUN=false
 BASELINE_ONLY=false
 VERIFY_ONLY=false
 SKIP_RESTATE=false
+CONFIRM_CANCEL_OPEN=false
+[ "${RESET_CONFIRM_CANCEL_OPEN:-}" = 1 ] && CONFIRM_CANCEL_OPEN=true
 SKIP_TOPICS=false
 SKIP_AGGREGATOR=false
 SKIP_STORES=false
@@ -197,6 +199,14 @@ USAGE
              when set to a phase number (2, 3, 3b, 4 ... 10), the run halts
              at the start of that phase with exit 2, exactly like any
              refusal. No effect when unset.
+    RESET_CONFIRM_CANCEL_OPEN  "1" is the same as --confirm-cancel-open.
+    RESTATE_MAX_OPEN  open invocations a Restate pod may carry before the
+             bulk drain (below) runs ahead of the per-id cancel loop
+             (default 300).
+    RESTATE_BULK_BATCH  invocations per `restate invocations cancel --limit`
+             call in the bulk drain (default 500).
+    RESTATE_BULK_CANCEL_MAX_S  wall-clock cap, per pod, on one bulk drain
+             (default 1800). Exceeding it halts the reset.
     RESET_CLEAR_DECLARATIONS  whether the reset also clears exercise
              declarations (a person's act, ADR-0050). Unset, "" or "0" (the
              default) KEEPS them: the asset_declaration and asset_correlation
@@ -237,6 +247,16 @@ FLAGS
                       --census-only, --writer-census-only, any --red-check-*,
                       or --declare-unmeasured.
   --skip-restate      Do not cancel invocations or clear Restate state.
+  --confirm-cancel-open
+                      Confirm a bounded bulk cancel of open Restate
+                      invocations. A pod holding more than RESTATE_MAX_OPEN
+                      open invocations is drained by service (cancel
+                      --limit, escalating to --kill when rounds make no
+                      progress) instead of refusing. Without this flag (or
+                      RESET_CONFIRM_CANCEL_OPEN=1) the pre-flight prints the
+                      per-handler table and asks "type yes" on a tty, or
+                      halts before anything is mutated when there is none.
+                      Chart: exerciseControl.resetJob.extraArgs=[--confirm-cancel-open]
   --skip-topics       Do not trim any topic partition.
   --skip-aggregator   Do not restart the Faust deployments. THIS IS THE
                       DOCUMENTED RED-CHECK (PREDICTION doc §5): skipping it
@@ -305,6 +325,7 @@ while [ $# -gt 0 ]; do
     --verify-only) VERIFY_ONLY=true ;;
     --quick) QUICK=true ;;
     --skip-restate) SKIP_RESTATE=true ;;
+    --confirm-cancel-open) CONFIRM_CANCEL_OPEN=true ;;
     --skip-topics) SKIP_TOPICS=true ;;
     --skip-aggregator) SKIP_AGGREGATOR=true ;;
     --skip-stores) SKIP_STORES=true ;;
@@ -1995,21 +2016,191 @@ restate_unreadable() {
     "Check: kubectl -n $NS logs $pod -c restate --tail=50"
 }
 
+# ---------------------------------------------------------------------------
+# Bulk cancel of a large open-invocation backlog.
+#
+# Above RESTATE_MAX_OPEN the reset does not refuse: it cancels in bulk, after
+# the operator confirmed (restate_open_preflight, before anything is mutated).
+# `restate invocations cancel <QUERY> --limit N` takes a service name as the
+# query, so one exec cancels up to N invocations instead of one.
+# ---------------------------------------------------------------------------
+declare -A RESTATE_CONFIRMED_OPEN=()   # pod -> open count confirmed at pre-flight (N_pod)
+RESTATE_BULK_CANCEL_JSON=()            # one record object per drained pod (restate_bulk_drain)
+
+RESTATE_BY_HANDLER_SQL="select target_service_name, target_handler_name, status, count(*) as n from sys_invocation where status <> 'completed' group by 1,2,3 order by 4 desc limit 10"
+
+# restate_by_handler_table POD -> the top open (service, handler, status) rows.
+restate_by_handler_table() {
+  local pod="$1" raw i
+  local -a sv=() hd=() st=() nn=()
+  raw="$(restate_json "$pod" "$RESTATE_BY_HANDLER_SQL" 2>/dev/null || true)"
+  mapfile -t sv < <(json_field "$raw" "target_service_name")
+  mapfile -t hd < <(json_field "$raw" "target_handler_name")
+  mapfile -t st < <(json_field "$raw" "status")
+  mapfile -t nn < <(json_field "$raw" "n")
+  if [ "${#sv[@]}" -eq 0 ]; then echo "      (by-handler table unreadable or empty)"; return 0; fi
+  printf '      %-36s %-26s %-12s %s\n' service handler status open
+  for i in "${!sv[@]}"; do
+    printf '      %-36s %-26s %-12s %s\n' "${sv[$i]}" "${hd[$i]:-}" "${st[$i]:-}" "${nn[$i]:-}"
+  done
+}
+
+# Seams for the tty confirmation (a test stubs them).
+restate_have_tty() { [ -t 0 ]; }
+restate_read_tty() { local a=""; read -r a < /dev/tty || true; printf '%s' "$a"; }
+
+# restate_open_preflight -- runs before ANY phase mutates anything (full run:
+# inside the pre-flight; quick run: before the quiesce). Counts open
+# invocations on every Restate pod the reset will clear; for pods over
+# RESTATE_MAX_OPEN, prints the by-handler table and requires confirmation
+# (--confirm-cancel-open, else a tty "yes", else a halt). Records
+# RESTATE_CONFIRMED_OPEN[pod]. Under --dry-run it only prints the plan.
+restate_open_preflight() {
+  $SKIP_RESTATE && return 0
+  local pod n bound=0 pods_txt="" summary="" ans
+  local -a over=()
+  local max="${RESTATE_MAX_OPEN:-300}"
+  for pod in "${RESTATE_PODS[@]}"; do
+    n="$(restate_count "$pod" "select count(*) as n from sys_invocation where status <> 'completed'")" \
+      || restate_unreadable "$pod" "counting open invocations (pre-flight)"
+    [[ "$n" =~ ^[0-9]+$ ]] || restate_unreadable "$pod" "counting open invocations (pre-flight)"
+    if [ "$n" -gt "$max" ]; then over+=("$pod=$n"); fi
+  done
+  [ "${#over[@]}" -gt 0 ] || return 0
+  echo
+  echo "restate pre-flight: open invocations above RESTATE_MAX_OPEN ($max) on ${#over[@]} pod(s):"
+  for pod in "${over[@]}"; do
+    echo "   ${pod%%=*}: ${pod#*=} open"
+    restate_by_handler_table "${pod%%=*}"
+    bound=$((bound + ${pod#*=}))
+    pods_txt="${pods_txt:+$pods_txt, }${pod%%=*}"
+    summary="${summary:+$summary, }${pod%%=*} has ${pod#*=} open"
+  done
+  if $DRY_RUN; then
+    echo "   [dry-run] would bulk-cancel up to $bound open invocations across $pods_txt,"
+    echo "   [dry-run] by service, ${RESTATE_BULK_BATCH:-500} per call (cancel --limit), --kill after two rounds without progress."
+    if $CONFIRM_CANCEL_OPEN; then
+      echo "   [dry-run] confirmation given (--confirm-cancel-open). Nothing cancelled."
+    else
+      echo "   [dry-run] confirmation NOT given: a real run would prompt on a tty, or halt. Nothing cancelled."
+    fi
+    return 0
+  fi
+  if $CONFIRM_CANCEL_OPEN; then
+    echo "   --confirm-cancel-open given: bulk cancel of up to $bound open invocations across $pods_txt"
+  elif restate_have_tty; then
+    printf 'Cancel up to %s open invocations across %s? type yes: ' "$bound" "$pods_txt" >&2
+    ans="$(restate_read_tty)"
+    if [ "$ans" != "yes" ]; then
+      halt_reset "bulk cancel of open Restate invocations not confirmed" \
+        "$summary (limit $max)" \
+        "nothing mutated: no workload scaled, no topic or store touched"
+    fi
+  else
+    halt_reset "Restate has open invocations above the limit and no confirmation to cancel them" \
+      "$summary (limit $max)" \
+      "nothing mutated: no workload scaled, no topic or store touched" \
+      "Confirm with --confirm-cancel-open (or RESET_CONFIRM_CANCEL_OPEN=1; chart: exerciseControl.resetJob.extraArgs=[--confirm-cancel-open]) to cancel up to $bound open invocations in bulk"
+  fi
+  for pod in "${over[@]}"; do
+    RESTATE_CONFIRMED_OPEN["${pod%%=*}"]="${pod#*=}"
+  done
+}
+
+# restate_bulk_drain POD OPEN_N -- drains while open > RESTATE_MAX_OPEN.
+# Bounds: rounds <= ceil(N_pod/batch)+10, wall clock RESTATE_BULK_CANCEL_MAX_S,
+# growth past 2*N_pod+1000 halts. Two rounds without a decrease trigger one
+# --kill round; if that does not decrease either, halt.
+restate_bulk_drain() {
+  local pod="$1" cur="$2" n_pod batch max_s max max_rounds grow_limit start
+  local round=0 stall=0 kills=0 kill_round before after svc out
+  local -a svcs=()
+  max="${RESTATE_MAX_OPEN:-300}"
+  batch="${RESTATE_BULK_BATCH:-500}"
+  max_s="${RESTATE_BULK_CANCEL_MAX_S:-1800}"
+  n_pod="${RESTATE_CONFIRMED_OPEN[$pod]:-}"
+  if [ -z "$n_pod" ]; then
+    halt_reset "Restate on $pod has $cur open invocations (limit $max) and no confirmation to cancel them" \
+      "Pod $pod grew past the limit after the pre-flight, or the pre-flight did not run." \
+      "Confirm with --confirm-cancel-open (or RESET_CONFIRM_CANCEL_OPEN=1; chart: exerciseControl.resetJob.extraArgs=[--confirm-cancel-open])"
+  fi
+  max_rounds=$(( (n_pod + batch - 1) / batch + 10 ))
+  grow_limit=$((2 * n_pod + 1000))
+  start=$SECONDS
+  while [ "$cur" -gt "$max" ]; do
+    round=$((round + 1))
+    if [ "$round" -gt "$max_rounds" ]; then
+      halt_reset "Restate bulk cancel on $pod did not drain within $max_rounds rounds" \
+        "Pod $pod still has $cur open invocations (confirmed $n_pod, limit $max)." \
+        "$(restate_by_handler_table "$pod")"
+    fi
+    if [ $((SECONDS - start)) -gt "$max_s" ]; then
+      halt_reset "Restate bulk cancel on $pod exceeded RESTATE_BULK_CANCEL_MAX_S=${max_s}s" \
+        "Pod $pod still has $cur open invocations (confirmed $n_pod, limit $max)." \
+        "$(restate_by_handler_table "$pod")"
+    fi
+    kill_round=false
+    [ "$stall" -ge 2 ] && { kill_round=true; kills=$((kills + 1)); }
+    before="$cur"
+    mapfile -t svcs < <(json_field "$(restate_json "$pod" "select target_service_name, count(*) as n from sys_invocation where status <> 'completed' group by 1")" "target_service_name")
+    for svc in "${svcs[@]}"; do
+      [ -n "$svc" ] || continue
+      # "No invocations found" (completed meanwhile) and any other failure are
+      # tolerated: the re-count below decides, not the exit status.
+      if $kill_round; then
+        echo "-> bulk cancel --kill $svc on $pod (--limit $batch)"
+        out="$(kubectl exec -n "$NS" "$pod" -c restate -- \
+          timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$svc" --kill --limit "$batch" 2>&1)" || true
+      else
+        echo "-> bulk cancel $svc on $pod (--limit $batch)"
+        out="$(kubectl exec -n "$NS" "$pod" -c restate -- \
+          timeout "${RESTATE_CMD_TIMEOUT:-60}" restate -y invocations cancel "$svc" --limit "$batch" 2>&1)" || true
+      fi
+      # The CLI lists every id it cancels (up to $batch lines a call); keep
+      # only its summary or error lines so a 75k drain stays readable.
+      printf '%s\n' "$out" | grep -E '^\[|[Nn]o invocations|[Ee]rror|[Tt]imed out' | sed 's/^/   /' || true
+    done
+    after="$(restate_count "$pod" "select count(*) as n from sys_invocation where status <> 'completed'")" \
+      || restate_unreadable "$pod" "re-counting open invocations"
+    [[ "$after" =~ ^[0-9]+$ ]] || restate_unreadable "$pod" "re-counting open invocations"
+    echo "   bulk cancel round $round on $pod: open $before -> $after"
+    cur="$after"
+    if [ "$cur" -gt "$grow_limit" ]; then
+      halt_reset "Restate on $pod is gaining open invocations faster than the bulk cancel drains them" \
+        "Pod $pod has $cur open invocations (confirmed $n_pod; growth bound $grow_limit)." \
+        "Something is producing them:" \
+        "$(restate_by_handler_table "$pod")"
+    fi
+    if [ "$cur" -lt "$before" ]; then
+      stall=0
+    else
+      if $kill_round; then
+        halt_reset "Restate bulk cancel on $pod made no progress, even with --kill" \
+          "Pod $pod: open $before -> $cur after a --kill round (confirmed $n_pod, limit $max)." \
+          "$(restate_by_handler_table "$pod")"
+      fi
+      stall=$((stall + 1))
+    fi
+  done
+  # One JSON object per drained pod, for the exercise reset record.
+  RESTATE_BULK_CANCEL_JSON+=("{\"pod\": \"$pod\", \"confirmed_open\": $n_pod, \"open_before\": $2, \"open_after\": $cur, \"rounds\": $round, \"kill_rounds\": $kills, \"seconds\": $((SECONDS - start))}")
+}
+
 restate_clear_pass() {
   local pod="$1" pass="$2" raw ids id svc_raw services svc key diag diag_sql
   local open_n out rc
-  # 0. Backlog guard. Cancelling one id per kubectl exec cannot keep up with a
-  #    Restate that is still working through thousands of open invocations
-  #    (each id can complete between the list and the cancel), so refuse
-  #    before listing anything.
+  # 0. Backlog drain. The per-id loop below costs one kubectl exec per id, so
+  #    it cannot keep up with thousands of open invocations. Above
+  #    RESTATE_MAX_OPEN the pod is first drained in bulk by service
+  #    (restate_bulk_drain: bounded, and only with the operator's
+  #    confirmation recorded by restate_open_preflight before anything was
+  #    mutated). At or below the limit, the per-id loop and the state clear
+  #    run unchanged.
   open_n="$(restate_count "$pod" "select count(*) as n from sys_invocation where status <> 'completed'")" \
     || restate_unreadable "$pod" "counting open invocations"
   [[ "$open_n" =~ ^[0-9]+$ ]] || restate_unreadable "$pod" "counting open invocations"
   if [ "$open_n" -gt "${RESTATE_MAX_OPEN:-300}" ]; then
-    halt_reset "Restate on $pod has $open_n open invocations (limit ${RESTATE_MAX_OPEN:-300})" \
-      "Pod $pod has $open_n open invocations; the limit is ${RESTATE_MAX_OPEN:-300}." \
-      "Restate is still working through a backlog, so one-at-a-time cancels cannot keep up." \
-      "Remedy: re-run with --skip-restate (chart: exerciseControl.resetJob.extraArgs=[--skip-restate]) so topics and stores clear first, then wipe Restate with a helm upgrade that sets restate.ephemeralOnUpgrade=true"
+    restate_bulk_drain "$pod" "$open_n"
   fi
   # 1. Open invocations (the scheduled timers, plus any running or backing
   #    off that would re-arm). An id seen open here for the first time in
@@ -2921,8 +3112,12 @@ write_exercise_reset_record() {
          "${RELEASE}-exercise-reset-record)"
     return 0
   fi
-  local at declared_json="" n fr_json fr_at fr_c1
+  local at declared_json="" n fr_json fr_at fr_c1 bulk_json="" b
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for b in ${RESTATE_BULK_CANCEL_JSON[@]+"${RESTATE_BULK_CANCEL_JSON[@]}"}; do
+    bulk_json="${bulk_json:+$bulk_json, }$b"
+  done
+  bulk_json="[${bulk_json}]"
   for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
     declared_json="${declared_json:+$declared_json, }\"$n\""
   done
@@ -2931,7 +3126,7 @@ write_exercise_reset_record() {
   fr_at=null; [ -n "$FIRST_ROLLUP_AT" ] && fr_at="\"$FIRST_ROLLUP_AT\""
   fr_json="{\"asset_count\": ${FIRST_ROLLUP_COUNT:-null}, \"observed_at\": $fr_at, \"predicted\": ${FIRST_ROLLUP_PREDICTED:-null}, \"store_after\": ${FIRST_ROLLUP_STORE_AFTER:-null}, \"clause1\": ${fr_c1}, \"verdict\": \"${FIRST_ROLLUP_VERDICT:-not measured}\"}"
   kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
-    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json}" \
+    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json, \"restate_bulk_cancel\": $bulk_json}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
@@ -5158,6 +5353,10 @@ quick_stores() {
 run_quick_sequence() {
   QUICK_T0=$SECONDS
   quick_banner
+  # Quick clears Restate too: confirm (or halt) before any quiesce.
+  CURRENT_PHASE="pre-flight"
+  restate_open_preflight
+  CURRENT_PHASE=""
   quick_step "2 quiesce"    quiesce    quick_quiesce_all
   quick_step "3 restate"    restate    quick_restate
   quick_step "4 topics"     topics     quick_topics
@@ -5206,6 +5405,9 @@ run_reset_sequence() {
     halt_reset "pre-flight: an undeclared live consumer on a target topic" \
       "nothing mutated: no workload scaled, no topic touched"
   fi
+  # Open Restate invocations above RESTATE_MAX_OPEN need the operator's
+  # confirmation to bulk-cancel; ask (or halt) now, before phase 2 mutates.
+  restate_open_preflight
   PHASES_DONE+=("pre-flight")
 
   run_phase "2 quiesce" phase2_quiesce

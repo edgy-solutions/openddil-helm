@@ -236,7 +236,7 @@ run_quick_fixture() {
       SCALES_ARMED=true
       QSTATE_QUIESCED+=("Deployment/victim"); QSTATE_REPLICAS["Deployment/victim"]=2
     }
-    quick_restate() { :; }; quick_stores() { :; }; phase5_aggregator() { :; }
+    restate_open_preflight() { :; }; quick_restate() { :; }; quick_stores() { :; }; phase5_aggregator() { :; }
     phase7_electric() { :; }; phase9_restore_producers() { SCALES_RESTORED=true; }
     run_reset_sequence
   ) > "$T/qout" 2> "$T/qerr"
@@ -325,6 +325,7 @@ grep -q 'DO \$q\$' "$T/dry.out" && grep -q 'DELETE FROM asset_registry' "$T/dry.
 # --- 7 + 1. sequence and banners with stubbed quick steps -------------------------------------
 REAL_DEFS="$(declare -f quick_quiesce_all quick_restate quick_topics quick_stores phase5_aggregator phase7_electric phase9_restore_producers)"
 quick_quiesce_all()    { echo "Q2" >> "$CALLS"; }
+restate_open_preflight() { :; }
 quick_restate()        { echo "Q3" >> "$CALLS"; }
 quick_topics()         { echo "Q4" >> "$CALLS"; }
 phase5_aggregator()    { echo "Q5" >> "$CALLS"; }
