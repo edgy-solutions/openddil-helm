@@ -373,11 +373,12 @@ Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`),
 in a stand-in. Steps 1–3 are unchanged and measured; steps 4–7 are new and
 unmeasured until the dry run.
 
-Needs, before the camera: `frontend.cortex.baseUrl` set on the lab
-(chart ≥ 0.1.146), and the intake's per-case entry pointed at cortex's
-`GET /cases/{case_id}/action` under the delegate credential.
+Needs, before the camera: `frontend.cortex.baseUrl` and
+`frontend.cortex.idp: openddil` set on the lab (chart ≥ 0.1.147), and the
+intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action`
+under the delegate credential.
 `<dry run: cortex's action route live on the lab — without it the beat ends at step 5>`
-`<dry run: the link lands signed in (one realm, or brokered) — or say "a second sign-in" on camera>`
+`<dry run: the link lands signed in — the ?idp=openddil marker starts the brokered login; until cortex's marker build is pinned, expect one click on cortex's login page>`
 
 1. **Edge-01 — Ada files a fault report** on `dis:1:1:1008`: slot
    `tr_module`, fault code `MRAD-ARR-0417`, a one-line note. The form answers
@@ -394,8 +395,9 @@ Needs, before the camera: `frontend.cortex.baseUrl` set on the lab
    ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
    camera; it is the same ledger as BEAT 2a.
 4. **Edge-01 — "Approve in cortex" appears on the fault card**, once the
-   delivery has happened. That is the moment the case exists in cortex; the
-   link carries the case id cortex returned for it, and before that there
+   delivery has happened. That is the moment the case exists in cortex. The
+   link opens that case: it carries the case id cortex returned for it (the
+   task carries the same `case_id`, cortex 2026-10-18). Before that there
    is no link and no placeholder. The card checks every 15 s.
    If BIT already raised this fault, its event was delivered before the
    report, and Ada's report joins that episode (the delivery reads
@@ -404,12 +406,20 @@ Needs, before the camera: `frontend.cortex.baseUrl` set on the lab
    `<dry run: unverified — the card matches on fault code, so check the BIT
    event's delivered fault code matches the one on the card>`
    `<dry run: report to link, seconds>`
-5. **Cortex — the case's task, three hands.** Click the link: cortex opens
-   the case and its pending approval. **atlantia chooses** the action,
-   **liaison.coalition approves**, **alice releases** — each under their own
-   sign-in in cortex. OpenDDIL takes no part in the approval and acts for no
+5. **Cortex — one case, three people, each opens the case.** The link
+   opens the case, `/case/{case_id}`; nobody approves "from the link".
+   Every step is someone opening that same case under their own sign-in:
+   - **atlantia opens the case and chooses** the action;
+   - **liaison.coalition opens the same case and approves**;
+   - **alice opens the case and releases**.
+
+   Whoever holds the pending task sees it full-pane. The other two see the
+   case read-only, with the steps decided so far. A task filed before
+   cortex's 196 has no case id and reads "No case": file the report fresh
+   for the camera. OpenDDIL takes no part in the approval and acts for no
    one.
    `<dry run: which profile signs in as each of the three; the action text atlantia picks>`
+   `<dry run: how liaison and alice reach the case (the same link, or cortex's own task list)>`
    **Say it on camera: while the case is pending, HQ's pane shows nothing
    for it.** That is by design: OpenDDIL reads the decided action, never the
    case's state.
@@ -436,7 +446,8 @@ pre-filled, under Ada's own sign-in; nothing is sent until she sends it.
 Over 4000 characters is refused in the panel, never cut short.
 
 *The beat:* a technician's report at the edge became a case in cortex, the
-people who own the decision approved and released it there, and the action
+people who own the decision each opened that case and chose, approved and
+released it there, and the action
 came back to HQ with its approval chain attached. OpenDDIL carried the
 report out once, under a label, and admitted the action only after checking
 who approved it.
