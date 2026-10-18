@@ -1799,13 +1799,31 @@ maps/list when undeclared. One definition for the hub and every tier.
 {{- end }}
 
 {{/*
+openddil.frontendCortexJson -- the `cortex` object for a frontend deployment.json
+({"baseUrl": ...}), or nothing when frontend.cortex.baseUrl is empty. Fails the
+render unless the value starts http:// or https:// (the frontend ignores
+anything else, so a typo would silently draw no link); strips one trailing "/".
+One definition for the hub and every tier.
+*/}}
+{{- define "openddil.frontendCortexJson" -}}
+{{- $c := .Values.frontend.cortex | default dict -}}
+{{- $u := $c.baseUrl | default "" | toString -}}
+{{- if $u -}}
+{{- if not (or (hasPrefix "http://" $u) (hasPrefix "https://" $u)) -}}
+{{- fail (printf "frontend.cortex.baseUrl must start with http:// or https:// (got %q): set it to e.g. https://cortex.example.test, or leave it empty to draw no cortex links" $u) -}}
+{{- end -}}
+{{- toJson (dict "baseUrl" (trimSuffix "/" $u)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
 deployment.json: any configured pane, FOB or HQ location, releasability, any HQ child
 link (whose shape places its header row), or any declared move-panel input
-(movement units/standards, effector declared load). Empty otherwise.
+(movement units/standards, effector declared load), or frontend.cortex.baseUrl. Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -1858,6 +1876,9 @@ browser can tell "declared empty" from "an older chart".
 {{- $tierTree := include "openddil.hqTierTreeJson" . | fromJsonArray -}}
 {{- if $tierTree -}}
 {{- $_ := set $d "tiers" $tierTree -}}
+{{- end -}}
+{{- with include "openddil.frontendCortexJson" . -}}
+{{- $_ := set $d "cortex" (fromJson .) -}}
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}

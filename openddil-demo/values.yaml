@@ -1103,6 +1103,13 @@ frontend:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 200m, memory: 256Mi }
   port: 80
+  # Optional cortex deep links. Draws the fault card's "Approve in cortex"
+  # link and points the question panel at cortex's ask route. Empty = the key
+  # is omitted from every frontend's deployment.json and nothing changes
+  # (the OSS and work default). Must start http:// or https://; one trailing
+  # slash is stripped. Example: https://cortex.example.test
+  cortex:
+    baseUrl: ""
   branding:
     # Optional ConfigMap holding branding.json (title, logo) plus image
     # files; served unauthenticated at /branding/ on every UI. Empty =

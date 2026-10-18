@@ -1029,7 +1029,8 @@ data:
       },
       {{- /* Same two keys as the hub's deployment.json, one definition. */}}
       "effectors": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).effectors | toJson }},
-      "movement": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).movement | toJson }}
+      "movement": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).movement | toJson }}{{ with include "openddil.frontendCortexJson" $root }},
+      "cortex": {{ . }}{{ end }}
     }
 {{- if $root.Values.releasability.enabled }}
 ---

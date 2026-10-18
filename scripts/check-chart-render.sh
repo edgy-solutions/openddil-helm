@@ -2843,6 +2843,52 @@ g16_fail_check "rocksdbTotalMemory over half the limit" "exceeds half" --set-str
 g16_fail_check "rocksdbTotalMemory over half of the TIER limit" "exceeds half" --set-string restate.rocksdbTotalMemory=1Gi --set-string tierNode.restate.resources.limits.memory=1Gi
 g16_fail_check "rocksdbTotalMemory unparseable" "cannot parse" --set-string restate.rocksdbTotalMemory=lots
 
+# 17: frontend.cortex.baseUrl reaches the hub's and every tier's deployment.json (tierNode.enabled, or no tier renders).
+# Unset = no `cortex` key anywhere; set = {baseUrl} with one trailing slash stripped; non-http(s) fails the render.
+echo "[17] frontend cortex baseUrl"
+g17_count() {
+  # args: mode (absent|present); reads the render on stdin; counts deployment.json documents
+  "$PY" -c '
+import sys, yaml, json
+mode = sys.argv[1]
+n = 0
+for d in yaml.safe_load_all(sys.stdin):
+    if not d or d.get("kind") != "ConfigMap":
+        continue
+    raw = (d.get("data") or {}).get("deployment.json")
+    if raw is None:
+        continue
+    j = json.loads(raw)
+    n += 1
+    if mode == "absent":
+        if "cortex" in j:
+            print("  FAIL [17]: " + d["metadata"]["name"] + " carries cortex while unset"); sys.exit(1)
+    elif j.get("cortex", {}).get("baseUrl") != "https://cortex.example.test":
+        print("  FAIL [17]: " + d["metadata"]["name"] + " has cortex=" + repr(j.get("cortex"))); sys.exit(1)
+if n < 2 and mode == "present":
+    print("  FAIL [17]: saw " + str(n) + " deployment.json(s), want at least 2 (hub and a tier)"); sys.exit(1)
+print("  ok   [17]: " + str(n) + " deployment.json(s) checked, cortex " + mode)
+' "$1"
+}
+helm template t "$CHART" --set tierNode.enabled=true 2>/dev/null | g17_count absent || { echo "  FAIL [17]: unset"; fail=1; }
+helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test/ 2>/dev/null | g17_count present || { echo "  FAIL [17]: set"; fail=1; }
+if err=$(helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=ftp://x 2>&1 >/dev/null); then
+  echo "  FAIL [17]: ftp:// baseUrl did not fail the render"; fail=1
+elif ! printf '%s' "$err" | grep -q "must start with http:// or https://"; then
+  echo "  FAIL [17]: ftp:// baseUrl failed, but did not name the reason (expected: must start with http:// or https://)"; fail=1
+else
+  echo "  ok   [17]: ftp:// baseUrl fails the render, naming the reason"
+fi
+if helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test 2>/dev/null \
+   | "$PY" -c '
+import sys, yaml
+ok = any(d and d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") for d in yaml.safe_load_all(sys.stdin))
+sys.exit(0 if ok else 1)'; then
+  echo "  ok   [17]: cortex alone (no panes, releasability off) still renders the hub deployment.json ConfigMap"
+else
+  echo "  FAIL [17]: cortex alone did not render the hub deployment.json ConfigMap"; fail=1
+fi
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"
