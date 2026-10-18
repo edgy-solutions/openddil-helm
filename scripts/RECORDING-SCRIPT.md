@@ -3,7 +3,7 @@
 Four browser profiles, four logins, three connected beats (the C2 picture; a
 fault report to an action; an arrival), two cuts, two heals. Roughly 21–25
 minutes of recording. Every number below was measured on 2026-09-09 unless dated
-otherwise (BEATS 2a and 2b: 2026-10-03; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
+otherwise (BEATS 2a and 2b: 2026-10-03, BEAT 2b's cortex steps unmeasured; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
 and check rather than narrate around it** — that disagreement is the finding.
 Lines marked `<dry run: …>` are placeholders the dry run fills in; do not
 record over one that is still open.
@@ -365,56 +365,81 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 of it about records they could see anyway. Bram's 1 of 9 is the same gate,
 reading the same records, as the liaison's 12 of 20.
 
-## BEAT 2b — one fault, connected: from a technician's report to an action (~3 min)
+## BEAT 2b — one fault, connected: report, approve in cortex, action on the pane (~4 min)
 
-Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`) and
-**HQ**.
+Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`),
+**cortex** (the three approvers' sign-ins), and **HQ**. Rewritten
+2026-10-17 for the dry run on the 23rd: **approval happens in cortex**, not
+in a stand-in. Steps 1–3 are unchanged and measured; steps 4–7 are new and
+unmeasured until the dry run.
+
+Needs, before the camera: `frontend.cortex.baseUrl` set on the lab
+(chart ≥ 0.1.146), and the intake's per-case entry pointed at cortex's
+`GET /cases/{case_id}/action` under the delegate credential.
+`<dry run: cortex's action route live on the lab — without it the beat ends at step 5>`
+`<dry run: the link lands signed in (one realm, or brokered) — or say "a second sign-in" on camera>`
 
 1. **Edge-01 — Ada files a fault report** on `dis:1:1:1008`: slot
    `tr_module`, fault code `MRAD-ARR-0417`, a one-line note. The form answers
-   with an event id (HTTP 202).
-2. **Within about a minute, the event crosses the boundary** toward the
-   consumer's destination. It carries the asset's picture and the spares
-   view: four sites with on-hand counts and lead times, and the **nearest
-   spare: region-east, 2 on hand, 3 days** (measured 2026-10-03; every lead
-   time is from the parts-availability stand-in, and the event says so,
+   with an event id (HTTP 202), and says approval opens in cortex once the
+   report reaches it.
+2. **Within about a minute, the event crosses the boundary** to cortex. It
+   carries the asset's picture and the spares view: four sites with on-hand
+   counts and lead times, and the **nearest spare: region-east, 2 on hand,
+   3 days** (measured 2026-10-03; every lead time is from the
+   parts-availability stand-in, and the event says so,
    `lead_time_source: stand-in`).
 3. **The same report from Bram's side** (`dis:2:1:1001`, a BDR asset) is
    released to a destination whose nations include BDR, and **refused** by an
    ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
    camera; it is the same ledger as BEAT 2a.
-4. **HQ — the action arrives** on the actions pane, the released-records
-   pane the deployment configures for the action destination. The row reads
-   **remove and replace array module, section 3**; part
-   `part:array-module`, **from region-east**; outcome approved; two
-   approvals (a regional officer and the coalition supervisor); it cites
-   three modules (fault isolation, remove, install). Decision: **ADMIT**.
-   Report to answer: 1 s; report to admitted action: 30 s, one intake poll
-   (measured 2026-10-10, rev 134; again under 1 s and 27 s on rev 136; under
-   1 s and 10 s on 2026-10-12, rev 142).
-   **FIGURE** on the row opens the cited figure, "Detail A, Section 3", with
-   section 3 highlighted (rev 142 dry run: the figure opened with its
-   highlight; the probe did not read the title text, so check it by eye).
-5. **HQ — three more rows on the same asset, refused.** On the lab the
-   action stand-in also answers with three deliberately flawed copies of the
-   same action, and the pane refuses each one for its own reason:
-   `label_mismatch` (the action's label does not match the record it
-   answers), `approver_unentitled` (an approver is known but not entitled to
-   approve), `approver_unresolved` (an approver the deployment cannot
-   resolve). They are decided in the same poll as the ADMIT row (measured
-   2026-10-12, rev 142: all four at report + 10 s, all on the same event).
-   Say it plainly: **admission is decided per action, and a refusal says
-   why.**
-   If BIT already raised this fault, Ada's report joins that fault's event
-   (same event id, her report as a second source). The row is the same
-   action, re-stamped, not a new row. Say "the action updates"; don't
-   wait for a second row.
+4. **Edge-01 — "Approve in cortex" appears on the fault card**, once the
+   delivery has happened. That is the moment the case exists in cortex; the
+   link carries the case id cortex returned for it, and before that there
+   is no link and no placeholder. The card checks every 15 s.
+   If BIT already raised this fault, its event was delivered before the
+   report, and Ada's report joins that episode (the delivery reads
+   `duplicate`): the link should be there at once, to the same case, and the case
+   is not new. Say "the case already exists"; don't wait for the link.
+   `<dry run: unverified — the card matches on fault code, so check the BIT
+   event's delivered fault code matches the one on the card>`
+   `<dry run: report to link, seconds>`
+5. **Cortex — the case's task, three hands.** Click the link: cortex opens
+   the case and its pending approval. **atlantia chooses** the action,
+   **liaison.coalition approves**, **alice releases** — each under their own
+   sign-in in cortex. OpenDDIL takes no part in the approval and acts for no
+   one.
+   `<dry run: which profile signs in as each of the three; the action text atlantia picks>`
+   **Say it on camera: while the case is pending, HQ's pane shows nothing
+   for it.** That is by design: OpenDDIL reads the decided action, never the
+   case's state.
+6. **HQ — the action arrives** on the actions pane within one intake poll
+   of the release (30 s on the lab). The row carries the action as cortex
+   released it, and **under it the approval chain**, in step order: step,
+   role, approver, decision (approved/rejected), decided at. Decision:
+   **ADMIT** — the same checks as before: the label matches the record it
+   answers, every approver resolves and is entitled, on_behalf_of holds.
+   `<dry run: release to admitted row, seconds; the row's text and part>`
+   **FIGURE** on the row opens a cited figure only if the action cites one.
+   `<dry run: does the released action carry figure citations?>`
+7. **Optional: refusals.** A refused action shows its chain too — a
+   refusal's chain is part of why it was refused. The lab's stand-in can
+   still answer with its three flawed copies (`label_mismatch`,
+   `approver_unentitled`, `approver_unresolved`) if its list entry stays
+   configured beside the cortex entry. Say: **admission is decided per
+   action, and a refusal says why.**
+   `<dry run: keep the stand-in entry for this shot, or drop the step>`
 
-*The beat:* HQ sees the edge's report come back as an approved action:
-replace the array module in section 3 with the spare from region-east. The
-report was filed at the edge, crossed the boundary once, under a label,
-and came back as an action, and HQ can show which records went out and which
-did not.
+*Ask in cortex (optional, ~30 s):* on Edge-01 the question panel's button
+reads **Ask in cortex**. It opens cortex's ask route with the question
+pre-filled, under Ada's own sign-in; nothing is sent until she sends it.
+Over 4000 characters is refused in the panel, never cut short.
+
+*The beat:* a technician's report at the edge became a case in cortex, the
+people who own the decision approved and released it there, and the action
+came back to HQ with its approval chain attached. OpenDDIL carried the
+report out once, under a label, and admitted the action only after checking
+who approved it.
 
 ## BEAT 2c — Arrival: something observed becomes a fleet asset (~3 min)
 
