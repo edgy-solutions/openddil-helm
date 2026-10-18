@@ -377,7 +377,13 @@ Needs, before the camera: `frontend.cortex.baseUrl` and
 `frontend.cortex.idp: openddil` set on the lab (chart ≥ 0.1.147), and the
 intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action`
 under the delegate credential.
-`<dry run: cortex's action route live on the lab — without it the beat ends at step 5>`
+The route is cortex's `lane/01-196` build (`d1fcdc0c`, cortex 2026-10-18): one GET per
+case, no list route. It answers **200 only once the case is released**; approved but not
+released is 404 `no_action_record`, and a **rejected case is 404 for good** (it never reaches
+HQ). A case the delegate may not see is **403 `not_your_case`**; the intake counts that as
+`case_fetch_failed` with a WARNING each tick, so a 403 in the intake log means the
+delegate's scope, not a missing action.
+`<dry run: cortex's 196 rolled on the lab — without it the beat ends at step 5>`
 `<dry run: the link lands signed in — the ?idp=openddil marker starts the brokered login; until cortex's marker build is pinned, expect one click on cortex's login page>`
 
 1. **Edge-01 — Ada files a fault report** on `dis:1:1:1008`: slot
@@ -438,6 +444,8 @@ under the delegate credential.
    `approver_unentitled`, `approver_unresolved`) if its list entry stays
    configured beside the cortex entry. Say: **admission is decided per
    action, and a refusal says why.**
+   A case rejected **in cortex** is not one of these: it has no action record, so HQ
+   shows nothing for it, ever. HQ's refusals are admission refusals of a released action.
    `<dry run: keep the stand-in entry for this shot, or drop the step>`
 
 *Ask in cortex (optional, ~30 s):* on Edge-01 the question panel's button
