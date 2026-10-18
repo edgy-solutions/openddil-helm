@@ -2929,6 +2929,53 @@ elif ! printf '%s' "$err" | grep -q "idp is set but frontend.cortex.baseUrl is e
 else
   echo "  ok   [17]: idp without baseUrl fails the render, naming the reason"
 fi
+g17_fields() {
+  # args: want label, want displayName ("" = key must be absent); reads the render on stdin
+  "$PY" -c '
+import sys, yaml, json
+wl, wd = sys.argv[1], sys.argv[2]
+n = 0
+bad = []
+for d in yaml.safe_load_all(sys.stdin):  # reads all of stdin before deciding
+    if not d or d.get("kind") != "ConfigMap":
+        continue
+    raw = (d.get("data") or {}).get("deployment.json")
+    if raw is None:
+        continue
+    n += 1
+    c = json.loads(raw).get("cortex", {})
+    if c.get("caseLinkLabel") != wl or c.get("displayName") != (wd or None):
+        bad.append(d["metadata"]["name"])
+if bad:
+    print("  FAIL [17]: caseLinkLabel/displayName wrong in " + ", ".join(bad)); sys.exit(1)
+if n < 2:
+    print("  FAIL [17]: saw " + str(n) + " deployment.json(s), want at least 2 (hub and a tier)"); sys.exit(1)
+print("  ok   [17]: caseLinkLabel=" + repr(wl) + " displayName=" + repr(wd or None) + " in " + str(n) + " deployment.json(s)")' "$1" "$2"
+}
+# (h) baseUrl set, label unset: default label everywhere, no displayName.
+helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test 2>/dev/null \
+  | g17_fields "Open maintenance case" "" || { echo "  FAIL [17]: default caseLinkLabel"; fail=1; }
+# (i) overrides reach every deployment.json.
+helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test --set-string frontend.cortex.caseLinkLabel="Open the case" --set-string frontend.cortex.displayName="Example Maint" 2>/dev/null \
+  | g17_fields "Open the case" "Example Maint" || { echo "  FAIL [17]: label/displayName overrides"; fail=1; }
+# (j) a 49-character label fails the render, naming the reason.
+l49=$(printf 'a%.0s' $(seq 1 49))
+if err=$(helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test --set-string frontend.cortex.caseLinkLabel="$l49" 2>&1 >/dev/null); then
+  echo "  FAIL [17]: 49-character caseLinkLabel did not fail the render"; fail=1
+elif ! printf '%s' "$err" | grep -q "frontend.cortex.caseLinkLabel must match"; then
+  echo "  FAIL [17]: 49-character caseLinkLabel failed, but did not name the reason"; fail=1
+else
+  echo "  ok   [17]: 49-character caseLinkLabel fails the render, naming the reason"
+fi
+# (k) displayName without baseUrl fails the render, naming the reason.
+if err=$(helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.displayName="Example Maint" 2>&1 >/dev/null); then
+  echo "  FAIL [17]: displayName without baseUrl did not fail the render"; fail=1
+elif ! printf '%s' "$err" | grep -q "displayName is set but frontend.cortex.baseUrl is empty"; then
+  echo "  FAIL [17]: displayName without baseUrl failed, but did not name the reason"; fail=1
+else
+  echo "  ok   [17]: displayName without baseUrl fails the render, naming the reason"
+fi
+# (l) the default label alone creates no cortex key: covered by the unset check above.
 
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"

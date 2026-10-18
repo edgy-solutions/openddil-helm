@@ -394,7 +394,7 @@ under the delegate credential.
    released to a destination whose nations include BDR, and **refused** by an
    ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
    camera; it is the same ledger as BEAT 2a.
-4. **Edge-01 — "Approve in cortex" appears on the fault card**, once the
+4. **Edge-01 — "Open maintenance case" appears on the fault card**, once the
    delivery has happened. That is the moment the case exists in cortex. The
    link opens that case: it carries the case id cortex returned for it (the
    task carries the same `case_id`, cortex 2026-10-18). Before that there

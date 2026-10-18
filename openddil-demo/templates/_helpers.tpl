@@ -1800,9 +1800,13 @@ maps/list when undeclared. One definition for the hub and every tier.
 
 {{/*
 openddil.frontendCortexJson -- the `cortex` object for a frontend deployment.json
-({"baseUrl": ...}), or nothing when frontend.cortex.baseUrl is empty. Fails the
-render unless the value starts http:// or https:// (the frontend ignores
-anything else, so a typo would silently draw no link); strips one trailing "/".
+({"baseUrl": ..., "caseLinkLabel": ..., "idp"?: ..., "displayName"?: ...}), or
+nothing when frontend.cortex.baseUrl is empty. Fails the render unless the value
+starts http:// or https:// (the frontend ignores anything else, so a typo would
+silently draw no link); strips one trailing "/". caseLinkLabel is always emitted
+when baseUrl is set (default "Open maintenance case"; 1-48 printable chars);
+displayName only when non-empty (1-64 printable chars). With baseUrl empty,
+idp or displayName set is a mistake and fails; caseLinkLabel is ignored.
 One definition for the hub and every tier.
 */}}
 {{- define "openddil.frontendCortexJson" -}}
@@ -1820,9 +1824,23 @@ One definition for the hub and every tier.
 {{- end -}}
 {{- $_ := set $o "idp" $i -}}
 {{- end -}}
+{{- $l := $c.caseLinkLabel | default "" | toString | trim | default "Open maintenance case" -}}
+{{- if not (regexMatch "^[^\\x00-\\x1f\\x7f]{1,48}$" $l) -}}
+{{- fail (printf "frontend.cortex.caseLinkLabel must match ^[^\\x00-\\x1f\\x7f]{1,48}$ (1-48 printable characters) (got %q): shorten it, or leave it empty for the default" $l) -}}
+{{- end -}}
+{{- $_ := set $o "caseLinkLabel" $l -}}
+{{- $d := $c.displayName | default "" | toString | trim -}}
+{{- if $d -}}
+{{- if not (regexMatch "^[^\\x00-\\x1f\\x7f]{1,64}$" $d) -}}
+{{- fail (printf "frontend.cortex.displayName must match ^[^\\x00-\\x1f\\x7f]{1,64}$ (1-64 printable characters) (got %q): shorten it, or leave it empty to show the base URL host" $d) -}}
+{{- end -}}
+{{- $_ := set $o "displayName" $d -}}
+{{- end -}}
 {{- toJson $o -}}
 {{- else if ($c.idp | default "" | toString) -}}
 {{- fail "frontend.cortex.idp is set but frontend.cortex.baseUrl is empty: a marker with no link is a mistake; set baseUrl or clear idp" -}}
+{{- else if ($c.displayName | default "" | toString | trim) -}}
+{{- fail "frontend.cortex.displayName is set but frontend.cortex.baseUrl is empty: a name with no link is a mistake; set baseUrl or clear displayName" -}}
 {{- end -}}
 {{- end }}
 

@@ -1103,7 +1103,7 @@ frontend:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 200m, memory: 256Mi }
   port: 80
-  # Optional cortex deep links. Draws the fault card's "Approve in cortex"
+  # Optional cortex deep links. Draws the fault card's "Open maintenance case"
   # link and points the question panel at cortex's ask route. Empty = the key
   # is omitted from every frontend's deployment.json and nothing changes
   # (the OSS and work default). Must start http:// or https://; one trailing
@@ -1112,6 +1112,11 @@ frontend:
     baseUrl: ""
     # The cortex-recognised broker marker (openddil where cortex brokers through OpenDDIL's Keycloak); empty means no marker.
     idp: ""
+    # The fault card link's visible text. Must not name a system. 1-48 printable characters.
+    caseLinkLabel: "Open maintenance case"
+    # The destination's display name, shown only in the link's tooltip ("Opens in <name>").
+    # Empty = the frontend shows the base URL's host. 1-64 printable characters.
+    displayName: ""
   branding:
     # Optional ConfigMap holding branding.json (title, logo) plus image
     # files; served unauthenticated at /branding/ on every UI. Empty =
