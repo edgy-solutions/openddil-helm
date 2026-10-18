@@ -1812,7 +1812,17 @@ One definition for the hub and every tier.
 {{- if not (or (hasPrefix "http://" $u) (hasPrefix "https://" $u)) -}}
 {{- fail (printf "frontend.cortex.baseUrl must start with http:// or https:// (got %q): set it to e.g. https://cortex.example.test, or leave it empty to draw no cortex links" $u) -}}
 {{- end -}}
-{{- toJson (dict "baseUrl" (trimSuffix "/" $u)) -}}
+{{- $o := dict "baseUrl" (trimSuffix "/" $u) -}}
+{{- $i := $c.idp | default "" | toString -}}
+{{- if $i -}}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,62}$" $i) -}}
+{{- fail (printf "frontend.cortex.idp must match ^[a-z0-9][a-z0-9-]{0,62}$ (got %q): use the marker cortex recognises, e.g. openddil, or leave it empty for no marker" $i) -}}
+{{- end -}}
+{{- $_ := set $o "idp" $i -}}
+{{- end -}}
+{{- toJson $o -}}
+{{- else if ($c.idp | default "" | toString) -}}
+{{- fail "frontend.cortex.idp is set but frontend.cortex.baseUrl is empty: a marker with no link is a mistake; set baseUrl or clear idp" -}}
 {{- end -}}
 {{- end }}
 

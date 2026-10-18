@@ -1110,6 +1110,8 @@ frontend:
   # slash is stripped. Example: https://cortex.example.test
   cortex:
     baseUrl: ""
+    # The cortex-recognised broker marker (openddil where cortex brokers through OpenDDIL's Keycloak); empty means no marker.
+    idp: ""
   branding:
     # Optional ConfigMap holding branding.json (title, logo) plus image
     # files; served unauthenticated at /branding/ on every UI. Empty =

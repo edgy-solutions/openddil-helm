@@ -2889,6 +2889,46 @@ sys.exit(0 if ok else 1)'; then
 else
   echo "  FAIL [17]: cortex alone did not render the hub deployment.json ConfigMap"; fail=1
 fi
+# (e) baseUrl plus idp: every deployment.json carries cortex.idp (reads all of stdin; see 8ec6933).
+if helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test --set-string frontend.cortex.idp=example-idp 2>/dev/null \
+   | "$PY" -c '
+import sys, yaml, json
+n = 0
+bad = []
+for d in yaml.safe_load_all(sys.stdin):  # reads all of stdin before deciding
+    if not d or d.get("kind") != "ConfigMap":
+        continue
+    raw = (d.get("data") or {}).get("deployment.json")
+    if raw is None:
+        continue
+    n += 1
+    if json.loads(raw).get("cortex", {}).get("idp") != "example-idp":
+        bad.append(d["metadata"]["name"])
+if bad:
+    print("  FAIL [17]: cortex.idp != example-idp in " + ", ".join(bad)); sys.exit(1)
+if n < 2:
+    print("  FAIL [17]: saw " + str(n) + " deployment.json(s), want at least 2 (hub and a tier)"); sys.exit(1)
+print("  ok   [17]: idp=example-idp reaches " + str(n) + " deployment.json(s)")'; then
+  :
+else
+  echo "  FAIL [17]: idp did not reach every deployment.json"; fail=1
+fi
+# (f) invalid idp fails the render, naming the reason.
+if err=$(helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.baseUrl=https://cortex.example.test --set-string frontend.cortex.idp=Bad_IDP 2>&1 >/dev/null); then
+  echo "  FAIL [17]: Bad_IDP idp did not fail the render"; fail=1
+elif ! printf '%s' "$err" | grep -q "frontend.cortex.idp must match"; then
+  echo "  FAIL [17]: Bad_IDP idp failed, but did not name the reason (expected: frontend.cortex.idp must match)"; fail=1
+else
+  echo "  ok   [17]: invalid idp fails the render, naming the reason"
+fi
+# (g) idp without baseUrl fails the render, naming the reason.
+if err=$(helm template t "$CHART" --set tierNode.enabled=true --set-string frontend.cortex.idp=example-idp 2>&1 >/dev/null); then
+  echo "  FAIL [17]: idp without baseUrl did not fail the render"; fail=1
+elif ! printf '%s' "$err" | grep -q "idp is set but frontend.cortex.baseUrl is empty"; then
+  echo "  FAIL [17]: idp without baseUrl failed, but did not name the reason"; fail=1
+else
+  echo "  ok   [17]: idp without baseUrl fails the render, naming the reason"
+fi
 
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
