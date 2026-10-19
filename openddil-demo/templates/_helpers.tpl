@@ -1865,7 +1865,7 @@ network: true. One definition for the hub and every tier.
 {{- if not (kindIs "map" $t) -}}
 {{- fail (printf "frontend.terrain must be a map (got %s): set keys such as basemap and network, or leave it empty for the packaged defaults" (kindOf $t)) -}}
 {{- end -}}
-{{- $allowed := list "basemap" "network" "elevationUrl" "imageryUrl" "patchImageryUrl" "landUrl" "lakesUrl" "waterUrl" "imageryMaxZoom" "patchMaxZoom" "reliefPalette" "credits" -}}
+{{- $allowed := list "basemap" "network" "elevationUrl" "imageryUrl" "patchImageryUrl" "landUrl" "lakesUrl" "waterUrl" "imageryMaxZoom" "patchMaxZoom" "reliefPalette" "credits" "image" -}}
 {{- range $k := keys $t | sortAlpha -}}
 {{- if not (has $k $allowed) -}}
 {{- fail (printf "frontend.terrain.%s is not a known key: check the spelling; allowed keys are %s" $k (join ", " $allowed)) -}}
@@ -1955,8 +1955,66 @@ network: true. One definition for the hub and every tier.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- if $o -}}
 {{- toJson $o -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.frontendTerrainImage -- chart-only (never written into deployment.json):
+frontend.terrain.image names a content image holding a packed terrain bundle
+(terrain/<hash>/...). Empty when image.repository is unset. Otherwise validates
+and emits JSON {ref, hash, pull, size}: elevationUrl must sit under
+/deployment-overlay/terrain/<16 hex>/ (that hash IS the bundle hash), every other
+terrain URL under that prefix must carry the same hash, and tag or digest must be
+set. Used by the hub and every tier frontend Deployment.
+*/}}
+{{- define "openddil.frontendTerrainImage" -}}
+{{- $t := .Values.frontend.terrain | default dict -}}
+{{- $i := get $t "image" | default dict -}}
+{{- if and (kindIs "map" $i) (get $i "repository") -}}
+{{- if not (or (get $i "tag") (get $i "digest")) -}}
+{{- fail "frontend.terrain.image.tag or frontend.terrain.image.digest must be set when frontend.terrain.image.repository is set: pin the bundle image" -}}
+{{- end -}}
+{{- $e := get $t "elevationUrl" | default "" | toString -}}
+{{- $pre := regexFind "^/deployment-overlay/terrain/[0-9a-f]{16}/" $e -}}
+{{- if not $pre -}}
+{{- fail (printf "frontend.terrain.elevationUrl must be set to a path matching /deployment-overlay/terrain/<16 hex chars>/... when frontend.terrain.image.repository is set (got %q): the hash in it names the bundle inside the image" $e) -}}
+{{- end -}}
+{{- range $k := list "imageryUrl" "patchImageryUrl" "landUrl" "lakesUrl" "waterUrl" -}}
+{{- $v := get $t $k | default "" | toString -}}
+{{- if and (hasPrefix "/deployment-overlay/terrain/" $v) (not (hasPrefix $pre $v)) -}}
+{{- fail (printf "frontend.terrain.%s must carry the same bundle hash as frontend.terrain.elevationUrl (%s) when frontend.terrain.image.repository is set (got %q)" $k $pre $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $hash := trimSuffix "/" (trimPrefix "/deployment-overlay/terrain/" $pre) -}}
+{{- dict "ref" (include "openddil.thirdPartyImage" (dict "repository" (get $i "repository") "tag" (get $i "tag") "digest" (get $i "digest"))) "hash" $hash "pull" (include "openddil.pullPolicy" (dict "policy" (get $i "pullPolicy") "root" .)) "size" (get $i "sizeLimit" | default "1Gi") | toJson -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.frontendTerrainInit -- the `terrain` initContainer (takes the JSON above):
+copies the image's /terrain into the emptyDir mounted at /dst.
+*/}}
+{{- define "openddil.frontendTerrainInit" -}}
+- name: terrain
+  image: {{ .ref | quote }}
+  imagePullPolicy: {{ .pull }}
+  command:
+    - sh
+    - -c
+    - {{ printf "set -e; test -d /terrain/%s/dem || { echo \"terrain image lacks /terrain/%s/dem (bundle hash from frontend.terrain.elevationUrl)\"; exit 1; }; cp -a /terrain/. /dst/; echo \"terrain %s: $(du -sk /dst | cut -f1) KiB\"" .hash .hash .hash | quote }}
+  volumeMounts:
+    - name: terrain
+      mountPath: /dst
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 {{- end }}
 
 {{/*

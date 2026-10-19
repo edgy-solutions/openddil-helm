@@ -3129,6 +3129,76 @@ helm template t "$CHART" --set tierNode.enabled=true --set persistence.storageCl
 helm template t "$CHART" --set tierNode.enabled=true --set electric.persistence.useEmptyDir=true 2>/dev/null | g19_check empty || { echo "  FAIL [19]: useEmptyDir"; fail=1; }
 helm template t "$CHART" --set tierNode.enabled=true --set electric.persistence.enabled=false 2>/dev/null | g19_check off || { echo "  FAIL [19]: enabled=false"; fail=1; }
 
+echo "[20] terrain image"
+# g20_check MODE: reads a render on stdin. MODE off: no `terrain` initContainer/volume in any frontend Deployment.
+#   MODE on: hub + every tier frontend carry the initContainer (image x/terrain:t, hash in the command), the
+#   emptyDir with sizeLimit, the read-only nginx mount; and no deployment.json carries the key `image`.
+g20_check() {
+  "$PY" -c '
+import sys, yaml, json
+mode = sys.argv[1]
+H = "0123456789abcdef"
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]  # read it all: an early exit SIGPIPEs helm
+fes = [d for d in docs if d["kind"] == "Deployment"
+       and any(c["name"] == "frontend" for c in d["spec"]["template"]["spec"]["containers"])]
+if len(fes) < 2:
+    print("  FAIL [20]: " + str(len(fes)) + " frontend Deployment(s), want hub + at least one tier"); sys.exit(1)
+for d in fes:
+    n = d["metadata"]["name"]
+    pod = d["spec"]["template"]["spec"]
+    inits = [c for c in pod.get("initContainers", []) if c["name"] == "terrain"]
+    vols = [v for v in pod.get("volumes", []) if v["name"] == "terrain"]
+    fe = [c for c in pod["containers"] if c["name"] == "frontend"][0]
+    mounts = [m for m in fe.get("volumeMounts", []) if m["name"] == "terrain"]
+    if mode == "off":
+        if inits or vols or mounts:
+            print("  FAIL [20]: " + n + " has terrain initContainer/volume/mount while unset"); sys.exit(1)
+        continue
+    if len(inits) != 1 or inits[0]["image"] != "x/terrain:t" or "/terrain/" + H + "/dem" not in " ".join(inits[0]["command"]) \
+       or not any(m["name"] == "terrain" and m["mountPath"] == "/dst" for m in inits[0].get("volumeMounts", [])):
+        print("  FAIL [20]: " + n + " lacks the terrain initContainer (image x/terrain:t, hash in command, /dst mount)"); sys.exit(1)
+    if len(vols) != 1 or not vols[0].get("emptyDir", {}).get("sizeLimit"):
+        print("  FAIL [20]: " + n + " lacks the terrain emptyDir with sizeLimit"); sys.exit(1)
+    if len(mounts) != 1 or mounts[0]["mountPath"] != "/usr/share/nginx/html/deployment-overlay/terrain" or not mounts[0].get("readOnly"):
+        print("  FAIL [20]: " + n + " lacks the read-only nginx terrain mount"); sys.exit(1)
+    if d["spec"]["template"]["metadata"].get("annotations", {}).get("openddil.io/terrain-image") != "x/terrain:t":
+        print("  FAIL [20]: " + n + " lacks the openddil.io/terrain-image annotation"); sys.exit(1)
+nj = 0
+for d in docs:
+    raw = d["kind"] == "ConfigMap" and (d.get("data") or {}).get("deployment.json")
+    if raw:
+        nj += 1
+        if "image" in json.loads(raw).get("terrain", {}):
+            print("  FAIL [20]: " + d["metadata"]["name"] + " deployment.json carries terrain.image"); sys.exit(1)
+print("  ok   [20]: " + mode + " holds in " + str(len(fes)) + " frontend Deployment(s), " + str(nj) + " deployment.json(s)")' "$1"
+}
+g20_vals=$(mktemp)
+g20_ok='/deployment-overlay/terrain/0123456789abcdef/dem/{z}/{x}/{y}.png'
+helm template t "$CHART" --set tierNode.enabled=true 2>/dev/null | g20_check off || { echo "  FAIL [20]: unset renders terrain image pieces"; fail=1; }
+g20_body() {
+  # args: elevationUrl-line, extra-terrain-line, image-extra
+  printf 'frontend:\n  terrain:\n%s\n%s\n    image: {repository: x/terrain%s}\n' "$1" "$2" "$3"
+}
+g20_body "    elevationUrl: \"$g20_ok\"" "" ", tag: t" > "$g20_vals"
+helm template t "$CHART" --set tierNode.enabled=true -f "$g20_vals" 2>/dev/null | g20_check on || { echo "  FAIL [20]: image set"; fail=1; }
+# image alone must not emit a terrain block (checked via the unset mode on deployment.json: no `image` key either way).
+g20_bad() {
+  # args: label, expected message fragment, values-file body
+  printf '%s\n' "$3" > "$g20_vals"
+  if err=$(helm template t "$CHART" --set tierNode.enabled=true -f "$g20_vals" 2>&1 >/dev/null); then
+    echo "  FAIL [20]: $1 did not fail the render"; fail=1
+  elif ! printf '%s' "$err" | grep -qF "$2"; then
+    echo "  FAIL [20]: $1 failed, but did not name the reason (expected: $2)"; fail=1
+  else
+    echo "  ok   [20]: $1 fails the render, naming the reason"
+  fi
+}
+g20_bad "image without elevationUrl" "frontend.terrain.elevationUrl must be set" "$(g20_body "" "" ", tag: t")"
+g20_bad "elevationUrl without a 16-hex hash" "frontend.terrain.elevationUrl must be set" "$(g20_body '    elevationUrl: "/deployment-overlay/terrain/nothex/{z}/{x}/{y}.png"' "" ", tag: t")"
+g20_bad "waterUrl with a different hash" "frontend.terrain.waterUrl must carry the same bundle hash" "$(g20_body "    elevationUrl: \"$g20_ok\"" '    waterUrl: "/deployment-overlay/terrain/fedcba9876543210/water.json"' ", tag: t")"
+g20_bad "no tag and no digest" "frontend.terrain.image.tag or frontend.terrain.image.digest" "$(g20_body "    elevationUrl: \"$g20_ok\"" "" "")"
+rm -f "$g20_vals"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

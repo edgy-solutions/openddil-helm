@@ -1183,7 +1183,21 @@ frontend:
   #     imageryUrl: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
   #     credits:
   #       imagery: "Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
-  terrain: {}
+  #
+  # `image` is chart-only (never written into deployment.json): a content image
+  # holding a packed bundle's terrain/<hash>/ tree, copied by an initContainer
+  # into an emptyDir the frontend serves at /deployment-overlay/terrain. Empty
+  # repository = none. When set, elevationUrl must be
+  # /deployment-overlay/terrain/<16 hex>/... (that hash is the bundle hash, and
+  # every other terrain URL under that prefix must match), and tag or digest
+  # is required. A real area's image is location data: private registry only.
+  terrain:
+    image:
+      repository: ""
+      tag: ""
+      digest: ""
+      pullPolicy: IfNotPresent
+      sizeLimit: 1Gi
 
 # --- Per-link heartbeat and HQ link_status ----------------------------------
 # Every buffer monitor (projector-<edge>, tier-projector-<tier>) produces one

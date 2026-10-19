@@ -912,10 +912,19 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-frontend-%s" $tier.id) "root" $root) | nindent 8 }}
+      {{- $terrainImg := include "openddil.frontendTerrainImage" $root }}
+      {{- if $terrainImg }}
+      annotations:
+        openddil.io/terrain-image: {{ (fromJson $terrainImg).ref | quote }}
+      {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $terrainImg }}
+      initContainers:
+        {{- include "openddil.frontendTerrainInit" (fromJson $terrainImg) | nindent 8 }}
       {{- end }}
       containers:
         - name: frontend
@@ -968,11 +977,21 @@ spec:
             - name: branding
               mountPath: /usr/share/nginx/html/branding
               readOnly: true
+            {{- if $terrainImg }}
+            - name: terrain
+              mountPath: /usr/share/nginx/html/deployment-overlay/terrain
+              readOnly: true
+            {{- end }}
           ports:
             - containerPort: 80
           resources:
             {{- toYaml $root.Values.frontend.resources | nindent 12 }}
       volumes:
+        {{- if $terrainImg }}
+        - name: terrain
+          emptyDir:
+            sizeLimit: {{ (fromJson $terrainImg).size | quote }}
+        {{- end }}
         - name: deployment-config
           configMap:
             name: {{ $root.Release.Name }}-tier-frontend-config-{{ $tier.id }}

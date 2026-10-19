@@ -1145,14 +1145,25 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "frontend" "root" .) | nindent 8 }}
-      {{- if include "openddil.frontendDeploymentJsonWanted" . }}
+      {{- $terrainImg := include "openddil.frontendTerrainImage" . }}
+      {{- if or (include "openddil.frontendDeploymentJsonWanted" .) $terrainImg }}
       annotations:
+        {{- if include "openddil.frontendDeploymentJsonWanted" . }}
         checksum/deployment-config: {{ include "openddil.frontendDeploymentJson" . | sha256sum | quote }}
+        {{- end }}
+        {{- if $terrainImg }}
+        openddil.io/terrain-image: {{ (fromJson $terrainImg).ref | quote }}
+        {{- end }}
       {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $terrainImg }}
+      # Heavy overlay asset by image: copied into an emptyDir nginx serves.
+      initContainers:
+        {{- include "openddil.frontendTerrainInit" (fromJson $terrainImg) | nindent 8 }}
       {{- end }}
       containers:
         - name: frontend
@@ -1231,6 +1242,11 @@ spec:
               mountPath: /usr/share/nginx/html/deployment
               readOnly: true
             {{- end }}
+            {{- if $terrainImg }}
+            - name: terrain
+              mountPath: /usr/share/nginx/html/deployment-overlay/terrain
+              readOnly: true
+            {{- end }}
       volumes:
         - name: branding
           configMap:
@@ -1246,6 +1262,11 @@ spec:
         - name: deployment-config
           configMap:
             name: {{ .Release.Name }}-frontend-deployment-config
+        {{- end }}
+        {{- if $terrainImg }}
+        - name: terrain
+          emptyDir:
+            sizeLimit: {{ (fromJson $terrainImg).size | quote }}
         {{- end }}
 ---
 apiVersion: v1
