@@ -1845,13 +1845,128 @@ One definition for the hub and every tier.
 {{- end }}
 
 {{/*
+openddil.frontendTerrainJson -- the `terrain` object for a frontend deployment.json
+(the terrain source for both 3D maps), or nothing when frontend.terrain is empty
+or unset. Otherwise validates every key and emits the map as JSON; any problem
+fails the render with a message that starts with the field path. This mirrors the
+frontend's own validator (isValidDeploymentTerrain), which silently drops a bad
+block whole at runtime; failing the render instead is the point. Checks: unknown
+key (typo guard); basemap relief|imagery|licensed; reliefPalette sand|slate;
+network a boolean; elevationUrl/imageryUrl/patchImageryUrl a string holding {z},
+{x} and {y}; landUrl/lakesUrl/waterUrl a non-empty string; imageryMaxZoom and
+patchMaxZoom an integer 0-22 (YAML gives float64, --set gives int64; emitted as
+an integer); credits a map of elevation/imagery/patchImagery/land/water to
+non-empty strings; and any URL field that is remote (scheme or //) needs
+network: true. One definition for the hub and every tier.
+*/}}
+{{- define "openddil.frontendTerrainJson" -}}
+{{- $t := .Values.frontend.terrain | default dict -}}
+{{- if $t -}}
+{{- if not (kindIs "map" $t) -}}
+{{- fail (printf "frontend.terrain must be a map (got %s): set keys such as basemap and network, or leave it empty for the packaged defaults" (kindOf $t)) -}}
+{{- end -}}
+{{- $allowed := list "basemap" "network" "elevationUrl" "imageryUrl" "patchImageryUrl" "landUrl" "lakesUrl" "waterUrl" "imageryMaxZoom" "patchMaxZoom" "reliefPalette" "credits" -}}
+{{- range $k := keys $t | sortAlpha -}}
+{{- if not (has $k $allowed) -}}
+{{- fail (printf "frontend.terrain.%s is not a known key: check the spelling; allowed keys are %s" $k (join ", " $allowed)) -}}
+{{- end -}}
+{{- end -}}
+{{- $o := dict -}}
+{{- if hasKey $t "basemap" -}}
+{{- $v := get $t "basemap" -}}
+{{- if not (and (kindIs "string" $v) (has $v (list "relief" "imagery" "licensed"))) -}}
+{{- fail (printf "frontend.terrain.basemap must be one of relief, imagery, licensed (got %q): set one of those, or remove the key for the default (relief)" (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o "basemap" $v -}}
+{{- end -}}
+{{- if hasKey $t "reliefPalette" -}}
+{{- $v := get $t "reliefPalette" -}}
+{{- if not (and (kindIs "string" $v) (has $v (list "sand" "slate"))) -}}
+{{- fail (printf "frontend.terrain.reliefPalette must be one of sand, slate (got %q): set one of those, or remove the key for the default" (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o "reliefPalette" $v -}}
+{{- end -}}
+{{- if hasKey $t "network" -}}
+{{- $v := get $t "network" -}}
+{{- if not (kindIs "bool" $v) -}}
+{{- fail (printf "frontend.terrain.network must be a boolean (got %q): use true or false unquoted (with --set use network=true, not --set-string)" (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o "network" $v -}}
+{{- end -}}
+{{- range $k := list "elevationUrl" "imageryUrl" "patchImageryUrl" -}}
+{{- if hasKey $t $k -}}
+{{- $v := get $t $k -}}
+{{- if not (and (kindIs "string" $v) (contains "{z}" $v) (contains "{x}" $v) (contains "{y}" $v)) -}}
+{{- fail (printf "frontend.terrain.%s must be a string holding the {z}, {x} and {y} placeholders (got %q): write a tile template such as https://tiles.example.test/{z}/{x}/{y}.png" $k (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- range $k := list "landUrl" "lakesUrl" "waterUrl" -}}
+{{- if hasKey $t $k -}}
+{{- $v := get $t $k -}}
+{{- if not (and (kindIs "string" $v) (ne $v "")) -}}
+{{- fail (printf "frontend.terrain.%s must be a non-empty string (got %q): set a URL or a path under /deployment-overlay/, or remove the key" $k (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- range $k := list "imageryMaxZoom" "patchMaxZoom" -}}
+{{- if hasKey $t $k -}}
+{{- $v := get $t $k -}}
+{{- $ok := false -}}
+{{- $n := int64 0 -}}
+{{- if or (kindIs "int" $v) (kindIs "int64" $v) -}}
+{{- $n = int64 $v -}}
+{{- $ok = true -}}
+{{- else if kindIs "float64" $v -}}
+{{- if eq (floor $v) $v -}}
+{{- $n = int64 $v -}}
+{{- $ok = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and $ok (ge $n (int64 0)) (le $n (int64 22))) -}}
+{{- fail (printf "frontend.terrain.%s must be an integer from 0 to 22 (got %q): use a whole number such as 17" $k (toString $v)) -}}
+{{- end -}}
+{{- $_ := set $o $k $n -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $t "credits" -}}
+{{- $c := get $t "credits" -}}
+{{- if not (kindIs "map" $c) -}}
+{{- fail (printf "frontend.terrain.credits must be a map (got %s): use keys elevation, imagery, patchImagery, land, water" (kindOf $c)) -}}
+{{- end -}}
+{{- $ck := list "elevation" "imagery" "patchImagery" "land" "water" -}}
+{{- range $k := keys $c | sortAlpha -}}
+{{- if not (has $k $ck) -}}
+{{- fail (printf "frontend.terrain.credits.%s is not a known key: allowed keys are %s" $k (join ", " $ck)) -}}
+{{- end -}}
+{{- $v := get $c $k -}}
+{{- if not (and (kindIs "string" $v) (ne $v "")) -}}
+{{- fail (printf "frontend.terrain.credits.%s must be a non-empty string (got %q): write the attribution text, or remove the key" $k (toString $v)) -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set $o "credits" $c -}}
+{{- end -}}
+{{- range $k := list "elevationUrl" "imageryUrl" "patchImageryUrl" "landUrl" "lakesUrl" "waterUrl" -}}
+{{- if hasKey $o $k -}}
+{{- if and (regexMatch "^([a-zA-Z][a-zA-Z0-9+.-]*:)?//" (get $o $k)) (not (eq (get $o "network" | default false) true)) -}}
+{{- fail (printf "frontend.terrain.%s is a remote URL but frontend.terrain.network is not true: the frontend would ignore it and use the packaged default; set network: true or use a path under /deployment-overlay/" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $o -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
 deployment.json: any configured pane, FOB or HQ location, releasability, any HQ child
 link (whose shape places its header row), or any declared move-panel input
-(movement units/standards, effector declared load), or frontend.cortex.baseUrl. Empty otherwise.
+(movement units/standards, effector declared load), frontend.cortex.baseUrl, or frontend.terrain. Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) (include "openddil.frontendTerrainJson" .) }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -1907,6 +2022,9 @@ browser can tell "declared empty" from "an older chart".
 {{- end -}}
 {{- with include "openddil.frontendCortexJson" . -}}
 {{- $_ := set $d "cortex" (fromJson .) -}}
+{{- end -}}
+{{- with include "openddil.frontendTerrainJson" . -}}
+{{- $_ := set $d "terrain" (fromJson .) -}}
 {{- end -}}
 {{- toJson $d -}}
 {{- end -}}

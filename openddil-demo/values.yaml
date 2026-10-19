@@ -1153,6 +1153,26 @@ frontend:
   # coordinates:
   #   hq: {lat: 0.5, lon: 0.5, label: "HQ Alpha"}
   hq: {}
+  # Optional terrain source for both 3D maps. Rendered as `terrain` into every
+  # frontend's deployment.json (the hub and each tier) when set; omitted when
+  # empty. Empty means the packaged defaults: the relief basemap, no network,
+  # tiles under /deployment-overlay/terrain/. Allowed keys: basemap
+  # (relief|imagery|licensed), network (bool), elevationUrl, imageryUrl,
+  # patchImageryUrl (tile templates holding {z} {x} {y}), landUrl, lakesUrl,
+  # waterUrl (non-empty strings), imageryMaxZoom, patchMaxZoom (integers
+  # 0-22), reliefPalette (sand|slate), credits (map with any of elevation,
+  # imagery, patchImagery, land, water: non-empty strings). A remote URL
+  # (http://, https:// or //) needs network: true; network: true means the
+  # browser fetches tiles from the internet. Bad input fails the render.
+  # Example using public internet sources:
+  #   terrain:
+  #     basemap: licensed
+  #     network: true
+  #     elevationUrl: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+  #     imageryUrl: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  #     credits:
+  #       imagery: "Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+  terrain: {}
 
 # --- Per-link heartbeat and HQ link_status ----------------------------------
 # Every buffer monitor (projector-<edge>, tier-projector-<tier>) produces one

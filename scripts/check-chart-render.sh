@@ -2977,6 +2977,103 @@ else
 fi
 # (l) the default label alone creates no cortex key: covered by the unset check above.
 
+# ---------------------------------------------------------------------------
+echo "[18] frontend terrain"
+# g18_check MODE: reads a render on stdin (all of it, before deciding) and checks every deployment.json.
+#   MODE none    : no deployment.json carries `terrain`
+#   MODE example : every deployment.json carries exactly the Esri/AWS example object, n >= 2
+#   MODE int17   : every deployment.json has terrain.imageryMaxZoom == 17 as an integer, n >= 2
+#   MODE both    : every deployment.json carries cortex and terrain, n >= 2
+g18_check() {
+  "$PY" -c '
+import sys, yaml, json
+mode = sys.argv[1]
+want = {"basemap": "licensed", "network": True,
+        "elevationUrl": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+        "imageryUrl": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "credits": {"imagery": "Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community"}}
+n = 0
+bad = []
+for d in yaml.safe_load_all(sys.stdin):  # reads all of stdin before deciding
+    if not d or d.get("kind") != "ConfigMap":
+        continue
+    raw = (d.get("data") or {}).get("deployment.json")
+    if raw is None:
+        continue
+    n += 1
+    j = json.loads(raw)
+    t = j.get("terrain")
+    if mode == "none":
+        ok = "terrain" not in j
+    elif mode == "example":
+        ok = t == want
+    elif mode == "int17":
+        v = (t or {}).get("imageryMaxZoom")
+        ok = v == 17 and type(v) is int and "17.0" not in raw
+    else:
+        ok = isinstance(j.get("cortex"), dict) and isinstance(t, dict) and t.get("basemap") == "imagery"
+    if not ok:
+        bad.append(d["metadata"]["name"])
+if bad:
+    print("  FAIL [18]: " + mode + ": wrong terrain in " + ", ".join(bad)); sys.exit(1)
+if mode != "none" and n < 2:
+    print("  FAIL [18]: " + mode + ": saw " + str(n) + " deployment.json(s), want at least 2 (hub and a tier)"); sys.exit(1)
+print("  ok   [18]: " + mode + " holds in " + str(n) + " deployment.json(s)")' "$1"
+}
+g18_vals=$(mktemp)
+trap 'rm -f "$g18_vals"' EXIT
+# (a) unset: no deployment.json carries terrain.
+helm template t "$CHART" --set tierNode.enabled=true 2>/dev/null | g18_check none || { echo "  FAIL [18]: unset terrain appears in a deployment.json"; fail=1; }
+# (b) the example, network true: every deployment.json carries exactly it.
+cat > "$g18_vals" <<'YAML'
+frontend:
+  terrain:
+    basemap: licensed
+    network: true
+    elevationUrl: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+    imageryUrl: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    credits:
+      imagery: "Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+YAML
+helm template t "$CHART" --set tierNode.enabled=true -f "$g18_vals" 2>/dev/null | g18_check example || { echo "  FAIL [18]: example terrain did not reach every deployment.json"; fail=1; }
+# (c) terrain alone renders the hub deployment.json ConfigMap.
+if helm template t "$CHART" --set tierNode.enabled=true --set frontend.terrain.basemap=imagery 2>/dev/null \
+   | "$PY" -c '
+import sys, yaml
+docs = list(yaml.safe_load_all(sys.stdin))  # read it all: an early exit SIGPIPEs helm, and pipefail fails the case
+ok = any(d and d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config") for d in docs)
+sys.exit(0 if ok else 1)'; then
+  echo "  ok   [18]: terrain alone (nothing else set) still renders the hub deployment.json ConfigMap"
+else
+  echo "  FAIL [18]: terrain alone did not render the hub deployment.json ConfigMap"; fail=1
+fi
+# (d) a YAML number renders as an integer (no 17.0).
+printf 'frontend:\n  terrain:\n    imageryMaxZoom: 17\n' > "$g18_vals"
+helm template t "$CHART" --set tierNode.enabled=true -f "$g18_vals" 2>/dev/null | g18_check int17 || { echo "  FAIL [18]: imageryMaxZoom 17 not rendered as integer 17"; fail=1; }
+# (e) bad input fails the render, naming the reason.
+g18_bad() {
+  # args: label, expected message fragment, values-file body
+  printf '%s\n' "$3" > "$g18_vals"
+  if err=$(helm template t "$CHART" --set tierNode.enabled=true -f "$g18_vals" 2>&1 >/dev/null); then
+    echo "  FAIL [18]: $1 did not fail the render"; fail=1
+  elif ! printf '%s' "$err" | grep -qF "$2"; then
+    echo "  FAIL [18]: $1 failed, but did not name the reason (expected: $2)"; fail=1
+  else
+    echo "  ok   [18]: $1 fails the render, naming the reason"
+  fi
+}
+g18_bad "basemap: satellite" "frontend.terrain.basemap must be one of" $'frontend:\n  terrain:\n    basemap: satellite'
+g18_bad "network: \"yes\"" "frontend.terrain.network must be a boolean" $'frontend:\n  terrain:\n    network: "yes"'
+g18_bad "remote imageryUrl without network" "frontend.terrain.imageryUrl is a remote URL but frontend.terrain.network is not true" $'frontend:\n  terrain:\n    imageryUrl: "https://tiles.example.test/{z}/{x}/{y}.png"'
+g18_bad "elevationUrl missing {y}" "frontend.terrain.elevationUrl must be a string holding" $'frontend:\n  terrain:\n    elevationUrl: "/deployment-overlay/terrain/{z}/{x}.png"'
+g18_bad "unknown key basemapp" "frontend.terrain.basemapp is not a known key" $'frontend:\n  terrain:\n    basemapp: relief'
+g18_bad "empty credits.imagery" "frontend.terrain.credits.imagery must be a non-empty string" $'frontend:\n  terrain:\n    credits:\n      imagery: ""'
+g18_bad "imageryMaxZoom: 23" "frontend.terrain.imageryMaxZoom must be an integer" $'frontend:\n  terrain:\n    imageryMaxZoom: 23'
+# (f) cortex and terrain together: both keys, valid JSON, everywhere.
+printf 'frontend:\n  cortex:\n    baseUrl: https://cortex.example.test\n  terrain:\n    basemap: imagery\n' > "$g18_vals"
+helm template t "$CHART" --set tierNode.enabled=true -f "$g18_vals" 2>/dev/null | g18_check both || { echo "  FAIL [18]: cortex + terrain together"; fail=1; }
+rm -f "$g18_vals"
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

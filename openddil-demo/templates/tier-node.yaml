@@ -1027,10 +1027,11 @@ data:
                different value. */}}
         "parent": {{ with $tier.parent }}{{ . | quote }}{{ else }}null{{ end }}
       },
-      {{- /* Same two keys as the hub's deployment.json, one definition. */}}
+      {{- /* Same keys as the hub's deployment.json (effectors, movement, and cortex/terrain when set), one definition. */}}
       "effectors": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).effectors | toJson }},
       "movement": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).movement | toJson }}{{ with include "openddil.frontendCortexJson" $root }},
-      "cortex": {{ . }}{{ end }}
+      "cortex": {{ . }}{{ end }}{{ with include "openddil.frontendTerrainJson" $root }},
+      "terrain": {{ . }}{{ end }}
     }
 {{- if $root.Values.releasability.enabled }}
 ---
