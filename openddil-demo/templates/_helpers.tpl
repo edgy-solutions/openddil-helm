@@ -2817,3 +2817,74 @@ is readable.
 {{- if $arr }}{{ toJson $arr }}{{ end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Electric storage (hub + every tier). Electric keeps shape logs and its KV under
+ELECTRIC_STORAGE_DIR; without a volume they count as the pod's ephemeral storage
+(evictions) and every restart re-snapshots every client. Args: dict "root" "name"
+(the claim name, <release>-...-data). emptyDir is the NFS escape hatch: the shape
+index is SQLite and needs POSIX locks.
+*/}}
+{{- define "openddil.electricPvcActive" -}}
+{{- if and .Values.electric.persistence.enabled (not .Values.electric.persistence.useEmptyDir) }}true{{ end -}}
+{{- end }}
+
+{{- define "openddil.electricEnv" -}}
+- name: ELECTRIC_STORAGE_DIR
+  value: /app/persistent
+{{- end }}
+
+{{- define "openddil.electricMount" -}}
+{{- if .Values.electric.persistence.enabled }}
+volumeMounts:
+  - name: electric-data
+    mountPath: /app/persistent
+{{- end }}
+{{- end }}
+
+{{- define "openddil.electricVolumes" -}}
+{{- $p := .root.Values.electric.persistence }}
+{{- if $p.enabled }}
+volumes:
+  - name: electric-data
+    {{- if $p.useEmptyDir }}
+    emptyDir:
+      sizeLimit: {{ $p.emptyDirSizeLimit }}
+    {{- else }}
+    persistentVolumeClaim:
+      claimName: {{ .name }}
+    {{- end }}
+{{- end }}
+{{- end }}
+
+{{/* An RWO claim cannot be held by the old and the new pod at once. The null
+clears the defaulted rollingUpdate on a live Deployment, which Recreate refuses. */}}
+{{- define "openddil.electricStrategy" -}}
+{{- if include "openddil.electricPvcActive" . }}
+strategy:
+  type: Recreate
+  rollingUpdate: null
+{{- end }}
+{{- end }}
+
+{{- define "openddil.electricPvc" -}}
+{{- if include "openddil.electricPvcActive" .root }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "openddil.labels" .root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" .component "root" .root) | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  {{- with (.root.Values.electric.persistence.storageClass | default .root.Values.persistence.storageClass) }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .root.Values.electric.persistence.size }}
+---
+{{ end }}
+{{- end }}

@@ -308,6 +308,17 @@ electric:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
   port: 5133
+  # Shape logs and Electric's KV live under /app/persistent. Without a volume
+  # they count as the pod's ephemeral storage (evictions) and every restart
+  # makes every client re-snapshot. One claim per Electric (hub + each tier).
+  persistence:
+    enabled: true            # false = container filesystem, as before 0.1.151
+    size: 5Gi
+    storageClass: ""         # empty -> persistence.storageClass -> cluster default
+    useEmptyDir: false       # NFS-only clusters: the shape index is SQLite, which
+                             # needs POSIX locks NFS does not give (same reason as
+                             # persistence.restateUseEmptyDir)
+    emptyDirSizeLimit: 5Gi   # applied when useEmptyDir is true
 
 # --- Restate (server + hub projector) ---------------------------------------
 restate:

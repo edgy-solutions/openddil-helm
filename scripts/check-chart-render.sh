@@ -3074,6 +3074,61 @@ printf 'frontend:\n  cortex:\n    baseUrl: https://cortex.example.test\n  terrai
 helm template t "$CHART" --set tierNode.enabled=true -f "$g18_vals" 2>/dev/null | g18_check both || { echo "  FAIL [18]: cortex + terrain together"; fail=1; }
 rm -f "$g18_vals"
 
+echo "[19] electric persistence"
+# Every Electric Deployment (hub + each tier) against its claim. Mode: pvc[:class] | empty | off.
+g19_check() {
+  "$PY" -c '
+import sys, yaml
+mode = sys.argv[1]
+want_class = mode.split(":", 1)[1] if ":" in mode else None
+mode = mode.split(":", 1)[0]
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]  # read it all: an early exit SIGPIPEs helm
+def electric(d):
+    return d["kind"] == "Deployment" and d["metadata"]["name"].split("-", 1)[-1].find("electric") >= 0 \
+        and any(c["name"] == "electric" for c in d["spec"]["template"]["spec"]["containers"])
+deps = [d for d in docs if electric(d)]
+pvcs = {d["metadata"]["name"]: d for d in docs if d["kind"] == "PersistentVolumeClaim" and "electric" in d["metadata"]["name"]}
+if len(deps) < 2:
+    print("  FAIL [19]: " + str(len(deps)) + " Electric Deployment(s), want hub + at least one tier"); sys.exit(1)
+if mode == "pvc" and len(pvcs) != len(deps):
+    print("  FAIL [19]: " + str(len(pvcs)) + " Electric PVC(s) for " + str(len(deps)) + " Electric Deployment(s)"); sys.exit(1)
+if mode != "pvc" and pvcs:
+    print("  FAIL [19]: " + mode + " rendered Electric PVC(s): " + ",".join(pvcs)); sys.exit(1)
+for d in deps:
+    n = d["metadata"]["name"]
+    pod = d["spec"]["template"]["spec"]
+    c = [c for c in pod["containers"] if c["name"] == "electric"][0]
+    env = {e["name"]: e.get("value") for e in c.get("env", [])}
+    mounts = [m for m in c.get("volumeMounts", []) if m["mountPath"] == "/app/persistent"]
+    vols = {v["name"]: v for v in pod.get("volumes", [])}
+    rec = d["spec"].get("strategy", {}).get("type") == "Recreate"
+    if env.get("ELECTRIC_STORAGE_DIR") != "/app/persistent":
+        print("  FAIL [19]: " + n + " ELECTRIC_STORAGE_DIR=" + repr(env.get("ELECTRIC_STORAGE_DIR"))); sys.exit(1)
+    if mode == "off":
+        if mounts or rec:
+            print("  FAIL [19]: " + n + " mounts /app/persistent or is Recreate while persistence is off"); sys.exit(1)
+        continue
+    if len(mounts) != 1 or mounts[0]["name"] not in vols:
+        print("  FAIL [19]: " + n + " has no /app/persistent mount bound to a volume"); sys.exit(1)
+    v = vols[mounts[0]["name"]]
+    if mode == "empty":
+        if "emptyDir" not in v or not v["emptyDir"].get("sizeLimit") or rec:
+            print("  FAIL [19]: " + n + " want emptyDir with sizeLimit and no Recreate, got " + repr(v) + " recreate=" + str(rec)); sys.exit(1)
+    else:
+        claim = v.get("persistentVolumeClaim", {}).get("claimName")
+        if claim not in pvcs or not rec:
+            print("  FAIL [19]: " + n + " claim=" + repr(claim) + " (rendered: " + ",".join(pvcs) + ") recreate=" + str(rec)); sys.exit(1)
+        if pvcs[claim]["spec"].get("storageClassName") != want_class:
+            print("  FAIL [19]: " + claim + " storageClassName=" + repr(pvcs[claim]["spec"].get("storageClassName")) + ", want " + repr(want_class)); sys.exit(1)
+print("  ok   [19]: " + str(len(deps)) + " Electric Deployment(s), " + str(len(pvcs)) + " PVC(s), mode " + sys.argv[1])
+' "$1"
+}
+helm template t "$CHART" --set tierNode.enabled=true 2>/dev/null | g19_check pvc || { echo "  FAIL [19]: default"; fail=1; }
+helm template t "$CHART" --set tierNode.enabled=true --set electric.persistence.storageClass=fast 2>/dev/null | g19_check pvc:fast || { echo "  FAIL [19]: electric storageClass"; fail=1; }
+helm template t "$CHART" --set tierNode.enabled=true --set persistence.storageClass=slow 2>/dev/null | g19_check pvc:slow || { echo "  FAIL [19]: persistence storageClass fallback"; fail=1; }
+helm template t "$CHART" --set tierNode.enabled=true --set electric.persistence.useEmptyDir=true 2>/dev/null | g19_check empty || { echo "  FAIL [19]: useEmptyDir"; fail=1; }
+helm template t "$CHART" --set tierNode.enabled=true --set electric.persistence.enabled=false 2>/dev/null | g19_check off || { echo "  FAIL [19]: enabled=false"; fail=1; }
+
 echo
 [ "$fail" -eq 0 ] && echo "chart render guards: clean" || echo "chart render guards: FAILED"
 exit "$fail"

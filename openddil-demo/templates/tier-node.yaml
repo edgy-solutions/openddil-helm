@@ -822,6 +822,7 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 4 }}
 ---
+{{ include "openddil.electricPvc" (dict "root" $root "name" (printf "%s-tier-electric-%s-data" $root.Release.Name $tier.id) "component" (printf "tier-electric-%s" $tier.id)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -831,6 +832,7 @@ metadata:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 4 }}
 spec:
   replicas: 1
+  {{- include "openddil.electricStrategy" $root | nindent 2 }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" (printf "tier-electric-%s" $tier.id) "root" $root) | nindent 6 }}
@@ -857,10 +859,13 @@ spec:
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- include "openddil.electricEnv" $root | nindent 12 }}
           ports:
             - containerPort: 3000
           resources:
             {{- toYaml $root.Values.electric.resources | nindent 12 }}
+          {{- include "openddil.electricMount" $root | nindent 10 }}
+      {{- include "openddil.electricVolumes" (dict "root" $root "name" (printf "%s-tier-electric-%s-data" $root.Release.Name $tier.id)) | nindent 6 }}
 
 ---
 # ===========================================================================
