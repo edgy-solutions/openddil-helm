@@ -30,6 +30,24 @@ openddil-helm/
 - An ingress controller (NGINX, Traefik, etc.) if `ingress.enabled=true`
 - Pull access to `ghcr.io/edgy-solutions/openddil/*` (public, or via
   imagePullSecret if pulling from a mirror)
+- **Image digests, for a reproducible install.** The chart's defaults are
+  `:latest` tags, so installing the same chart version twice can run
+  different code. Pin every image by digest in a values file, then check
+  it with `scripts/check-image-pins.sh ./openddil-demo -n openddil -f
+  <your values files>`. That check names every image the render leaves unpinned.
+- **The TLS Secret, before `helm install`, when `ingress.tls` is set.** The
+  chart never creates it. Create the namespace, then the Secret
+  (`kubectl -n openddil create secret tls <ingress.tls[].secretName>
+  --cert=... --key=...`), then install. The certificate must cover
+  `ingress.host` and every `publicOrigin` host (`releasability.publicOrigin`,
+  and each `edges[]`/`regions[]` entry that sets one). A wildcard covers all
+  of them.
+- **DNS for `ingress.host` and every `publicOrigin` host, both from browsers
+  AND from inside the cluster.** Each `publicOrigin` is also the OIDC issuer
+  and redirect origin, and in-cluster components call it by name. A record
+  that resolves only on operators' machines (an `/etc/hosts` line) is
+  enough for the browser but not for the pods. Point every one of these hosts
+  at the ingress controller.
 
 ## Image-build flow (where do the images come from?)
 

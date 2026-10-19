@@ -522,6 +522,29 @@ rung (iii)/(iv) evidence.
 cd openddil-customer-bundle-example/tools/dis-sim && ./deploy.sh $NS
 ```
 
+**Retarget the two generators to your edges.** `k8s/dis-sim.yaml` aims at
+the example bundle's own edge ids (`openddil-sensor-ingest-edge-<site>`), not
+the chart's. With the chart's default `edges:` (`edge-01`, `edge-02`), those
+Services do not exist, so every PDU is dropped and no asset appears. List the
+two generators, then point each at one of your `edges[]` entries, using its id
+and `udpPort`:
+
+```bash
+kubectl -n $NS get deploy -l app.kubernetes.io/name=dis-sim -o name
+# then, for the first and second generator listed:
+kubectl -n $NS set env deploy/<first-generator> \
+  DIS_TARGET_HOST=openddil-sensor-ingest-edge-01 DIS_TARGET_PORT=62040
+kubectl -n $NS set env deploy/<second-generator> \
+  DIS_TARGET_HOST=openddil-sensor-ingest-edge-02 DIS_TARGET_PORT=62041
+```
+
+To confirm, the sensor-ingest log at each edge shows the received and decoded
+counts rising with 0 errors. The generator emits EntityState only: no Fire
+or Detonation. So on a generator-only install, `effector-events` and
+`munition-tracks` stay at watermark 0 at every tier, and the logistics-sim
+publishes 0 parts-availability records, because no generator entity matches a
+shipped profile.
+
 > **`rpk produce` onto `raw-sensor-stream` is a debugging tool for one stage,
 > NOT a proof path.** It skips decode and mapping and requires reproducing an
 > internal wire shape by inspection. Entering at the DIS socket keeps the

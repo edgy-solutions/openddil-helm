@@ -28,7 +28,7 @@ Frontend (port-forward):
 
 {{- end }}
 
-{{- if include "openddil.linkControlEnabled" . }}
+{{ if include "openddil.linkControlEnabled" . -}}
 DDIL sever (toxiproxy):
   One link per uplink: each child tier's uplink to its parent is its own
   toxiproxy proxy, uplink-<child id>. A tier's screen toggles its own
