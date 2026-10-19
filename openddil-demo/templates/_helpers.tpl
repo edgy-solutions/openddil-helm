@@ -2019,12 +2019,12 @@ copies the image's /terrain into the emptyDir mounted at /dst.
 
 {{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
-deployment.json: any configured pane, FOB or HQ location, releasability, any HQ child
+deployment.json: any configured pane, releasability, any HQ child
 link (whose shape places its header row), or any declared move-panel input
 (movement units/standards, effector declared load), frontend.cortex.baseUrl, or frontend.terrain. Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.frontend.fobs .Values.frontend.hq .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) (include "openddil.frontendTerrainJson" .) }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) (include "openddil.frontendTerrainJson" .) }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -2052,21 +2052,6 @@ browser can tell "declared empty" from "an older chart".
 {{- end }}
 {{- if $declaredEdges -}}
 {{- $_ := set $d "edges" $declaredEdges -}}
-{{- end -}}
-{{- if .Values.frontend.fobs -}}
-{{- $_ := set $d "fobs" .Values.frontend.fobs -}}
-{{- end -}}
-{{- /* Optional HQ location. Declared inputs are checked here, not left for the
-       browser to drop: a half-written hq would silently draw HQ at the FOB
-       centre. */ -}}
-{{- if .Values.frontend.hq -}}
-{{- range $k := list "lat" "lon" -}}
-{{- $v := get $.Values.frontend.hq $k -}}
-{{- if not (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) -}}
-{{- fail (printf "frontend.hq.%s must be a number (got %s): set frontend.hq to {lat: <number>, lon: <number>, label: <optional text>}, or leave frontend.hq empty to draw HQ at the centre of the FOBs" $k (ternary "nothing" (kindOf $v) (eq (kindOf $v) "invalid"))) -}}
-{{- end -}}
-{{- end -}}
-{{- $_ := set $d "hq" .Values.frontend.hq -}}
 {{- end -}}
 {{- /* Each direct child's SHAPE (not its name): a child that rolls up sits on
        the hub->HQ segment, a leaf child on a direct edge->HQ line. */ -}}
@@ -2945,4 +2930,69 @@ spec:
       storage: {{ .root.Values.electric.persistence.size }}
 ---
 {{ end }}
+{{- end }}
+
+{{/*
+openddil.validateSiteTable -- the site table (edge-assignment.yaml) is the one
+source of positions for every map. The retired frontend values fail the
+render with a pointer to the value that replaced them, so a deployment that
+still sets them learns it at install rather than seeing its map quietly
+ignore them. edgeAssignment.configMap must be a ConfigMap name or empty.
+*/}}
+{{- define "openddil.validateSiteTable" -}}
+{{- range $k := list "fobs" "hq" -}}
+{{- if hasKey $.Values.frontend $k -}}
+{{- if get $.Values.frontend $k -}}
+{{- fail (printf "frontend.%s is retired: every map now reads FOB, region and HQ positions from the site table. Put the rows in edge-assignment.yaml (fobs: and tier_sites:; schema in the example customer bundle's edge-assignment/README.md), create a ConfigMap holding it, set edgeAssignment.configMap to that ConfigMap's name, and remove frontend.%s" $k $k) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "string" .Values.edgeAssignment.configMap) -}}
+{{- fail (printf "edgeAssignment.configMap must be a ConfigMap name (a string), or empty for no site table (got %s)" (kindOf .Values.edgeAssignment.configMap)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The site table's mount pieces, one definition each so the six pods that mount
+it cannot drift. All take the root context and render nothing when
+edgeAssignment.configMap is empty. Backends (asset-registry, every projector)
+get the file at /etc/openddil/edge-assignment/ and EDGE_ASSIGNMENT_CONFIG;
+frontends serve it at /edge-assignment/edge-assignment.yaml. No subPath, so a
+ConfigMap edit reaches the frontends without a restart (subPath mounts never
+update). The volume is not optional: a named site table that is missing
+holds the pod in ContainerCreating rather than letting assignment fall back
+and the maps draw nothing without a word.
+*/}}
+{{- define "openddil.edgeAssignmentEnv" -}}
+{{- if .Values.edgeAssignment.configMap }}
+- name: EDGE_ASSIGNMENT_CONFIG
+  value: /etc/openddil/edge-assignment/edge-assignment.yaml
+{{- end }}
+{{- end }}
+
+{{- define "openddil.edgeAssignmentBackendMount" -}}
+{{- if .Values.edgeAssignment.configMap }}
+- name: edge-assignment
+  mountPath: /etc/openddil/edge-assignment
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "openddil.edgeAssignmentFrontendMount" -}}
+{{- if .Values.edgeAssignment.configMap }}
+- name: edge-assignment
+  mountPath: /usr/share/nginx/html/edge-assignment
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "openddil.edgeAssignmentVolume" -}}
+{{- if .Values.edgeAssignment.configMap }}
+- name: edge-assignment
+  configMap:
+    name: {{ .Values.edgeAssignment.configMap }}
+    items:
+      - key: edge-assignment.yaml
+        path: edge-assignment.yaml
+{{- end }}
 {{- end }}

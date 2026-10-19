@@ -15,6 +15,7 @@
 */}}
 {{- include "openddil.validateEdgeAttachment" . }}
 {{- include "openddil.validateLinkStatus" . }}
+{{- include "openddil.validateSiteTable" . }}
 {{- $hqBroker := printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort) }}
 {{/*
 THE DETECTION CUTOVER — UD-10, and ADR-0026's "coupled interim mechanisms
@@ -621,9 +622,9 @@ spec:
 # any future static-assignment input lands via a separate admin write
 # path, not a second Faust pod.
 #
-# Bundle init brings in /proto (contracts/gen/python) and
-# /etc/openddil/edge-assignment/edge-assignment.yaml (the FOB list +
-# strategy chain, same file the projector reads).
+# Bundle init brings in /proto (contracts/gen/python). The site table
+# (edge-assignment.yaml: FOB rows + strategy chain, the same file every
+# projector and every map reads) is mounted from edgeAssignment.configMap.
 #
 # Depends on:
 #   - postgres-schema-init having applied the 20260604202813 migration
@@ -694,25 +695,14 @@ spec:
               value: "telemetry-latest-state"
             - name: ASSET_REGISTRY_OUTPUT_TOPIC
               value: {{ .Values.assetRegistry.outputTopic | quote }}
-            # EDGE_ASSIGNMENT_CONFIG is intentionally NOT set in the OSS
-            # chart. The OSS chart has no embedded FOB list -- without an
-            # overlay, every asset assigns to "unspecified" via the
-            # service's built-in fallback (still useful: divergence
-            # tracking + asset_id->edge cache for downstream consumers).
-            # Customer overlays patch this in via the same post-install
-            # hook pattern they use to point the projectors at their
-            # FOB file:
-            #   kubectl patch deploy/<release>-asset-registry-service \
-            #     --type strategic -p '{"spec":{"template":{"spec":{
-            #       "containers":[{"name":"asset-registry-service",
-            #         "volumeMounts":[{"name":"edge-assignment",
-            #           "mountPath":"/etc/openddil/edge-assignment"}],
-            #         "env":[{"name":"EDGE_ASSIGNMENT_CONFIG",
-            #           "value":"/etc/openddil/edge-assignment/edge-assignment.yaml"}]
-            #       }],
-            #       "volumes":[{"name":"edge-assignment","configMap":
-            #         {"name":"<slug>-edge-assignment"}}]
-            #     }}}}'
+            # The site table, when the deployment supplies one
+            # (edgeAssignment.configMap). Without it every asset assigns to
+            # "unspecified" via the service's built-in fallback (still
+            # useful: divergence tracking + asset_id->edge cache for
+            # downstream consumers).
+            {{- if .Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentEnv" . | nindent 12 }}
+            {{- end }}
             - name: ASSET_REGISTRY_WEB_PORT
               value: {{ .Values.assetRegistry.webPort | quote }}
             - name: PYTHONPATH
@@ -736,11 +726,17 @@ spec:
             - name: bundle-shared
               mountPath: /proto
               subPath: proto
+            {{- if .Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentBackendMount" . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.assetRegistry.resources | nindent 12 }}
       volumes:
         - name: bundle-shared
           emptyDir: {}
+        {{- if .Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -1105,6 +1101,9 @@ spec:
               value: {{ .Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ .Values.munitionTracks.silenceSeconds | quote }}
+            {{- if .Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentEnv" . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.projector.port }}
@@ -1114,6 +1113,9 @@ spec:
               subPath: proto
             - name: effector-declared-load
               mountPath: /etc/openddil/effector-declared-load
+            {{- if .Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentBackendMount" . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.projector.resources | nindent 12 }}
       volumes:
@@ -1122,6 +1124,9 @@ spec:
         - name: effector-declared-load
           configMap:
             name: {{ .Release.Name }}-effector-declared-load
+        {{- if .Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" . | nindent 8 }}
+        {{- end }}
 ---
 # ===========================================================================
 # frontend
@@ -1247,11 +1252,19 @@ spec:
               mountPath: /usr/share/nginx/html/deployment-overlay/terrain
               readOnly: true
             {{- end }}
+            # The site table, served at /edge-assignment/edge-assignment.yaml:
+            # every map's only source of FOB, region and HQ positions.
+            {{- if .Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentFrontendMount" . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: branding
           configMap:
             name: {{ .Values.frontend.branding.configMap | default (printf "%s-branding" .Release.Name) }}
             optional: true
+        {{- if .Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.frontend.figures.configMap }}
         - name: figures
           configMap:
@@ -1291,7 +1304,7 @@ spec:
 # on .Values.egress.destination. Without releasability there is no pane and
 # the key is absent.
 # Hub-only -- a tier frontend (tier-node.yaml's own deployment.json) carries
-# tier shape, never this. Minimal on purpose: no title/tier/fobs keys, so
+# tier shape, never this. Minimal on purpose: no title/tier keys, so
 # every other field the app reads from deployment.json keeps its built-in
 # default.
 apiVersion: v1

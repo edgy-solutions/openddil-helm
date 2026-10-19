@@ -1037,6 +1037,9 @@ spec:
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
+            {{- if $root.Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentEnv" $root | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ $root.Values.projector.port }}
@@ -1046,6 +1049,9 @@ spec:
               subPath: proto
             - name: effector-declared-load
               mountPath: /etc/openddil/effector-declared-load
+            {{- if $root.Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentBackendMount" $root | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml $root.Values.projector.resources | nindent 12 }}
       volumes:
@@ -1054,6 +1060,9 @@ spec:
         - name: effector-declared-load
           configMap:
             name: {{ $root.Release.Name }}-effector-declared-load-{{ $edge.id }}
+        {{- if $root.Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" $root | nindent 8 }}
+        {{- end }}
 {{- end }}
 ---
 {{- end }}

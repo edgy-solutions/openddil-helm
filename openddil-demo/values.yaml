@@ -951,6 +951,23 @@ assetRegistry:
   # chart's "explicit topic provisioning" stance).
   outputTopic: asset-registry-events
 
+# The site table: one file, edge-assignment.yaml, saying where every FOB,
+# region and HQ sits and how assets are assigned to edges. Supplied by the
+# deployment overlay as a ConfigMap (key edge-assignment.yaml) created before
+# install; this value names it. The chart mounts it read-only into
+# asset-registry, projector-hq, every edge projector and every tier projector
+# (at /etc/openddil/edge-assignment/, with EDGE_ASSIGNMENT_CONFIG pointing at
+# the file), and into the hub frontend and every tier frontend, which serve it
+# at /edge-assignment/edge-assignment.yaml. Every map takes its positions from
+# that file and nowhere else. Schema: the example customer bundle's
+# edge-assignment/README.md.
+# The backends read the file at startup; the frontends serve the live mount,
+# so an edit to the ConfigMap reaches the maps on reload without a restart.
+# Empty (the default): nothing is mounted, every asset takes the built-in
+# fallback assignment, and the maps draw no sites.
+edgeAssignment:
+  configMap: ""
+
 # openddil-logistics-sim -- per-element sub-component telemetry simulator
 # for the maintainer-tier 3D drill-down. Multi-profile: MRAD first;
 # LTAMDS / Patriot / future asset types land as additional entries in
@@ -1144,26 +1161,10 @@ frontend:
   # and is passed through as opaque JSON into the hub frontend's
   # deployment.json. Empty by default -- no panes, no ConfigMap, no mount.
   releasedRecordsPanes: []
-  # Forward operating bases that PLACE tiers on the HQ theater. Rendered
-  # into deployment.json as `fobs` when non-empty; the key is omitted when
-  # empty. Each entry is {edge_id, region_id, lat, lon, label?}, where
-  # edge_id is the id of the tier (edge or region) the FOB places; that
-  # tier's link_status row paints its link. A FOB whose edge_id is not a tier
-  # is not drawn. A FOB may name a region tier to place it; a region with no
-  # FOB is drawn at the mean of its drawn children. The tier tree itself is
-  # rendered as `tiers` ({id, parent, hasChildren}). Placeholder shape,
-  # synthetic coordinates:
-  #   fobs:
-  #     - {edge_id: edge-01, region_id: region-east, lat: 0.0, lon: 0.0, label: "FOB One"}
-  fobs: []
-  # Optional location of HQ on the HQ theater: {lat, lon, label?}. Rendered
-  # into the hub deployment.json as `hq` when set; the key is omitted when
-  # empty. lat and lon are required numbers when it is set (the render fails
-  # otherwise). Absent means HQ is drawn at the centre of the FOBs; the
-  # theater's framing is the same either way. Placeholder shape, synthetic
-  # coordinates:
-  #   hq: {lat: 0.5, lon: 0.5, label: "HQ Alpha"}
-  hq: {}
+  # Site positions (FOBs, region and HQ sites) are not frontend values: every
+  # map reads them from the site table named by edgeAssignment.configMap.
+  # frontend.fobs and frontend.hq are retired; setting either fails the
+  # render with a pointer there.
   # Optional terrain source for both 3D maps. Rendered as `terrain` into every
   # frontend's deployment.json (the hub and each tier) when set; omitted when
   # empty. Empty means the packaged defaults: the relief basemap, no network,

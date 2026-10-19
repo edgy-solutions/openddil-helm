@@ -779,6 +779,9 @@ spec:
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
+            {{- if $root.Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentEnv" $root | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml $root.Values.projector.resources | nindent 12 }}
           volumeMounts:
@@ -789,6 +792,9 @@ spec:
               subPath: proto
             - name: effector-declared-load
               mountPath: /etc/openddil/effector-declared-load
+            {{- if $root.Values.edgeAssignment.configMap }}
+            {{- include "openddil.edgeAssignmentBackendMount" $root | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tier-projector-config
           configMap:
@@ -798,6 +804,9 @@ spec:
         - name: effector-declared-load
           configMap:
             name: {{ $root.Release.Name }}-tier-effector-declared-load-{{ $tier.id }}
+        {{- if $root.Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" $root | nindent 8 }}
+        {{- end }}
 
 ---
 # ===========================================================================
@@ -982,6 +991,11 @@ spec:
               mountPath: /usr/share/nginx/html/deployment-overlay/terrain
               readOnly: true
             {{- end }}
+            {{- if $root.Values.edgeAssignment.configMap }}
+            # The site table, the same file the hub serves: this tier's map
+            # draws its FOBs and its own site from it, and from nothing else.
+            {{- include "openddil.edgeAssignmentFrontendMount" $root | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 80
           resources:
@@ -999,6 +1013,9 @@ spec:
           configMap:
             name: {{ $root.Values.frontend.branding.configMap | default (printf "%s-branding" $root.Release.Name) }}
             optional: true
+        {{- if $root.Values.edgeAssignment.configMap }}
+        {{- include "openddil.edgeAssignmentVolume" $root | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1009,7 +1026,8 @@ metadata:
 data:
   # THE TIER PARAMETER. Fetched by the app at startup from
   # /deployment/deployment.json — the same channel that already carried
-  # branding and FOB topology, which is why this needed no new mechanism.
+  # branding, which is why this needed no new mechanism. (Site positions
+  # are not here: they come from the site table, edgeAssignment.configMap.)
   #
   # SHAPE, NOT NAME. Nothing downstream branches on `id`: `has_children` and
   # `parent` select the panels, so a fourth tier resolves by shape with no

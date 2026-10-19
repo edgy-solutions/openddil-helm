@@ -505,34 +505,87 @@ if leaked:
 print(f"  ok   [7e]: hub carries releasedRecordsPanes; {len(tiers)} tier-frontend-config(s) do not")
 ' || fail=1
 
-# 7hq: frontend.hq reaches the hub's deployment.json as `hq` when set, is
-# absent when unset, and a half-written value fails the render.
-render --set-json 'frontend.hq={"lat":0.5,"lon":0.5,"label":"HQ Alpha"}' | "$PY" -c '
-import sys, yaml, json
+# 7site: the site table (edgeAssignment.configMap) is every map's one source of
+# positions. Set, it mounts into asset-registry, projector-hq, every edge
+# projector, every tier projector, the hub frontend and every tier frontend
+# (backends with EDGE_ASSIGNMENT_CONFIG; no subPath, so a ConfigMap edit
+# reaches the frontends live). Unset, nothing mounts and the hub
+# deployment.json carries no positions. The retired frontend.fobs and
+# frontend.hq fail the render with a pointer to the new value.
+site_check='
+import sys, yaml
+mode, want_names = sys.argv[1], set(sys.argv[2].split(","))
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-hub = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
-if len(hub) != 1:
-    print("  FAIL [7hq]: want one hub frontend-deployment-config, got %d" % len(hub)); sys.exit(1)
-got = json.loads(hub[0]["data"]["deployment.json"]).get("hq")
-if got != {"lat": 0.5, "lon": 0.5, "label": "HQ Alpha"}:
-    print("  FAIL [7hq]: hub deployment.json hq = " + repr(got)); sys.exit(1)
-print("  ok   [7hq]: frontend.hq reaches the hub deployment.json")
-' || fail=1
-render | "$PY" -c '
-import sys, yaml, json
-docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
-hub = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config")]
-if len(hub) != 1:
-    print("  FAIL [7hq-unset]: want one hub frontend-deployment-config, got %d" % len(hub)); sys.exit(1)
-if "hq" in json.loads(hub[0]["data"]["deployment.json"]):
-    print("  FAIL [7hq-unset]: default hub deployment.json carries hq"); sys.exit(1)
-print("  ok   [7hq-unset]: no hq key when frontend.hq is unset")
-' || fail=1
-hq_err=$(helm template t "$CHART" --set-json 'frontend.hq={"lat":0.5}' 2>&1 >/dev/null); hq_status=$?
-if [ "$hq_status" -eq 0 ] || ! printf '%s' "$hq_err" | grep -q 'frontend.hq.lon must be a number'; then
-  echo "  FAIL [7hq-lon]: frontend.hq without lon did not fail the render with the message"; fail=1
+deps = [d for d in docs if d.get("kind") == "Deployment"]
+names = {d["metadata"]["name"] for d in deps}
+want = set()
+for d in names:
+    short = d[2:]  # release "t-"
+    if short in ("asset-registry-service", "projector-hq", "frontend") or short.startswith(("projector-edge-", "tier-projector-", "tier-frontend-")):
+        want.add(d)
+if mode == "on" and not (want_names <= want):
+    print("  FAIL [7site]: expected pods not rendered: %s" % sorted(want_names - want)); sys.exit(1)
+EP = "/etc/openddil/edge-assignment/edge-assignment.yaml"
+bad, got = [], set()
+for d in deps:
+    n = d["metadata"]["name"]
+    sp = d["spec"]["template"]["spec"]
+    vols = [v for v in sp.get("volumes") or [] if v["name"] == "edge-assignment"]
+    mounts, envs = [], []
+    for c in sp["containers"]:
+        mounts += [m for m in c.get("volumeMounts") or [] if m["name"] == "edge-assignment"]
+        envs += [e for e in c.get("env") or [] if e["name"] == "EDGE_ASSIGNMENT_CONFIG"]
+    if not (vols or mounts or envs):
+        continue
+    got.add(n)
+    if mode == "off":
+        bad.append(n + ": mounts the site table with edgeAssignment.configMap unset"); continue
+    if n not in want:
+        bad.append(n + ": not a site-table reader but mounts it"); continue
+    cm = (vols[0].get("configMap") or {}) if len(vols) == 1 else {}
+    if cm.get("name") != "site-table" or cm.get("items") != [{"key": "edge-assignment.yaml", "path": "edge-assignment.yaml"}] or cm.get("optional"):
+        bad.append(n + ": volume " + repr(vols))
+    if len(mounts) != 1 or mounts[0].get("subPath") or not mounts[0].get("readOnly"):
+        bad.append(n + ": mount " + repr(mounts))
+    fe = "frontend" in n
+    path = mounts[0]["mountPath"] if len(mounts) == 1 else None
+    if fe and (path != "/usr/share/nginx/html/edge-assignment" or envs):
+        bad.append(n + ": frontend mount %r env %r" % (path, envs))
+    if not fe and (path != "/etc/openddil/edge-assignment" or [e.get("value") for e in envs] != [EP]):
+        bad.append(n + ": backend mount %r env %r" % (path, envs))
+if mode == "on":
+    bad += [n + ": site-table reader without the mount" for n in sorted(want - got)]
+for d in docs:
+    if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-frontend-deployment-config"):
+        import json
+        j = json.loads(d["data"]["deployment.json"])
+        for k in ("fobs", "hq"):
+            if k in j:
+                bad.append("hub deployment.json still carries " + k)
+if bad:
+    print("  FAIL [7site-%s]: %s" % (mode, "; ".join(bad))); sys.exit(1)
+print("  ok   [7site-%s]: %d pod(s) mount the site table%s" % (mode, len(got), "" if mode == "off" else ": " + ", ".join(sorted(x[2:] for x in got))))
+'
+render --set edgeAssignment.configMap=site-table \
+  | "$PY" -c "$site_check" on "t-asset-registry-service,t-projector-hq,t-frontend,t-projector-edge-01,t-projector-edge-02,t-projector-edge-03" || fail=1
+render --set tierNode.enabled=true --set edgeAssignment.configMap=site-table \
+  | "$PY" -c "$site_check" on "t-asset-registry-service,t-projector-hq,t-frontend,t-tier-projector-edge-01,t-tier-frontend-edge-01,t-tier-projector-region-east,t-tier-frontend-region-east" || fail=1
+render --set tierNode.enabled=true --set-json 'frontend.releasedRecordsPanes=[{"title":"t","destination":"system:x","kind":"K","columns":[]}]' \
+  | "$PY" -c "$site_check" off "" || fail=1
+for retired in 'frontend.fobs=[{"edge_id":"edge-01","region_id":"region-east","lat":0.5,"lon":0.5}]' 'frontend.hq={"lat":0.5,"lon":0.5}'; do
+  key=${retired%%=*}
+  r_err=$(helm template t "$CHART" --set-json "$retired" 2>&1 >/dev/null); r_status=$?
+  if [ "$r_status" -eq 0 ] || ! printf '%s' "$r_err" | grep -q "$key is retired" || ! printf '%s' "$r_err" | grep -q 'set edgeAssignment.configMap'; then
+    echo "  FAIL [7site-retired]: $key did not fail the render with the pointer to edgeAssignment.configMap"; fail=1
+  else
+    echo "  ok   [7site-retired]: $key fails the render, pointing at edgeAssignment.configMap"
+  fi
+done
+cm_err=$(helm template t "$CHART" --set-json 'edgeAssignment.configMap=5' 2>&1 >/dev/null); cm_status=$?
+if [ "$cm_status" -eq 0 ] || ! printf '%s' "$cm_err" | grep -q 'edgeAssignment.configMap must be a ConfigMap name'; then
+  echo "  FAIL [7site-type]: a non-string edgeAssignment.configMap did not fail the render"; fail=1
 else
-  echo "  ok   [7hq-lon]: frontend.hq without lon fails the render"
+  echo "  ok   [7site-type]: a non-string edgeAssignment.configMap fails the render"
 fi
 
 # 7f: the move panel's declared inputs (effectors.declaredLoad, movement) reach
