@@ -1541,7 +1541,7 @@ G14_BASE=(--set releasability.enabled=true --set exerciseControl.enabled=true
 G14_SEQ='{"demo":{"label":"Demo","description":"d","steps":[{"method":"post","url":"http://svc.ns.svc:8080/go?x=1","body":{"k":1},"name":"go"},{"wait_s":30}]}}'
 
 # 14h-a: enabled with no sequences -- sequences.json is "{}", the env var is
-# set, and the egress is the two fixed rules only.
+# set, and the egress is the three fixed rules only.
 render "${G14_BASE[@]}" | "$PY" -c '
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
@@ -1560,12 +1560,12 @@ if env.get("EXERCISE_SEQUENCES_FILE") != "/etc/exercise/sequences.json":
     fail = True
 np = get("NetworkPolicy", "t-exercise-control-only")
 n = len(np[0]["spec"]["egress"]) if np else -1
-if n != 2:
-    print("  FAIL [14h-a]: egress has " + str(n) + " rule(s), want 2 (DNS + sensor-ingest)")
+if n != 3:
+    print("  FAIL [14h-a]: egress has " + str(n) + " rule(s), want 3 (DNS + sensor-ingest + restate admin)")
     fail = True
 if fail:
     sys.exit(1)
-print("  ok   [14h-a]: no sequences -> sequences.json \"{}\", EXERCISE_SEQUENCES_FILE set, 2 egress rules")
+print("  ok   [14h-a]: no sequences -> sequences.json \"{}\", EXERCISE_SEQUENCES_FILE set, 3 egress rules")
 ' || fail=1
 
 # 14h-b: a valid sequence renders and the ConfigMap JSON round-trips; the
@@ -1584,8 +1584,8 @@ if got != want:
     fail = True
 np = [d for d in docs if d.get("kind") == "NetworkPolicy" and (d.get("metadata") or {}).get("name") == "t-exercise-control-only"]
 eg = np[0]["spec"]["egress"] if np else []
-if len(eg) != 3 or eg[-1]["to"][0].get("ipBlock", {}).get("cidr") != "10.9.9.9/32":
-    print("  FAIL [14h-b]: sequenceEgress did not render as the third egress rule: " + str(eg))
+if len(eg) != 4 or eg[-1]["to"][0].get("ipBlock", {}).get("cidr") != "10.9.9.9/32":
+    print("  FAIL [14h-b]: sequenceEgress did not render as the fourth egress rule: " + str(eg))
     fail = True
 if fail:
     sys.exit(1)

@@ -2258,6 +2258,10 @@ exerciseControl:
     clearExerciseDeclarations: false
     activeDeadlineSeconds: 1800
     terminationGracePeriodSeconds: 180   # TERM waits out an in-flight exec (<=60 s), then the scale-downs are restored
+    # Open Restate invocations (per runtime) above which the reset needs an explicit
+    # confirm to cancel them. One value feeds both the UI pre-flight
+    # (EXERCISE_RESET_MAX_OPEN) and the script (RESTATE_MAX_OPEN) so they cannot differ.
+    maxOpen: 300
     ttlSecondsAfterFinished: 86400
     pollTimeoutSeconds: 180    # -> POLL_TIMEOUT_S
     resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}

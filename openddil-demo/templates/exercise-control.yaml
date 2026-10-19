@@ -147,6 +147,7 @@ block renders while resetJob is off.
 {{- if $rj.haltBeforePhase }}
 {{- $env = append $env (dict "name" "RESET_HALT_BEFORE_PHASE" "value" (toString $rj.haltBeforePhase)) }}
 {{- end }}
+{{- $env = append $env (dict "name" "RESTATE_MAX_OPEN" "value" (toString ($rj.maxOpen | default 300))) }}
 {{- $clearDecl := $rj.clearExerciseDeclarations }}
 {{- if kindIs "invalid" $clearDecl }}{{- $clearDecl = false }}{{- end }}
 {{- if not (kindIs "bool" $clearDecl) }}
@@ -181,6 +182,24 @@ block renders while resetJob is off.
 {{- $jobSum = deepCopy $job }}
 {{- $_ := set (index $jobSum "metadata") "labels" (omit $jobLabels "helm.sh/chart") }}
 {{- $_ := set (index $jobSum "spec" "template" "metadata") "labels" (omit $jobLabels "helm.sh/chart") }}
+{{- end }}
+{{- /*
+Restate runtimes the reset pre-flight counts open invocations on: the root
+restate-server plus one tier-restate-<id> per tier node, mirroring the
+conditions that render those Services (hub.yaml; tier-node.yaml: tierNode.enabled
+and the tier is in tierList and in tierNode.tiers when that is set). name = Service name.
+*/}}
+{{- $restateAdmin := list (dict "name" (printf "%s-restate-server" $root.Release.Name) "port" (int $root.Values.restate.adminPort) "component" "restate-server") }}
+{{- if $root.Values.tierNode.enabled }}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if or (not $root.Values.tierNode.tiers) (has $tier.id $root.Values.tierNode.tiers) }}
+{{- $restateAdmin = append $restateAdmin (dict "name" (printf "%s-tier-restate-%s" $root.Release.Name $tier.id) "port" 9070 "component" (printf "tier-restate-%s" $tier.id)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $restateUrls := list }}
+{{- range $restateAdmin }}
+{{- $restateUrls = append $restateUrls (printf "%s=http://%s%s:%d" .name .name (include "openddil.svcDomain" $root) (int .port)) }}
 {{- end }}
 {{- /*
 Rate sources: empty -> one URL per edges[] entry, against the edge's
@@ -288,6 +307,10 @@ spec:
               value: {{ $root.Values.exerciseControl.restartMaxZeroAgeSeconds | quote }}
             - name: EXERCISE_RESET_RECORD_FILE
               value: /etc/exercise-reset/record.json
+            - name: EXERCISE_RESTATE_ADMIN_URLS
+              value: {{ join "," $restateUrls | quote }}
+            - name: EXERCISE_RESET_MAX_OPEN
+              value: {{ $rj.maxOpen | default 300 | quote }}
             {{- if $rjOn }}
             - name: EXERCISE_RESET_JOB_FILE
               value: /etc/exercise-reset-job/job.json
@@ -396,6 +419,18 @@ spec:
         {{- end }}
       ports:
         - port: {{ $root.Values.sensorIngest.httpPort }}
+    # The reset pre-flight's open-invocation count: Restate admin, read-only query.
+    - to:
+        {{- range $restateAdmin }}
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: 9070
+        {{- if ne (int $root.Values.restate.adminPort) 9070 }}
+        - port: {{ $root.Values.restate.adminPort }}
+        {{- end }}
     {{- range $root.Values.exerciseControl.adapterEgress }}
     - to:
         {{- toYaml .to | nindent 8 }}
