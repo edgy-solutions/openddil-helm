@@ -154,6 +154,12 @@ block renders while resetJob is off.
 {{- fail (printf "exerciseControl.resetJob.clearExerciseDeclarations must be true or false, got %q" (toString $clearDecl)) }}
 {{- end }}
 {{- $env = append $env (dict "name" "RESET_CLEAR_DECLARATIONS" "value" (ternary "1" "0" $clearDecl)) }}
+{{- /* Phase 7 clears an Electric PVC with a one-shot Job (reset-scenario.sh); it needs the Electric image, the runner image for its guard, and the release's pull secrets. */}}
+{{- $pullNames := list }}
+{{- range ($root.Values.global.imagePullSecrets | default list) }}{{- $pullNames = append $pullNames .name }}{{- end }}
+{{- $env = append $env (dict "name" "ELECTRIC_IMAGE" "value" (include "openddil.thirdPartyImage" $root.Values.electric.image)) }}
+{{- $env = append $env (dict "name" "RESET_RUNNER_IMAGE" "value" (include "openddil.resetRunnerImage" $root)) }}
+{{- $env = append $env (dict "name" "IMAGE_PULL_SECRETS" "value" (join "," $pullNames)) }}
 {{- $jobLabels := merge (include "openddil.labels" $root | fromYaml) (include "openddil.selectorLabels" (dict "component" "exercise-reset" "root" $root) | fromYaml) }}
 {{- $podSpec := dict
       "restartPolicy" "Never"
@@ -503,7 +509,13 @@ rules:
     verbs: ["get", "list", "patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "patch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "create", "update", "patch"]

@@ -19,9 +19,12 @@
 #   A. Deployment present, OVERALL_FAIL=0 -> record applied, carrying
 #      measured_zero_at and verdict.
 #   B. Deployment absent -> nothing applied, the explanatory line printed.
-#   C. A halted reset -> write_exercise_reset_record is never even called
-#      (halt_reset exits directly, before RUN_COMPLETED is ever set), so
-#      nothing is applied.
+#   C. A halted reset -> the EXIT trap writes a HALTED record (halted_in,
+#      reason, completed; measured_zero_at null).
+#   F. A completed run that did not pass -> FAIL record, failed_in names the
+#      phase; measured_zero_at null.
+#   G. A DRY_RUN halt applies nothing.
+#   H. The record carries electric_cleared and mode.
 # ===========================================================================
 set -u
 
@@ -122,18 +125,17 @@ else
   fail "B: absent -- no explanatory line ($out)"
 fi
 
-# --- case C: a halted reset never calls write_exercise_reset_record at all.
-# halt_reset prints "HALT: ..." and exits 2 directly -- it never sets
-# RUN_COMPLETED and never reaches the call site. Run in a subshell so this
-# test process survives the exit.
+# --- case C: a halted reset writes a HALTED record from the EXIT trap, naming
+# where it halted and why, with a null measured_zero_at. The subshell installs
+# the real trap (run_reset_sequence does the same) and calls the real halt_reset.
 DEPLOY_PRESENT=true
 : > "$APPLY_LOG"
-out="$( ( halt_reset "simulated halt for this test" "state: n/a" ) 2>&1 )"
+out="$( ( trap 'on_reset_exit' EXIT; RESET_RUN=true; CURRENT_PHASE="4 topics"; PHASES_DONE=("2 quiesce" "3 restate"); halt_reset "simulated halt for this test" "state: n/a" ) 2>&1 )"
 rc=$?
-if [ "$rc" -eq 2 ] && [ ! -s "$APPLY_LOG" ]; then
-  pass "C: halted -- no apply (rc=$rc)"
+if [ "$rc" -eq 2 ] && grep -q '"verdict": "HALTED"' "$APPLY_LOG"    && grep -q '"measured_zero_at": null' "$APPLY_LOG"    && grep -q '"halted_in": "4 topics"' "$APPLY_LOG"    && grep -q '"reason": "simulated halt for this test"' "$APPLY_LOG"    && grep -q '"completed": \["2 quiesce", "3 restate"\]' "$APPLY_LOG"; then
+  pass "C: halted -- HALTED record with halted_in, reason, completed (rc=$rc)"
 else
-  fail "C: halted -- expected rc=2 and no apply, got rc=$rc, apply_log=$(cat "$APPLY_LOG")"
+  fail "C: halted -- expected rc=2 and a HALTED record, got rc=$rc, apply_log=$(cat "$APPLY_LOG")"
 fi
 
 # --- case D: dry run, deployment present -> nothing applied, line printed
@@ -163,12 +165,52 @@ RESTATE_BULK_CANCEL_JSON=('{"pod": "rs-a-0", "confirmed_open": 10000, "open_befo
                           '{"pod": "rs-b-0", "confirmed_open": 400, "open_before": 400, "open_after": 120, "rounds": 1, "kill_rounds": 1, "seconds": 3}')
 : > "$APPLY_LOG"
 write_exercise_reset_record >/dev/null 2>&1
-if grep -q '"restate_bulk_cancel": \[{"pod": "rs-a-0", "confirmed_open": 10000,.*}, {"pod": "rs-b-0", "confirmed_open": 400,.*"kill_rounds": 1, "seconds": 3}\]}' "$APPLY_LOG"; then
+if grep -q '"restate_bulk_cancel": \[{"pod": "rs-a-0", "confirmed_open": 10000,.*}, {"pod": "rs-b-0", "confirmed_open": 400,.*"kill_rounds": 1, "seconds": 3}]' "$APPLY_LOG"; then
   pass "E2: two drained pods -- both objects in the record, in order"
 else
   fail "E2: two drained pods -- record lacks them ($(cat "$APPLY_LOG"))"
 fi
 RESTATE_BULK_CANCEL_JSON=()
+
+# --- case F: a completed run that did not pass writes FAIL, failed_in names
+# the phase where OVERALL_FAIL went non-zero, and measured_zero_at is null.
+DEPLOY_PRESENT=true
+OVERALL_FAIL=0
+FAILED_IN=()
+_ph8() { OVERALL_FAIL=1; }
+_ph_ok() { :; }
+for spec in "7 electric:_ph_ok" "8 zero assertion:_ph8" "9 restore:_ph_ok"; do
+  _b=$OVERALL_FAIL; "${spec#*:}"; _note_fail "${spec%%:*}" "$_b"
+done
+: > "$APPLY_LOG"
+write_exercise_reset_record FAIL >/dev/null 2>&1
+if grep -q '"verdict": "FAIL"' "$APPLY_LOG" && grep -q '"measured_zero_at": null' "$APPLY_LOG"    && grep -q '"failed_in": \["8 zero assertion"\]' "$APPLY_LOG" && grep -q '"failed_at": "' "$APPLY_LOG"; then
+  pass "F: completed FAIL -- FAIL record, failed_in names phase 8 only"
+else
+  fail "F: completed FAIL -- record wrong ($(cat "$APPLY_LOG"))"
+fi
+OVERALL_FAIL=0; FAILED_IN=()
+
+# --- case G: a DRY_RUN halt applies nothing (the trap runs, the writer refuses).
+: > "$APPLY_LOG"
+out="$( ( DRY_RUN=true; trap 'on_reset_exit' EXIT; RESET_RUN=true; CURRENT_PHASE="4 topics"; halt_reset "dry halt" ) 2>&1 )"
+rc=$?
+if [ "$rc" -eq 2 ] && [ ! -s "$APPLY_LOG" ] && echo "$out" | grep -q "dry run"; then
+  pass "G: dry-run halt -- nothing applied, dry-run line printed"
+else
+  fail "G: dry-run halt -- rc=$rc apply_log=$(cat "$APPLY_LOG") out=$out"
+fi
+
+# --- case H: every record carries electric_cleared and mode.
+ELECTRIC_CLEARED_JSON=('{"instance": "openddil-electric-sync", "mode": "pvc", "pvc": "c", "job": "j", "result": "cleared", "entries_before": 7}')
+: > "$APPLY_LOG"
+write_exercise_reset_record >/dev/null 2>&1
+if grep -q '"electric_cleared": \[{"instance": "openddil-electric-sync", "mode": "pvc"' "$APPLY_LOG"    && grep -q '"mode": "full"' "$APPLY_LOG" && grep -q '"verdict": "PASS"' "$APPLY_LOG"; then
+  pass "H: electric_cleared and mode present on a PASS record"
+else
+  fail "H: electric_cleared/mode missing ($(cat "$APPLY_LOG"))"
+fi
+ELECTRIC_CLEARED_JSON=()
 
 echo
 if [ "$FAIL" -eq 0 ]; then

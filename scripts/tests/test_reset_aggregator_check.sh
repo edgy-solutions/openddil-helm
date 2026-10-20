@@ -144,6 +144,30 @@ else
   fail "H: unknown name (rc=$hrc) :: $hout"
 fi
 
+# --- I: phase 5 restarts the asset registry (a Faust app) with the faust-* family
+# (F-1020-6e). Discovery uses the script's own FAUST_DEPLOY_REGEX; kubectl is a
+# stub listing Deployments and recording rollout restarts.
+RESTARTS="$(mktemp)"
+kubectl() {
+  case "$*" in
+    "get deploy -n $NS -o name")
+      printf 'deployment.apps/%s
+' openddil-faust-aggregator openddil-asset-registry-service         openddil-asset-registry-service-extra openddil-projector-hq openddil-logistics-sim ;;
+    "rollout restart deploy -n $NS "*) { a="$*"; echo "${a##* }" >> "$RESTARTS"; } ;;
+  esac
+}
+mapfile -t FAUST_DEPLOYS < <(discover deploy "$FAUST_DEPLOY_REGEX")
+CENSUS_QUIESCED=(); SKIP_AGGREGATOR=false; DRY_RUN=false
+phase5_aggregator >/dev/null 2>&1
+restarted="$(sort "$RESTARTS" | tr '
+' ' ')"
+rm -f "$RESTARTS"
+if [ "$restarted" = "openddil-asset-registry-service openddil-faust-aggregator " ]; then
+  pass "I: phase 5 restarts the registry with the faust-* apps, and only those"
+else
+  fail "I: phase 5 restarted: '$restarted'"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "test_reset_aggregator_check: ALL PASS"

@@ -483,8 +483,22 @@ discover_restate_runtimes() {
 mapfile -t POSTGRES_PODS < <(discover pods "^${RELEASE}-(postgres-hq|tier-pg-)")
 mapfile -t RESTATE_PODS  < <(discover_restate_runtimes)
 mapfile -t REDPANDA_PODS < <(discover pods "^${RELEASE}-redpanda-" | grep -v -- '-connect-' || true)
-mapfile -t ELECTRIC_PODS < <(discover pods "^${RELEASE}-(electric-sync|tier-electric-)")
-mapfile -t FAUST_DEPLOYS < <(discover deploy "^${RELEASE}-faust-")
+# F-1020-6d: only a Running pod that is not terminating is an Electric pod for
+# this reset. A Completed, Evicted or Terminating pod never serves a shape and
+# would fail the handle verify on its own.
+discover_electric_pods() {
+  kubectl get pods -n "$NS"     -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"	"}{.metadata.deletionTimestamp}{"
+"}{end}'     2>/dev/null | awk -F'	' '$2 == "" { print $1 }'     | grep -E "^${RELEASE}-(electric-sync|tier-electric-)" || true
+}
+# The Electric instance is the Deployment. Tier ids carry dashes (edge-01), so
+# the tier arm accepts a DNS-label tail rather than a single dash-free token.
+ELECTRIC_DEPLOY_REGEX="^${RELEASE}-(electric-sync|tier-electric-[a-z0-9]([a-z0-9-]*[a-z0-9])?)\$"
+mapfile -t ELECTRIC_PODS < <(discover_electric_pods)
+mapfile -t ELECTRIC_DEPLOYS < <(discover deploy "$ELECTRIC_DEPLOY_REGEX")
+# F-1020-6e: asset-registry-service is a Faust app, so it is restarted with the
+# faust-* family (anchored: no other name matches).
+FAUST_DEPLOY_REGEX="^${RELEASE}-(faust-|asset-registry-service\$)"
+mapfile -t FAUST_DEPLOYS < <(discover deploy "$FAUST_DEPLOY_REGEX")
 # egress-intake is a producer for this purpose: it writes intake_records from
 # a destination's returned artifacts over HTTP, and it reads its answers topic
 # by assignment with no committed group, so the census can never derive it.
@@ -3088,19 +3102,34 @@ emergency_restore_scales() {
 # ===========================================================================
 # EXERCISE RESET RECORD -- the exercise control adapter's own "when did a
 # clean reset last happen" state (see exercise/control.py's read_reset).
-# Written only from the end of a COMPLETED, PASSING run, so an operator
-# checking the adapter's panel sees exactly what this script actually
-# asserted, never a guess:
-#   - a HALTED run never reaches this call at all (halt_reset exits
-#     directly, before RUN_COMPLETED is ever set — see its own definition);
-#   - a run that completed but did NOT pass (OVERALL_FAIL=1) is refused
-#     here explicitly, by the caller checking OVERALL_FAIL before calling
-#     this function at all. "Completed" and "passed" are not the same
-#     question, and only the second one writes the record.
-# Absent Deployment (exercise control not installed on this release) ->
-# nothing applied, one line printed saying why.
+# Every completed or halted, non-dry run writes one, so "no record" is never
+# the outcome of a reset that failed:
+#   - PASS   a full run that completed with OVERALL_FAIL 0 (a quick run is
+#            unmeasured and writes no PASS);
+#   - FAIL   a run that completed with OVERALL_FAIL != 0 (failed_in names the
+#            phases where it went non-zero);
+#   - HALTED a run that exited non-zero before RUN_COMPLETED (written from the
+#            EXIT trap: halt_reset, a phase's non-zero return, a set -e abort).
+# Only PASS ungates Restart (control.py restart_refusal): FAIL and HALTED carry
+# a null measured_zero_at and are refused as verdict_not_pass.
+#   write_exercise_reset_record [VERDICT [WHERE [REASON]]]
+#     PASS (default): no arguments. FAIL: failed_in comes from FAILED_IN.
+#     HALTED: WHERE = phase halted in, REASON = why; completed = PHASES_DONE.
+# Absent exercise-control Deployment -> nothing applied, one line says why.
+# Dry run -> nothing applied. A write failure prints one line and returns 0.
 # ===========================================================================
+_json_str() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t' '  '
+}
+FAILED_IN=()
+# _note_fail PHASE BEFORE -- called after each phase with OVERALL_FAIL as it
+# stood before it ran; records the phases where it went from 0 to non-zero.
+_note_fail() {
+  if [ "$2" -eq 0 ] && [ "$OVERALL_FAIL" -ne 0 ]; then FAILED_IN+=("$1"); fi
+  return 0
+}
 write_exercise_reset_record() {
+  local verdict="${1:-PASS}" where="${2:-}" reason="${3:-}"
   local name="${RELEASE}-exercise-control"
   if ! kubectl get deploy -n "$NS" "$name" -o name >/dev/null 2>&1; then
     echo "exercise-reset-record: not written -- no $name Deployment in" \
@@ -3112,12 +3141,16 @@ write_exercise_reset_record() {
          "${RELEASE}-exercise-reset-record)"
     return 0
   fi
-  local at declared_json="" n fr_json fr_at fr_c1 bulk_json="" b
+  local at declared_json="" n fr_json fr_at fr_c1 bulk_json="" b elec_json="" e head extra="" w
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for b in ${RESTATE_BULK_CANCEL_JSON[@]+"${RESTATE_BULK_CANCEL_JSON[@]}"}; do
     bulk_json="${bulk_json:+$bulk_json, }$b"
   done
   bulk_json="[${bulk_json}]"
+  for e in ${ELECTRIC_CLEARED_JSON[@]+"${ELECTRIC_CLEARED_JSON[@]}"}; do
+    elec_json="${elec_json:+$elec_json, }$e"
+  done
+  elec_json="[${elec_json}]"
   for n in ${DECLARED_UNMEASURED_USED[@]+"${DECLARED_UNMEASURED_USED[@]}"}; do
     declared_json="${declared_json:+$declared_json, }\"$n\""
   done
@@ -3125,9 +3158,29 @@ write_exercise_reset_record() {
   fr_c1=null; [ -n "$FIRST_ROLLUP_CLAUSE1" ] && fr_c1="\"$FIRST_ROLLUP_CLAUSE1\""
   fr_at=null; [ -n "$FIRST_ROLLUP_AT" ] && fr_at="\"$FIRST_ROLLUP_AT\""
   fr_json="{\"asset_count\": ${FIRST_ROLLUP_COUNT:-null}, \"observed_at\": $fr_at, \"predicted\": ${FIRST_ROLLUP_PREDICTED:-null}, \"store_after\": ${FIRST_ROLLUP_STORE_AFTER:-null}, \"clause1\": ${fr_c1}, \"verdict\": \"${FIRST_ROLLUP_VERDICT:-not measured}\"}"
-  kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
-    --from-literal=record.json="{\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json, \"restate_bulk_cancel\": $bulk_json}" \
-    --dry-run=client -o yaml | kubectl apply -f -
+  case "$verdict" in
+    PASS)
+      head="\"measured_zero_at\": \"$at\", \"verdict\": \"PASS\"" ;;
+    FAIL)
+      for w in ${FAILED_IN[@]+"${FAILED_IN[@]}"}; do
+        extra="${extra:+$extra, }\"$(_json_str "$w")\""
+      done
+      [ -z "$extra" ] && extra="\"unattributed\""
+      head="\"measured_zero_at\": null, \"verdict\": \"FAIL\", \"failed_at\": \"$at\", \"failed_in\": [$extra]" ;;
+    HALTED)
+      for w in ${PHASES_DONE[@]+"${PHASES_DONE[@]}"}; do
+        extra="${extra:+$extra, }\"$(_json_str "$w")\""
+      done
+      head="\"measured_zero_at\": null, \"verdict\": \"HALTED\", \"failed_at\": \"$at\", \"halted_in\": \"$(_json_str "${where:-between phases}")\", \"reason\": \"$(_json_str "$reason")\", \"completed\": [$extra]" ;;
+    *) echo "exercise-reset-record: not written -- unknown verdict $verdict"; return 0 ;;
+  esac
+  local mode="full"; $QUICK && mode="quick"
+  if ! kubectl create configmap "${RELEASE}-exercise-reset-record" -n "$NS" \
+    --from-literal=record.json="{$head, \"mode\": \"$mode\", \"declared_unmeasured\": $declared_json, \"clear_exercise_declarations\": $CLEAR_DECLARATIONS, \"first_rollup\": $fr_json, \"restate_bulk_cancel\": $bulk_json, \"electric_cleared\": $elec_json}" \
+    --dry-run=client -o yaml | kubectl apply -f -; then
+    echo "exercise-reset-record: WRITE FAILED (verdict $verdict); the exit code is unchanged"
+  fi
+  return 0
 }
 
 # ===========================================================================
@@ -3729,7 +3782,8 @@ phase4_topics() {
 }
 
 # ===========================================================================
-# PHASE 5 — AGGREGATOR. Restart the Faust deployments ONLY NOW. Phase 4's
+# PHASE 5 — AGGREGATOR. Restarts every Faust app, the asset registry included.
+# Restart the Faust deployments ONLY NOW. Phase 4's
 # changelog trim must already have happened: Faust replays its changelog
 # topic on startup and restores every key from it, so restarting before the
 # trim (or skipping the trim, --skip-topics/--skip-aggregator's own residue)
@@ -3801,26 +3855,320 @@ phase6_stores() {
 }
 
 # ===========================================================================
-# PHASE 7 — ELECTRIC. Delete the pods; there is no PVC and no mounted
-# volume on electric-sync or any tier-electric-* (hub.yaml:99-120), so shape
-# logs live only in the container filesystem. Deleting the pod IS the
-# reset — clients rebuild shapes against a new handle on their next request.
+# PHASE 7 -- ELECTRIC. Discard every Electric instance's shape logs.
+#
+# Electric keeps its shape logs under ELECTRIC_STORAGE_DIR (/app/persistent).
+# Where the release gives an instance a PVC (electric.persistence.enabled and
+# not useEmptyDir), deleting the pod discards nothing: the replacement mounts
+# the same claim and serves the same shape handle. Electric 1.6.2 has no safe
+# in-band delete-all (DELETE /v1/shape is test-only and removes one shape per
+# call), so for a PVC instance the reset
+#   a. records spec.replicas and classifies the instance by its `electric-data`
+#      volume (a claim -> "pvc"; emptyDir or absent -> "pod-delete");
+#   b. scales the Deployment to 0 and waits until no pod remains;
+#   c. runs a one-shot Job: initContainer `guard` refuses unless the Deployment
+#      is at 0 replicas with 0 pods, then container `clear` (the Electric image,
+#      same user) empties /app/persistent, not the mount point;
+#   d. scales back to the recorded replicas, even after a refusal or failure
+#      (scaling back deletes nothing).
+# That Job is the DECLARED ONLY REAL DELETE in the system for Electric. The
+# guard exists so it can never empty a volume under a live Electric. Nothing
+# else creates it: no chart template, no standalone script; it exists only
+# because this phase created it, inside a reset, and it names the instance in
+# the reset record (ELECTRIC_CLEARED_JSON). For an emptyDir instance (or none)
+# deleting the pod IS the reset, as before.
 # Run after stores are emptied (phase 6), so the shapes clients rebuild
 # reflect the reset data, not the old fleet re-synced into a fresh shape.
 # ===========================================================================
+ELECTRIC_CLEARED_JSON=()
+ELECTRIC_POLL_S="${ELECTRIC_POLL_S:-3}"
+ELECTRIC_SCALE_WAIT_S="${ELECTRIC_SCALE_WAIT_S:-120}"
+ELECTRIC_JOB_WAIT_S="${ELECTRIC_JOB_WAIT_S:-180}"
+ELECTRIC_BACK_WAIT_S="${ELECTRIC_BACK_WAIT_S:-180}"
+ELECTRIC_RUN_TAG=""
+ELECTRIC_LAST_STATE=""
+ELECTRIC_WANT_READY=0
+
+# _electric_state DEPLOY -> "spec|status|ready|pods" (blank status/ready -> 0).
+# pods counts the Deployment's pods that can hold the volume: every phase but
+# Succeeded and Failed (an Evicted pod is Failed and has no container), so
+# terminating pods (deletionTimestamp, phase still Running) still count.
+# Non-zero when the Deployment, its selector or its pods cannot be read.
+_electric_state() {
+  local d="$1" line spec st ready sel pods
+  line="$(kubectl get deploy -n "$NS" "$d" \
+    -o jsonpath='{.spec.replicas}{"|"}{.status.replicas}{"|"}{.status.readyReplicas}' 2>/dev/null)" || return 1
+  IFS='|' read -r spec st ready <<<"$line"
+  [ -n "$spec" ] || return 1
+  sel="$(kubectl get deploy -n "$NS" "$d" \
+    -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>/dev/null)" || return 1
+  sel="${sel%,}"
+  [ -n "$sel" ] || return 1
+  pods="$(kubectl get pods -n "$NS" -l "$sel" --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name 2>/dev/null)" || return 1
+  pods="$(printf '%s' "$pods" | grep -c . || true)"
+  printf '%s|%s|%s|%s' "$spec" "${st:-0}" "${ready:-0}" "${pods:-0}"
+}
+
+# _electric_wait DEPLOY SECONDS PREDICATE -- poll _electric_state until
+# PREDICATE (taking spec status ready pods) holds; bounded. The last state
+# read stays in ELECTRIC_LAST_STATE.
+_electric_wait() {
+  local d="$1" limit="$2" pred="$3" deadline spec st ready pods
+  deadline=$((SECONDS + limit))
+  while :; do
+    if ELECTRIC_LAST_STATE="$(_electric_state "$d")"; then
+      IFS='|' read -r spec st ready pods <<<"$ELECTRIC_LAST_STATE"
+      "$pred" "$spec" "$st" "$ready" "$pods" && return 0
+    else
+      ELECTRIC_LAST_STATE="unreadable"
+    fi
+    [ "$SECONDS" -ge "$deadline" ] && return 1
+    sleep "$ELECTRIC_POLL_S"
+  done
+}
+_electric_pred_down()  { [ "$1" = 0 ] && [ "$2" = 0 ] && [ "$4" = 0 ]; }
+_electric_pred_ready() { [ "$3" = "$ELECTRIC_WANT_READY" ]; }
+
+# _electric_json INSTANCE MODE PVC JOB RESULT ENTRIES -> one JSON object.
+_electric_json() {
+  local pvc="null" job="null" ent="null"
+  [ -n "$3" ] && pvc="\"$3\""
+  [ -n "$4" ] && job="\"$4\""
+  case "$6" in ''|*[!0-9]*) ;; *) ent="$6" ;; esac
+  printf '{"instance": "%s", "mode": "%s", "pvc": %s, "job": %s, "result": "%s", "entries_before": %s}' \
+    "$1" "$2" "$pvc" "$job" "$5" "$ent"
+}
+
+# _electric_job_yaml INSTANCE DEPLOY CLAIM JOBNAME -> the clear Job manifest.
+_electric_job_yaml() {
+  local inst="$1" d="$2" claim="$3" job="$4" guard clear pull="" s
+  local -a secrets=()
+  IFS= read -r -d '' guard <<'GUARD' || true
+set -u -o pipefail
+fail() { echo "REFUSED: $INSTANCE $1"; exit 1; }
+spec="$(kubectl get deploy -n "$NS" "$DEPLOY" -o jsonpath='{.spec.replicas}')" || fail "unreadable"
+ready="$(kubectl get deploy -n "$NS" "$DEPLOY" -o jsonpath='{.status.readyReplicas}')" || fail "unreadable"
+sel="$(kubectl get deploy -n "$NS" "$DEPLOY" -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')" || fail "unreadable"
+sel="${sel%,}"
+[ -n "$sel" ] || fail "no selector"
+pods="$(kubectl get pods -n "$NS" -l "$sel" --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)" || fail "pods unreadable"
+pods="$(printf '%s' "$pods" | grep -c . || true)"
+spec="${spec:-0}"; ready="${ready:-0}"
+if [ "$spec" != 0 ] || [ "$ready" != 0 ] || [ "$pods" != 0 ]; then
+  echo "REFUSED: $INSTANCE replicas=$spec ready=$ready pods=$pods"
+  exit 1
+fi
+echo "GUARD-OK: $INSTANCE replicas=0 ready=0 pods=0"
+GUARD
+  IFS= read -r -d '' clear <<'CLEAR' || true
+set -u
+d=/app/persistent
+if [ ! -d "$d" ]; then echo "NOT-CLEARED: $INSTANCE $d is not mounted"; exit 1; fi
+count() { find "$d" -mindepth 1 -maxdepth 1 ! -name lost+found | wc -l | tr -d ' '; }
+before="$(count)"
+find "$d" -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +
+after="$(count)"
+echo "CLEARED: $INSTANCE entries_before=$before entries_after=$after"
+[ "$after" = 0 ]
+CLEAR
+  guard="$(printf '%s\n' "$guard" | sed 's/^/                /')"
+  clear="$(printf '%s\n' "$clear" | sed 's/^/                /')"
+  if [ -n "${IMAGE_PULL_SECRETS:-}" ]; then
+    IFS=, read -r -a secrets <<<"$IMAGE_PULL_SECRETS"
+    pull="      imagePullSecrets:"
+    for s in "${secrets[@]}"; do
+      pull="${pull}"$'\n'"        - name: ${s}"
+    done
+  fi
+  cat <<YAML
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${job}
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/name: openddil
+    app.kubernetes.io/instance: ${RELEASE}
+    app.kubernetes.io/component: electric-clear
+    openddil.io/reset-run: "${ELECTRIC_RUN_TAG}"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: electric-clear
+        openddil.io/reset-run: "${ELECTRIC_RUN_TAG}"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ${RELEASE}-exercise-reset
+${pull}
+      initContainers:
+        - name: guard
+          image: "${RESET_RUNNER_IMAGE:-}"
+          command: ["bash", "-c"]
+          args:
+            - |
+${guard}
+          env:
+            - { name: NS, value: "${NS}" }
+            - { name: DEPLOY, value: "${d}" }
+            - { name: INSTANCE, value: "${inst}" }
+          securityContext:
+            allowPrivilegeEscalation: false
+      containers:
+        - name: clear
+          image: "${ELECTRIC_IMAGE:-}"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+${clear}
+          env:
+            - { name: INSTANCE, value: "${inst}" }
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - { name: electric-data, mountPath: /app/persistent }
+      volumes:
+        - name: electric-data
+          persistentVolumeClaim:
+            claimName: ${claim}
+YAML
+}
+
+# _electric_instance DEPLOY RESULTFILE -- steps a-e for one instance. Prints
+# its own log (the caller captures it per instance) and writes one JSON object
+# to RESULTFILE. Mutates nothing in DRY_RUN.
+_electric_instance() {
+  local d="$1" out="$2" inst mode="pod-delete" pvc="" job="" result="" entries=""
+  local replicas vol suffix pod n=0 jstat js jf jc logtxt line deadline
+  inst="$d"
+  suffix="${d#"${RELEASE}-"}"; suffix="${suffix#tier-electric-}"
+  [ "$suffix" = "electric-sync" ] && suffix="hub"
+  job="${RELEASE}-electric-clear-${suffix}-${ELECTRIC_RUN_TAG}"
+  # a. record and classify
+  replicas="$(kubectl get deploy -n "$NS" "$d" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || replicas=""
+  if [ -z "$replicas" ]; then
+    echo "  $inst: ERROR cannot read spec.replicas; nothing was changed"
+    _electric_json "$inst" "$mode" "" "" "failed" "" > "$out"; return 0
+  fi
+  vol="$(kubectl get deploy -n "$NS" "$d" \
+    -o jsonpath='{range .spec.template.spec.volumes[?(@.name=="electric-data")]}{.persistentVolumeClaim.claimName}{end}' 2>/dev/null)" || vol=""
+  if [ -n "$vol" ]; then mode="pvc"; pvc="$vol"; else job=""; fi
+  if $DRY_RUN; then
+    if [ "$mode" = pvc ]; then
+      echo "  $inst: [dry-run] would scale to 0, run Job $job on claim $pvc, scale back to $replicas"
+    else
+      echo "  $inst: [dry-run] would delete its Electric pod(s) (no PVC)"
+    fi
+    _electric_json "$inst" "$mode" "$pvc" "$job" "dry-run" "" > "$out"; return 0
+  fi
+  if [ "$mode" = "pod-delete" ]; then
+    for pod in ${ELECTRIC_PODS[@]+"${ELECTRIC_PODS[@]}"}; do
+      [[ "$pod" =~ ^${d}-[a-z0-9]+-[a-z0-9]+$ ]] || continue
+      echo "-> delete electric pod $pod (no PVC: discards its shape logs)"
+      kubectl delete pod -n "$NS" "$pod" && n=$((n + 1))
+    done
+    if [ "$n" -gt 0 ]; then result="pod-deleted"; else
+      echo "  $inst: ERROR no running pod found to delete"; result="failed"; fi
+    _electric_json "$inst" "$mode" "" "" "$result" "" > "$out"; return 0
+  fi
+  if ! kubectl get pvc -n "$NS" "$pvc" -o name >/dev/null 2>&1; then
+    echo "  $inst: ERROR claim $pvc not found; nothing was changed"
+    _electric_json "$inst" "$mode" "$pvc" "" "failed" "" > "$out"; return 0
+  fi
+  # b. scale to 0
+  echo "-> $inst: scale to 0 (was $replicas), claim $pvc"
+  if ! kubectl scale deploy -n "$NS" "$d" --replicas=0 >/dev/null; then
+    echo "  $inst: ERROR could not scale to 0"
+    result="failed"; job=""
+  elif ! _electric_wait "$d" "$ELECTRIC_SCALE_WAIT_S" _electric_pred_down; then
+    echo "  $inst: ERROR still up after ${ELECTRIC_SCALE_WAIT_S}s (spec|status|ready|pods = $ELECTRIC_LAST_STATE)"
+    result="timeout"; job=""
+  else
+    # c. the clear Job
+    echo "-> $inst: create Job $job (guard + clear on claim $pvc)"
+    if ! _electric_job_yaml "$inst" "$d" "$pvc" "$job" | kubectl create -n "$NS" -f - >/dev/null; then
+      echo "  $inst: ERROR could not create Job $job"
+      result="failed"
+    else
+      deadline=$((SECONDS + ELECTRIC_JOB_WAIT_S))
+      while :; do
+        jstat="$(kubectl get job -n "$NS" "$job" \
+          -o jsonpath='{.status.succeeded}{"|"}{.status.failed}{"|"}{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+        IFS='|' read -r js jf jc <<<"$jstat"
+        if [ "${js:-0}" -ge 1 ] 2>/dev/null; then result="cleared"; break; fi
+        if [ "${jf:-0}" -ge 1 ] 2>/dev/null || [ "${jc:-}" = True ]; then result="failed"; break; fi
+        if [ "$SECONDS" -ge "$deadline" ]; then result="timeout"; break; fi
+        sleep "$ELECTRIC_POLL_S"
+      done
+      logtxt="$(kubectl logs -n "$NS" "job/$job" -c clear 2>/dev/null || true)"
+      line="$(printf '%s\n' "$logtxt" | grep -o 'entries_before=[0-9]*' | tail -1 || true)"
+      entries="${line#entries_before=}"
+      if [ "$result" = failed ]; then
+        logtxt="$(kubectl logs -n "$NS" "job/$job" -c guard 2>/dev/null || true)"
+        if printf '%s\n' "$logtxt" | grep -q '^REFUSED:'; then
+          result="refused"
+          echo "  $inst: $(printf '%s\n' "$logtxt" | grep '^REFUSED:' | tail -1)"
+        fi
+      fi
+      echo "  $inst: Job $job -> $result${entries:+ (entries_before=$entries)}"
+    fi
+  fi
+  # d. scale back, whatever happened above. Scaling back deletes nothing.
+  echo "-> $inst: scale back to $replicas"
+  kubectl scale deploy -n "$NS" "$d" --replicas="$replicas" >/dev/null || result="failed"
+  ELECTRIC_WANT_READY="$replicas"
+  if ! _electric_wait "$d" "$ELECTRIC_BACK_WAIT_S" _electric_pred_ready; then
+    echo "  $inst: ERROR not back to $replicas ready after ${ELECTRIC_BACK_WAIT_S}s ($ELECTRIC_LAST_STATE)"
+    [ "$result" = cleared ] && result="timeout"
+  fi
+  # e. record
+  _electric_json "$inst" "$mode" "$pvc" "$job" "$result" "$entries" > "$out"
+}
+
 phase7_electric() {
   echo
-  echo "=== PHASE 7: electric (delete pods — no volume, deletion is the reset) ==="
+  echo "=== PHASE 7: electric (PVC: scale 0, clear Job, scale back; no PVC: delete pods) ==="
   if $SKIP_ELECTRIC; then
     skip_warning "ELECTRIC" \
-      "Electric pods are not deleted, so their existing shape logs are not\n    discarded. A client holding an old shape handle can keep being served\n    an append-only log seeded from before the reset."
+      "Electric storage is not cleared and pods are not deleted, so their existing shape logs are not\n    discarded. A client holding an old shape handle can keep being served\n    an append-only log seeded from before the reset."
     return 0
   fi
-  local pod
-  for pod in "${ELECTRIC_PODS[@]}"; do
-    maybe_run "delete electric pod $pod (discards its shape logs)" \
-      kubectl delete pod -n "$NS" "$pod"
+  if [ "${#ELECTRIC_DEPLOYS[@]}" -eq 0 ]; then
+    echo "  no Electric Deployment found; nothing to reset here"
+    return 0
+  fi
+  ELECTRIC_RUN_TAG="$(date -u +%y%m%d%H%M%S)"
+  local tmp d i=0 rc=0 res
+  local -a pids=()
+  tmp="$(mktemp -d)"
+  for d in "${ELECTRIC_DEPLOYS[@]}"; do
+    ( _electric_instance "$d" "$tmp/$i.json" ) > "$tmp/$i.log" 2>&1 &
+    pids+=($!)
+    i=$((i + 1))
   done
+  for ((i = 0; i < ${#pids[@]}; i++)); do
+    wait "${pids[$i]}" || true
+    cat "$tmp/$i.log"
+    if [ -s "$tmp/$i.json" ]; then
+      res="$(cat "$tmp/$i.json")"
+    else
+      res="$(_electric_json "${ELECTRIC_DEPLOYS[$i]}" "unknown" "" "" "failed" "")"
+      echo "  ${ELECTRIC_DEPLOYS[$i]}: ERROR no result was produced"
+    fi
+    ELECTRIC_CLEARED_JSON+=("$res")
+    case "$res" in
+      *'"result": "cleared"'*|*'"result": "pod-deleted"'*|*'"result": "dry-run"'*) ;;
+      *) rc=1 ;;
+    esac
+  done
+  rm -rf "$tmp"
+  if [ "$rc" -ne 0 ]; then
+    echo "ERROR: phase 7: at least one Electric instance was not cleared (see the lines above)" >&2
+  fi
+  return "$rc"
 }
 
 # ===========================================================================
@@ -4908,7 +5256,9 @@ halt_if_injected() {
 run_phase() {
   CURRENT_PHASE="$1"
   halt_if_injected "$1"
+  local before=$OVERALL_FAIL
   "$2"
+  _note_fail "$1" "$before"
   PHASES_DONE+=("$1")
   CURRENT_PHASE=""
 }
@@ -4943,6 +5293,8 @@ on_reset_exit() {
       echo "  THIS CLUSTER HAS NOT BEEN RESET. Fix the cause, then re-run the whole reset."
       echo "================================================================"
     } >&2
+    write_exercise_reset_record HALTED "${CURRENT_PHASE:-between phases}" \
+      "${HALT_REASON:-a phase stopped non-zero; its ERROR/ABORTED lines are in the run log}" >&2 || true
   fi
   emergency_restore_scales "$rc"
   exit "$rc"
@@ -5371,6 +5723,9 @@ run_quick_sequence() {
     echo "QUICK RESET: a run phase reported a failure (OVERALL_FAIL=$OVERALL_FAIL); see above."
   fi
   quick_end_banner
+  # A quick run is unmeasured, so a clean one writes no record; a failed one
+  # still writes FAIL (and a halt writes HALTED from on_reset_exit).
+  if [ "$OVERALL_FAIL" -ne 0 ]; then write_exercise_reset_record FAIL; fi
   exit "$OVERALL_FAIL"
 }
 
@@ -5424,7 +5779,9 @@ run_reset_sequence() {
   # get its producers back, exactly like a passing one does.
   CURRENT_PHASE="8 zero assertion"
   halt_if_injected "8 zero assertion"
+  p8_before=$OVERALL_FAIL
   phase8_zero || true
+  _note_fail "8 zero assertion" "$p8_before"
   PHASES_DONE+=("8 zero assertion")
   run_phase "9 restore" phase9_restore_producers
   # Recorded here, right after phase 9 returns, RFC3339 UTC second precision —
@@ -5449,16 +5806,15 @@ run_reset_sequence() {
   # run_phase call like every other phase.
   run_phase "10 subscription liveness" phase10_subscription_liveness
   RUN_COMPLETED=true
-  # A failed/halted reset never writes the record -- a halt never reaches this
-  # line (halt_reset exits directly, above), and a completed-but-failing run
-  # is refused explicitly here rather than inside the write function, so the
-  # gate is visible at the one call site instead of buried in it.
+  # Every completed or halted non-dry run writes a record (a halt writes its
+  # own from on_reset_exit). Only PASS ungates Restart (control.py): a FAIL
+  # record carries a null measured_zero_at and is refused as verdict_not_pass.
   if [ "$OVERALL_FAIL" -eq 0 ]; then
-    write_exercise_reset_record
+    write_exercise_reset_record PASS
   else
-    echo "exercise-reset-record: not written -- this run completed but did" \
-         "not pass (OVERALL_FAIL=$OVERALL_FAIL); a failed reset never writes" \
-         "the record"
+    echo "exercise-reset-record: this run completed but did not pass" \
+         "(OVERALL_FAIL=$OVERALL_FAIL); writing a FAIL record"
+    write_exercise_reset_record FAIL
   fi
   exit "$OVERALL_FAIL"
 }
