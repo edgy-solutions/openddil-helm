@@ -956,14 +956,21 @@ Why topic-init declares these: faust-regional declares its fan-in topic only
 at pod start, and broker auto-create is off. A broker that later loses its
 topics (volume wipe) would otherwise never get it back, and the aggregator
 would stay stuck until a restart. Ranges the same .Values.regions list as
-regional.yaml, so the two cannot disagree. The args match what Faust creates
-(1 partition, delete, 7 d), so enforcing them on a live topic changes nothing.
+regional.yaml, so the two cannot disagree. Partitions, cleanup policy and
+retention.ms match what Faust creates (1 partition, delete, 7 d).
+retention.bytes does not: Faust sets no size cap, so topic-init adds
+regionFanIn.retentionBytes, and enforcing it on a live topic is a deliberate
+change. Without it a flood fills the region broker's volume.
 */ -}}
 {{- define "openddil.regionFanInSpecs" -}}
 {{- $specs := list -}}
+{{- $capBytes := int64 ((.root.Values.regionFanIn | default dict).retentionBytes | default 0) -}}
+{{- if le $capBytes 0 -}}
+{{- fail "regionFanIn.retentionBytes must be a positive byte count: the fan-in topic has no other size bound" -}}
+{{- end -}}
 {{- range .root.Values.regions -}}
 {{- if eq (include "openddil.regionAggBrokerId" (dict "id" .id "root" $.root)) $.brokerId -}}
-{{- $specs = append $specs (printf "%s|-p 1 -r 1 -c cleanup.policy=delete -c retention.ms=604800000" (include "openddil.regionFanInTopic" .id)) -}}
+{{- $specs = append $specs (printf "%s|-p 1 -r 1 -c cleanup.policy=delete -c retention.ms=604800000 -c retention.bytes=%d" (include "openddil.regionFanInTopic" .id) $capBytes) -}}
 {{- end -}}
 {{- end -}}
 {{- toJson $specs -}}

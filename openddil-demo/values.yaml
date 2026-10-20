@@ -103,6 +103,15 @@ regions:
   - id: region-east
   - id: region-west
 
+# Size cap on each region's fan-in topic (<region>-fan-in, 1 partition, so
+# this is the topic's whole size). Without it the topic is bounded only by
+# time (7 d), and a sustained flood filled a 10 Gi region broker volume.
+# Keep it well under the region broker's volume, or under node disk when the
+# broker runs on emptyDir. topic-init enforces it on the live topic at every
+# install/upgrade; a hand-set value on the topic is replaced then.
+regionFanIn:
+  retentionBytes: 2147483648   # 2 GiB
+
 # --- Persistence ------------------------------------------------------------
 # storageClass is the default StorageClass for EVERY PersistentVolumeClaim
 # the chart creates (redpanda-edge x N, redpanda-hq, postgres-hq,
