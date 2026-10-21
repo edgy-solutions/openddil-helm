@@ -3,7 +3,7 @@
 Four browser profiles, four logins, three connected beats (the C2 picture; a
 fault report to an action; an arrival), two cuts, two heals. Roughly 21–25
 minutes of recording. Every number below was measured on 2026-09-09 unless dated
-otherwise (BEATS 2a and 2b: 2026-10-03, BEAT 2b's cortex steps unmeasured; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
+otherwise (BEAT 2a: 2026-10-03; BEAT 2b: 2026-10-21, its record and cortex steps unmeasured; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
 and check rather than narrate around it** — that disagreement is the finding.
 Lines marked `<dry run: …>` are placeholders the dry run fills in; do not
 record over one that is still open.
@@ -365,54 +365,49 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 of it about records they could see anyway. Bram's 1 of 9 is the same gate,
 reading the same records, as the liaison's 12 of 20.
 
-## BEAT 2b — one fault, connected: report, approve in cortex, action on the pane (~4 min)
+## BEAT 2b — one fault, connected: BIT finds it, the maintainer records it, the case opens in cortex (~3 min)
 
-Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`),
-**cortex** (the three approvers' sign-ins), and **HQ**. Rewritten
-2026-10-17 for the dry run on the 23rd: **approval happens in cortex**, not
-in a stand-in. Steps 1–3 are unchanged and measured; steps 4–7 are new and
-unmeasured until the dry run.
+Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`), **HQ**
+(the maintainer view of edge-01) and **cortex** (the three approvers' sign-ins).
 
-Needs, before the camera: `frontend.cortex.baseUrl` and
-`frontend.cortex.idp: openddil` set on the lab (chart ≥ 0.1.147), and the
-intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action`
-under the delegate credential.
-The route is cortex's `lane/01-196` build (`d1fcdc0c`, cortex 2026-10-18): one GET per
-case, no list route. It answers **200 only once the case is released**; approved but not
-released is 404 `no_action_record`, and a **rejected case is 404 for good** (it never reaches
-HQ). A case the delegate may not see is **403 `not_your_case`**; the intake counts that as
-`case_fetch_failed` with a WARNING each tick, so a 403 in the intake log means the
-delegate's scope, not a missing action.
-`<dry run: cortex's 196 rolled on the lab — without it the beat ends at step 5>`
+**Rewritten 2026-10-21 for the dry run.** The beat starts from the fault BIT has already raised, not from a fresh report. The case it opens is the one cortex already holds for that fault: **use it as it is.**
+- Before the take, do not reset, do not upgrade, and do not file a test report on `dis:1:1:1008`.
+- Cortex's side has been asked not to close or release the case before the dry run.
+- Steps 1 and 3 were measured on 2026-10-21, read-only, with nothing pressed. Step 2 is not rehearsed on the lab (see "One take"). Steps 4–6 are unmeasured until the dry run.
+
+Needs, before the camera:
+- `frontend.cortex.baseUrl` and `frontend.cortex.idp: openddil` set on the lab (chart ≥ 0.1.147).
+- The intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action` under the delegate credential. This is on the lab since 2026-10-21: one GET per case, every 30 s.
+
+How cortex's action route answers:
+- It answers **200 only once the case is released**.
+- Approved but not released is 404 `no_action_record`.
+- A **rejected case is 404 for good** (it never reaches HQ).
+- A case the delegate may not see is **403 `not_your_case`**.
+  - The intake treats a 403 as final: it names the case once in a WARNING and never polls it again (openddil-demo 33878a0).
+  - Until that image is on the lab, a 403 is counted as `case_fetch_failed`, with a WARNING each tick.
+  - Either way, a 403 in the intake log means the delegate's scope, not a missing action.
 `<dry run: the link lands signed in — the ?idp=openddil marker starts the brokered login; until cortex's marker build is pinned, expect one click on cortex's login page>`
 
-1. **Edge-01 — Ada files a fault report** on `dis:1:1:1008`: slot
-   `tr_module`, fault code `MRAD-ARR-0417`, a one-line note. The form answers
-   with an event id (HTTP 202), and says approval opens in cortex once the
-   report reaches it.
-2. **Within about a minute, the event crosses the boundary** to cortex. It
-   carries the asset's picture and the spares view: four sites with on-hand
-   counts and lead times, and the **nearest spare: region-east, 2 on hand,
-   3 days** (measured 2026-10-03; every lead time is from the
-   parts-availability stand-in, and the event says so,
-   `lead_time_source: stand-in`).
-3. **The same report from Bram's side** (`dis:2:1:1001`, a BDR asset) is
-   released to a destination whose nations include BDR, and **refused** by an
-   ATL-only one, `no_nation_overlap` (measured 2026-10-03). Optional on
-   camera; it is the same ledger as BEAT 2a.
-4. **Edge-01 — "Open maintenance case" appears on the fault card**, once the
-   delivery has happened. That is the moment the case exists in cortex. The
-   link opens that case: it carries the case id cortex returned for it (the
-   task carries the same `case_id`, cortex 2026-10-18). Before that there
-   is no link and no placeholder. The card checks every 15 s.
-   If BIT already raised this fault, its event was delivered before the
-   report, and Ada's report joins that episode (the delivery reads
-   `duplicate`): the link should be there at once, to the same case, and the case
-   is not new. Say "the case already exists"; don't wait for the link.
-   `<dry run: unverified — the card matches on fault code, so check the BIT
-   event's delivered fault code matches the one on the card>`
-   `<dry run: report to link, seconds>`
-5. **Cortex — one case, three people, each opens the case.** The link
+1. **Edge-01 — BIT has found the fault.** On `dis:1:1:1008`, the fault card reads:
+   *"Fault detected on tr_module: Array module fault, section 3. (MRAD-ARR-0417), 04:37Z. Record it?"*
+   It has a **Record it** button. Beside it: *"MRAD-ARR-0417 tr_module (3) · no work order on record"*.
+   **Say it:** the asset's own built-in test raised this, and nobody has reported it yet. The BIT event crossed the boundary when it was detected, so **cortex already has a case for it.**
+2. **Edge-01 — Ada records it.**
+   - **Record it** opens the fault form pre-filled with slot `tr_module` and code `MRAD-ARR-0417`. She adds a one-line note and submits.
+   - The form answers with an event id (HTTP 202).
+   - The card then reads *"Recorded, awaiting confirmation"* until the CM state shows her report. Then the BIT card goes away.
+   - Her report joins the open episode. On the consumer route it reads `duplicate`, and **no new case opens**: there is one open episode per fault.
+   - **Say it:** "the case already exists; her record is added to that fault, not a second case."
+
+   **One take.** Once she has recorded it, the BIT card does not come back without a scenario reset or an upgrade. Each of those re-delivers the event to cortex as a new event (BEAT 0). Do not rehearse this step on the lab before the take.
+   `<dry run: record to "Recorded, awaiting confirmation", seconds; to the card going away, seconds>`
+3. **HQ — open the case.**
+   - On HQ's maintainer view of edge-01 (`/demo?role=maintainer&edge=edge-01&asset=dis:1:1:1008`), the same fault card shows **Open maintenance case**.
+   - It links to cortex's `/case/{case_id}?idp=openddil`, for the case cortex returned when the BIT event was delivered. Measured 2026-10-21: the link draws, with that case's id in the href.
+   - Click it: cortex opens the case.
+   - **The link is not on Edge-01's card** (measured 2026-10-21: no link there). The card reads its case list from its own origin's `/egress/cases`, and the edge tiers have no egress pane. Open the case from HQ; don't wait for it on Edge-01.
+4. **Cortex — one case, three people, each opens the case.** The link
    opens the case, `/case/{case_id}`; nobody approves "from the link".
    Every step is someone opening that same case under their own sign-in:
    - **atlantia opens the case and chooses** the action;
@@ -420,16 +415,15 @@ delegate's scope, not a missing action.
    - **alice opens the case and releases**.
 
    Whoever holds the pending task sees it full-pane. The other two see the
-   case read-only, with the steps decided so far. A task filed before
-   cortex's 196 has no case id and reads "No case": file the report fresh
-   for the camera. OpenDDIL takes no part in the approval and acts for no
+   case read-only, with the steps decided so far. The case for 1008 carries its case id (the door returned it on the first
+   delivery and again on the 2026-10-21 resend). OpenDDIL takes no part in the approval and acts for no
    one.
    `<dry run: which profile signs in as each of the three; the action text atlantia picks>`
    `<dry run: how liaison and alice reach the case (the same link, or cortex's own task list)>`
    **Say it on camera: while the case is pending, HQ's pane shows nothing
    for it.** That is by design: OpenDDIL reads the decided action, never the
    case's state.
-6. **HQ — the action arrives** on the actions pane within one intake poll
+5. **HQ — the action arrives** on the actions pane within one intake poll
    of the release (30 s on the lab). The row carries the action as cortex
    released it, and **under it the approval chain**, in step order: step,
    role, approver, decision (approved/rejected), decided at. Decision:
@@ -438,7 +432,7 @@ delegate's scope, not a missing action.
    `<dry run: release to admitted row, seconds; the row's text and part>`
    **FIGURE** on the row opens a cited figure only if the action cites one.
    `<dry run: does the released action carry figure citations?>`
-7. **Optional: refusals.** A refused action shows its chain too — a
+6. **Optional: refusals.** A refused action shows its chain too — a
    refusal's chain is part of why it was refused. The lab's stand-in can
    still answer with its three flawed copies (`label_mismatch`,
    `approver_unentitled`, `approver_unresolved`) if its list entry stays
@@ -453,9 +447,10 @@ reads **Ask in cortex**. It opens cortex's ask route with the question
 pre-filled, under Ada's own sign-in; nothing is sent until she sends it.
 Over 4000 characters is refused in the panel, never cut short.
 
-*The beat:* a technician's report at the edge became a case in cortex, the
-people who own the decision each opened that case and chose, approved and
-released it there, and the action
+*The beat:* a fault the asset's own BIT raised at the edge was already a case
+in cortex; the maintainer recorded it, and her record joined that case rather
+than opening another; the people who own the decision each opened the case and
+chose, approved and released it there, and the action
 came back to HQ with its approval chain attached. OpenDDIL carried the
 report out once, under a label, and admitted the action only after checking
 who approved it.
