@@ -615,6 +615,9 @@ spec:
         {{- include "openddil.selectorLabels" (dict "component" "egress-forwarder" "root" .) | nindent 8 }}
       annotations:
         checksum/config: {{ toJson .Values.egress.forwarder.config | sha256sum | quote }}
+        {{- if .Values.egress.kinds }}
+        checksum/kinds: {{ toJson .Values.egress.kinds | sha256sum | quote }}
+        {{- end }}
         {{- if .Values.egress.trust.caConfigMap }}
         checksum/egress-trust: {{ .Values.egress.trust.caConfigMap | sha256sum | quote }}
         {{- end }}
@@ -675,6 +678,13 @@ spec:
             - name: OPENDDIL_FORWARD_CONFIG
               value: {{ printf "%s/config.json" $forwarderConfigMountPath | quote }}
             {{- include "openddil.pgHqEnv" . | nindent 12 }}
+            {{- if .Values.egress.kinds }}
+            # The forwarder reads the kind declarations for the ledger's
+            # episode stamps; without them every stamp is NULL and /cases
+            # matches nothing.
+            - name: OPENDDIL_EGRESS_KINDS_DIR
+              value: {{ $kindsMountPath | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: "INFO"
             {{- if .Values.egress.trust.caConfigMap }}
@@ -688,6 +698,11 @@ spec:
             - name: egress-forwarder-config
               mountPath: {{ $forwarderConfigMountPath }}
               readOnly: true
+            {{- if .Values.egress.kinds }}
+            - name: egress-kinds
+              mountPath: {{ $kindsMountPath }}
+              readOnly: true
+            {{- end }}
             {{- if .Values.egress.forwarder.tokenSecret }}
             - name: egress-forwarder-token
               mountPath: {{ $forwarderTokenMountPath }}
@@ -707,6 +722,11 @@ spec:
         - name: egress-forwarder-config
           configMap:
             name: {{ .Release.Name }}-egress-forwarder-config
+        {{- if .Values.egress.kinds }}
+        - name: egress-kinds
+          configMap:
+            name: {{ .Release.Name }}-egress-kinds
+        {{- end }}
         {{- if .Values.egress.forwarder.tokenSecret }}
         # A config entry's `token_file` points at
         # {{ $forwarderTokenMountPath }}/token (documented on
