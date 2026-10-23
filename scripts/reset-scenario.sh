@@ -3240,7 +3240,9 @@ bridge_graph() {
 
   local toxi_json port upstream
   declare -A toxi_upstream=()
-  toxi_json="$(kubectl get cm -n "$NS" "${RELEASE}-toxiproxy-config" -o jsonpath='{.data.toxiproxy\.json}' 2>/dev/null)"
+  # `|| true`: a release with link control off has no toxiproxy ConfigMap, and
+  # kubectl's NotFound exit would end the reset under `set -e` with no message.
+  toxi_json="$(kubectl get cm -n "$NS" "${RELEASE}-toxiproxy-config" -o jsonpath='{.data.toxiproxy\.json}' 2>/dev/null)" || true
   if [ -n "$toxi_json" ]; then
     while read -r port upstream; do
       [ -z "$port" ] && continue

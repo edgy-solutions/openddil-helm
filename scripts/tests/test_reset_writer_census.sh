@@ -134,6 +134,12 @@ kubectl() {
       printf '%s\n' "${BG_FIXTURE_ROWS[@]}"
       ;;
     "get cm "*)
+      # No fixture = no ConfigMap: answer the way real kubectl does (NotFound
+      # on stderr, exit 1), or the missing-ConfigMap case cannot fail.
+      if [ -z "$BG_TOXI_FIXTURE" ]; then
+        echo "Error from server (NotFound): configmaps \"${A[3]}\" not found" >&2
+        return 1
+      fi
       printf '%s\n' "$BG_TOXI_FIXTURE"
       ;;
     "get "*".status.replicas"*)
