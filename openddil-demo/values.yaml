@@ -2321,4 +2321,37 @@ exerciseControl:
     pollTimeoutSeconds: 180    # -> POLL_TIMEOUT_S
     resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
     apiServerEgress: []        # [{to: [...], ports: [...]}], same shape as adapterEgress; the API server endpoints
+  # The exercise loop: a supervisor starts it from HQ and it repeats `steps`
+  # until stopped or a step fails (a failed step halts it; nothing retries).
+  # Off by default. Steps are per site: a lab stub list and a production
+  # adapter list each set their own. Step kinds: {op: NAME} (an adapter op in
+  # adapter.operations; "restart" is gated and cannot be a step), {reset:
+  # quick} (needs resetJob.enabled), {wait_s: N}, {await: scenarioEnd}. The
+  # await ends after quietSeconds with no fire and nothing in flight, or at
+  # fallbackSeconds whatever the state. recordMax bounds the per-cycle record
+  # kept in the <release>-exercise-loop-record ConfigMap. The names "loop" and
+  # "loopstop" are reserved: no adapter op or sequence may use them.
+  loop:
+    enabled: false
+    steps: [{await: scenarioEnd}, {op: stop}, {reset: quick}, {op: run}]
+    quietSeconds: 120
+    fallbackSeconds: 720
+    recordMax: 50
+  # A lab/test adapter standing in for a real one: runs the bundle's
+  # exercise/stub_adapter.py inside the DIS generator image and serves the
+  # pause/resume/stop/run calls on <release>-exercise-stub-adapter:<port>.
+  # Off by default. Point adapter.endpoint at it. It deliberately carries no
+  # openddil.io/role label (the reset scales every simulator-labelled pod).
+  # simArgsCycle, when set, is a JSON list of argument strings; the k-th run
+  # uses element (k-1) % len, otherwise simArgs applies. `env` is passed to the
+  # generator (target host and the like). The generator script is at
+  # /src/dis_sim.py in its image.
+  stubAdapter:
+    enabled: false
+    image: {repository: ghcr.io/edgy-solutions/openddil/dis-sim, tag: "1.0", digest: "", pullPolicy: IfNotPresent}
+    port: 8096
+    simArgs: ""
+    simArgsCycle: []
+    env: {}
+    resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
   resources: {}

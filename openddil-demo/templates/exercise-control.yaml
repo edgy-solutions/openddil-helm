@@ -23,6 +23,9 @@ adapter block with no consequence.
 {{- end }}
 {{- $allowedOps := list "pause" "restart" "resume" "run" "stop" }}
 {{- range $op, $opDef := ($adapter.operations | default dict) }}
+{{- if has $op (list "loop" "loopstop") }}
+{{- fail (printf "exerciseControl.adapter.operations entry %q is reserved for the loop (start/stop ops); rename it" $op) }}
+{{- end }}
 {{- if not (has $op $allowedOps) }}
 {{- fail (printf "exerciseControl.adapter.operations entry %q is not one of %s" $op (toJson $allowedOps)) }}
 {{- end }}
@@ -51,6 +54,9 @@ crash-looping the pod. Every failure names the sequence and, for a step, its
 index.
 */}}
 {{- range $sname, $seq := ($root.Values.exerciseControl.sequences | default dict) }}
+{{- if has $sname (list "loop" "loopstop") }}
+{{- fail (printf "exerciseControl.sequences: name %q is reserved for the loop (start/stop ops); rename it" $sname) }}
+{{- end }}
 {{- if not (regexMatch "^[a-z]{1,32}$" $sname) }}
 {{- fail (printf "exerciseControl.sequences: name %q must match [a-z]{1,32}" $sname) }}
 {{- end }}
@@ -100,6 +106,54 @@ index.
 {{- end }}
 {{- if gt $totalWait 1800.0 }}
 {{- fail (printf "exerciseControl.sequences.%s: total wait_s %v exceeds 1800" $sname $totalWait) }}
+{{- end }}
+{{- end }}
+{{- /*
+EXERCISE LOOP (exerciseControl.loop.enabled), checked with the rules of
+control.py's load_loop_config so a bad step list fails `helm template`
+instead of leaving the loop unavailable at run time. The reserved names
+"loop"/"loopstop" are refused above, for adapter ops and for sequences.
+*/}}
+{{- $loop := $root.Values.exerciseControl.loop | default dict }}
+{{- $loopOn := $loop.enabled | default false }}
+{{- $stub := $root.Values.exerciseControl.stubAdapter | default dict }}
+{{- $stubOn := $stub.enabled | default false }}
+{{- $stubPort := $stub.port | default 8096 }}
+{{- if $loopOn }}
+{{- $loopSteps := $loop.steps | default list }}
+{{- if not $loopSteps }}
+{{- fail "exerciseControl.loop.enabled is true but exerciseControl.loop.steps is empty" }}
+{{- end }}
+{{- range $i, $st := $loopSteps }}
+{{- if or (not (kindIs "map" $st)) (ne (len $st) 1) }}
+{{- fail (printf "exerciseControl.loop.steps: step %d must be an object with exactly one of op, reset, wait_s, await" $i) }}
+{{- end }}
+{{- $kind := first (keys $st) }}
+{{- $arg := get $st $kind }}
+{{- if not (has $kind (list "op" "reset" "wait_s" "await")) }}
+{{- fail (printf "exerciseControl.loop.steps: step %d has kind %q; allowed: op, reset, wait_s, await" $i $kind) }}
+{{- end }}
+{{- if eq $kind "op" }}
+{{- if not (hasKey ($adapter.operations | default dict) (toString $arg)) }}
+{{- fail (printf "exerciseControl.loop.steps: step %d: op %q is not in exerciseControl.adapter.operations" $i (toString $arg)) }}
+{{- end }}
+{{- if eq (toString $arg) "restart" }}
+{{- fail (printf "exerciseControl.loop.steps: step %d: restart is gated and cannot be a loop step" $i) }}
+{{- end }}
+{{- else if eq $kind "reset" }}
+{{- if ne (toString $arg) "quick" }}
+{{- fail (printf "exerciseControl.loop.steps: step %d: reset must be \"quick\"" $i) }}
+{{- end }}
+{{- if not (($root.Values.exerciseControl.resetJob | default dict).enabled | default false) }}
+{{- fail "exerciseControl.loop has a reset step but exerciseControl.resetJob.enabled is false -- there is no reset Job to run" }}
+{{- end }}
+{{- else if eq $kind "wait_s" }}
+{{- if or (not (has (kindOf $arg) (list "float64" "float32" "int" "int64" "int32"))) (lt (float64 $arg) 0.0) }}
+{{- fail (printf "exerciseControl.loop.steps: step %d: wait_s must be a number >= 0" $i) }}
+{{- end }}
+{{- else if ne (toString $arg) "scenarioEnd" }}
+{{- fail (printf "exerciseControl.loop.steps: step %d: await must be \"scenarioEnd\"" $i) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- /*
@@ -220,6 +274,12 @@ one that serves /metrics.
 {{- $rateSources = append $rateSources (printf "http://%s-sensor-ingest-%s%s:%v/metrics" $root.Release.Name .id (include "openddil.svcDomain" $root) $root.Values.sensorIngest.httpPort) }}
 {{- end }}
 {{- end }}
+{{- $inflightSources := list }}
+{{- if $loopOn }}
+{{- range $root.Values.edges }}
+{{- $inflightSources = append $inflightSources (printf "http://%s-redpanda-connect-%s-metrics%s:%v/metrics" $root.Release.Name .id (include "openddil.svcDomain" $root) $root.Values.redpandaConnect.httpPort) }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -230,6 +290,39 @@ metadata:
 data:
   adapter.json: {{ toJson $adapter | quote }}
   sequences.json: {{ toJson $root.Values.exerciseControl.sequences | quote }}
+  {{- if $loopOn }}
+  loop.json: {{ toJson (dict "steps" $loop.steps "quietSeconds" $loop.quietSeconds "fallbackSeconds" $loop.fallbackSeconds "recordMax" $loop.recordMax) | quote }}
+  {{- end }}
+{{- if $loopOn }}
+---
+# The per-cycle loop record. Metadata only, deliberately NO data field: the
+# control service patches cycles.json into it, and a helm upgrade that owns no
+# data key never overwrites what it wrote.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-exercise-loop-record
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+{{- range $root.Values.edges }}
+---
+# Headless Service over this edge's Connect pods, so exercise-control can read
+# the metrics endpoint (the Connect Deployment has no Service of its own).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-redpanda-connect-{{ .id }}-metrics
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ $root.Values.redpandaConnect.httpPort }}
+      name: metrics
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" .id) "root" $root) | nindent 4 }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -271,12 +364,15 @@ spec:
         exercise-control pod rolls once on the upgrade that first ships this
         form of it, even with no sequences.
         */}}
-        checksum/config: {{ toJson (dict "adapter" $adapter "sequences" $root.Values.exerciseControl.sequences) | sha256sum | quote }}
+        {{- /* "loop" joins the sum only when on, so a loop-off release keeps its old sum and does not roll. */}}
+        {{- $cfgSum := dict "adapter" $adapter "sequences" $root.Values.exerciseControl.sequences }}
+        {{- if $loopOn }}{{- $_ := set $cfgSum "loop" $loop }}{{- end }}
+        checksum/config: {{ toJson $cfgSum | sha256sum | quote }}
         {{- if $rjOn }}
         checksum/reset-job: {{ toJson $jobSum | sha256sum | quote }}
         {{- end }}
     spec:
-      {{- if $rjOn }}
+      {{- if or $rjOn $loopOn }}
       serviceAccountName: {{ $root.Release.Name }}-exercise-control
       {{- end }}
       {{- with $root.Values.global.imagePullSecrets }}
@@ -317,6 +413,14 @@ spec:
               value: {{ join "," $restateUrls | quote }}
             - name: EXERCISE_RESET_MAX_OPEN
               value: {{ $rj.maxOpen | default 300 | quote }}
+            {{- if $loopOn }}
+            - name: EXERCISE_LOOP_FILE
+              value: /etc/exercise/loop.json
+            - name: EXERCISE_INFLIGHT_SOURCES
+              value: {{ join "," $inflightSources | quote }}
+            - name: EXERCISE_LOOP_RECORD_CM
+              value: {{ $root.Release.Name }}-exercise-loop-record
+            {{- end }}
             {{- if $rjOn }}
             - name: EXERCISE_RESET_JOB_FILE
               value: /etc/exercise-reset-job/job.json
@@ -425,6 +529,26 @@ spec:
         {{- end }}
       ports:
         - port: {{ $root.Values.sensorIngest.httpPort }}
+    {{- if $loopOn }}
+    # The loop's in-flight count: each edge's Connect metrics, read-only.
+    - to:
+        {{- range $root.Values.edges }}
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" (printf "redpanda-connect-%s" .id) "root" $root) | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ $root.Values.redpandaConnect.httpPort }}
+    {{- end }}
+    {{- if $stubOn }}
+    # The lab/test stub adapter.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "openddil.selectorLabels" (dict "component" "exercise-stub-adapter" "root" $root) | nindent 14 }}
+      ports:
+        - port: {{ $stubPort }}
+    {{- end }}
     # The reset pre-flight's open-invocation count: Restate admin, read-only query.
     - to:
         {{- range $restateAdmin }}
@@ -449,8 +573,9 @@ spec:
       ports:
         {{- toYaml .ports | nindent 8 }}
     {{- end }}
-    {{- if $rjOn }}
-    # The API server, for the control service creating reset Jobs.
+    {{- if or $rjOn $loopOn }}
+    # The API server, for the control service creating reset Jobs and
+    # patching the loop record.
     {{- range $rj.apiServerEgress }}
     - to:
         {{- toYaml .to | nindent 8 }}
@@ -537,6 +662,8 @@ subjects:
   - kind: ServiceAccount
     name: {{ $root.Release.Name }}-exercise-reset
     namespace: {{ $root.Release.Namespace }}
+{{- end }}
+{{- if or $rjOn $loopOn }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -545,7 +672,7 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
 ---
-# Control only creates and reads the reset Jobs.
+# Control only creates and reads the reset Jobs, and patches the loop record.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -553,9 +680,17 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
 rules:
+  {{- if $rjOn }}
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list"]
+  {{- end }}
+  {{- if $loopOn }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $root.Release.Name }}-exercise-loop-record]
+    verbs: ["get", "patch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

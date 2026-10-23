@@ -1,0 +1,101 @@
+{{- if .Values.exerciseControl.stubAdapter.enabled }}
+{{- $root := . }}
+{{- $stub := .Values.exerciseControl.stubAdapter }}
+# =============================================================================
+# Stub adapter: a LAB/TEST adapter, off by default
+# (exerciseControl.stubAdapter.enabled: false). It stands in for a real
+# exercise adapter so the exercise loop can be tried end to end: it serves the
+# pause/resume/stop/run calls and starts and stops the DIS generator script
+# from its own image as a child process.
+#
+# DELIBERATELY NO openddil.io/role=simulator LABEL. The reset scales every
+# simulator-labelled pod to zero and restores it afterwards; this pod must stay
+# up through a reset so the loop's own run/stop calls still have an adapter to
+# talk to. Do not add that label.
+#
+# Code arrives the way exercise-control's does: the bundle loader copies
+# demo/exercise to /app, and the dis-sim image's own python runs it. The
+# generator script is /src/dis_sim.py in that image.
+#
+# No NetworkPolicy of its own: this chart declares no namespace-wide default
+# deny, and nothing selects this pod for ingress, so its UDP egress to
+# sensor-ingest and the control service's calls to it are not blocked by it.
+# (exercise-control's own egress policy gets a rule for this pod.)
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $root.Release.Name }}-exercise-stub-adapter
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $stub.port }}
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" "exercise-stub-adapter" "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-exercise-stub-adapter
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" "exercise-stub-adapter" "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" "exercise-stub-adapter" "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" "exercise-stub-adapter" "root" $root) | nindent 8 }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/exercise" "dst" "app")
+          ) "root" $root) | nindent 8 }}
+      containers:
+        - name: stub-adapter
+          image: {{ include "openddil.thirdPartyImage" $stub.image }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $stub.image.pullPolicy "root" $root) }}
+          command: ["python", "-u", "/app/stub_adapter.py"]
+          env:
+            - name: STUB_PORT
+              value: {{ $stub.port | quote }}
+            - name: STUB_SIM_PATH
+              value: /src/dis_sim.py
+            - name: STUB_SIM_ARGS
+              value: {{ $stub.simArgs | default "" | quote }}
+            {{- if $stub.simArgsCycle }}
+            - name: STUB_SIM_ARGS_CYCLE
+              value: {{ toJson $stub.simArgsCycle | quote }}
+            {{- end }}
+            {{- range $k, $v := ($stub.env | default dict) }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - containerPort: {{ $stub.port }}
+              name: http
+          readinessProbe:
+            tcpSocket: { port: {{ $stub.port }} }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml $stub.resources | nindent 12 }}
+          volumeMounts:
+            - name: bundle-shared
+              mountPath: /app
+              subPath: app
+      volumes:
+        - name: bundle-shared
+          emptyDir: {}
+{{- end }}
