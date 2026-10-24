@@ -9,12 +9,15 @@
 #   F2 a step kind outside op/reset/wait_s/await
 #   F3 an op step naming an op the adapter lacks
 #   F4 an adapter op named loop, F5 a sequence named loop / loopstop
+#   F6 stub adapter enabled with no simSourceConfigMap
 # Positive renders:
 #   P0 default render carries none of it
 #   P1 loop.json, env, per-edge Connect metrics Service, NetworkPolicy rule,
 #      Role rule scoped by resourceNames
 #   P2 the record ConfigMap has metadata only -- no `data` field
-#   P3 the stub adapter: Deployment + Service, env, no role label
+#   P3 the stub adapter: Deployment + Service, env, no role label, and the
+#      simulator script ConfigMap mounted at /src
+#   P4 stub disabled (exercise-control on): no stub Deployment or Service
 # ===========================================================================
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +64,15 @@ failcase "F5a sequence named loop" "reserved for the loop" \
   "${BASE[@]}" --set-json 'exerciseControl.sequences={"loop":{"label":"L","steps":[{"wait_s":1}]}}'
 failcase "F5b sequence named loopstop" "reserved for the loop" \
   "${BASE[@]}" --set-json 'exerciseControl.sequences={"loopstop":{"label":"L","steps":[{"wait_s":1}]}}'
+
+failcase "F6 stub enabled, no simSourceConfigMap" "exerciseControl.stubAdapter.simSourceConfigMap"   "${BASE[@]}" --set exerciseControl.stubAdapter.enabled=true
+failcase "F6b message says the image has no script" "carries no simulator script"   "${BASE[@]}" --set exerciseControl.stubAdapter.enabled=true
+
+# P4: stub disabled, exercise-control on.
+helm template t "$CHART" "${BASE[@]}" > "$TMP/p4.yaml" 2>/dev/null
+if grep -q "exercise-stub-adapter" "$TMP/p4.yaml"; then
+  echo "FAIL P4 stub disabled still renders stub objects"; FAIL=1
+else echo "PASS P4 stub disabled renders no stub objects"; fi
 
 # P0: default render has none of it.
 helm template t "$CHART" > "$TMP/p0.yaml" 2>/dev/null
@@ -115,6 +127,7 @@ PYEOF
 
 # P3: stub adapter.
 helm template t "$CHART" "${BASE[@]}" --set exerciseControl.stubAdapter.enabled=true \
+  --set exerciseControl.stubAdapter.simSourceConfigMap=my-sim-src \
   --set exerciseControl.stubAdapter.simArgs="--rate 2" \
   --set-json 'exerciseControl.stubAdapter.simArgsCycle=["--a","--b"]' \
   --set exerciseControl.stubAdapter.env.DIS_TARGET_HOST=h > "$TMP/p3.yaml" 2>"$TMP/p3.err" \
@@ -145,6 +158,14 @@ if dep:
           and env.get("DIS_TARGET_HOST") == "h" and env.get("STUB_PORT") == "8096", "P3 stub env")
     check(c["command"][-1].endswith("stub_adapter.py") and "dis-sim" in c["image"],
           "P3 stub runs stub_adapter.py from the dis-sim image")
+    pod = dep["spec"]["template"]["spec"]
+    vol = [v for v in pod.get("volumes", []) if v.get("name") == "sim-src"]
+    check(len(vol) == 1 and vol[0].get("configMap", {}).get("name") == "my-sim-src"
+          and vol[0]["configMap"].get("items") == [{"key": "dis_sim.py", "path": "dis_sim.py"}],
+          "P3 volume sim-src is the named ConfigMap, key dis_sim.py")
+    mnt = [m for m in c.get("volumeMounts", []) if m.get("name") == "sim-src"]
+    check(len(mnt) == 1 and mnt[0].get("mountPath") == "/src",
+          "P3 sim-src mounted at /src")
 sys.exit(1 if bad else 0)
 PYEOF
 exit $FAIL

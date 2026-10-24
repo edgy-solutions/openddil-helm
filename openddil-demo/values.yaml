@@ -2345,9 +2345,13 @@ exerciseControl:
   # simArgsCycle, when set, is a JSON list of argument strings; the k-th run
   # uses element (k-1) % len, otherwise simArgs applies. `env` is passed to the
   # generator (target host and the like). The generator script is at
-  # /src/dis_sim.py in its image.
+  # /src/dis_sim.py, from simSourceConfigMap.
   stubAdapter:
     enabled: false
+    # Name of a ConfigMap in the release namespace whose key dis_sim.py is the
+    # simulator script. The dis-sim image carries no script (the lab sims mount
+    # the same kind of ConfigMap). Required when the stub is enabled.
+    simSourceConfigMap: ""
     image: {repository: ghcr.io/edgy-solutions/openddil/dis-sim, tag: "1.0", digest: "", pullPolicy: IfNotPresent}
     port: 8096
     simArgs: ""

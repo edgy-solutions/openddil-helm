@@ -1,12 +1,17 @@
 {{- if .Values.exerciseControl.stubAdapter.enabled }}
 {{- $root := . }}
 {{- $stub := .Values.exerciseControl.stubAdapter }}
+{{- if not $stub.simSourceConfigMap }}
+{{- fail "exerciseControl.stubAdapter.simSourceConfigMap is required when the stub adapter is enabled: the dis-sim image carries no simulator script, so the stub needs a ConfigMap (key dis_sim.py) mounted at /src" }}
+{{- end }}
 # =============================================================================
 # Stub adapter: a LAB/TEST adapter, off by default
 # (exerciseControl.stubAdapter.enabled: false). It stands in for a real
 # exercise adapter so the exercise loop can be tried end to end: it serves the
 # pause/resume/stop/run calls and starts and stops the DIS generator script
-# from its own image as a child process.
+# as a child process. The script is NOT in the image: it comes from the
+# ConfigMap named by exerciseControl.stubAdapter.simSourceConfigMap (key
+# dis_sim.py), mounted at /src.
 #
 # DELIBERATELY NO openddil.io/role=simulator LABEL. The reset scales every
 # simulator-labelled pod to zero and restores it afterwards; this pod must stay
@@ -15,7 +20,8 @@
 #
 # Code arrives the way exercise-control's does: the bundle loader copies
 # demo/exercise to /app, and the dis-sim image's own python runs it. The
-# generator script is /src/dis_sim.py in that image.
+# generator script is /src/dis_sim.py, from the simSourceConfigMap mount (the
+# image carries none).
 #
 # No NetworkPolicy of its own: this chart declares no namespace-wide default
 # deny, and nothing selects this pod for ingress, so its UDP egress to
@@ -95,7 +101,14 @@ spec:
             - name: bundle-shared
               mountPath: /app
               subPath: app
+            - name: sim-src
+              mountPath: /src
       volumes:
+        - name: sim-src
+          configMap:
+            name: {{ $stub.simSourceConfigMap | quote }}
+            items:
+              - {key: dis_sim.py, path: dis_sim.py}
         - name: bundle-shared
           emptyDir: {}
 {{- end }}
