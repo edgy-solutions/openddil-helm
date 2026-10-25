@@ -248,9 +248,12 @@ the suite measured a byte of what the read path carries. This one does.
   took 4 min 46 s from the egress pods starting (2026-10-12, rev 142). Wait
   5 minutes after an upgrade or a reset before rolling, so the HQ pane shows
   the BIT-only event before BEAT 2b files the report.
-* **Each of those re-opened events is delivered to the consumer's
-  destination once.** An upgrade or a reset is a new event there, by design;
-  BEAT 2b's own report on the same episode is not (it reads `duplicate`).
+* **An upgrade sends the consumer nothing.** The route dedupes on the
+  episode, so a re-opened event is not a new case (measured rev 189,
+  2026-10-21: 0 to-consumer outcome lines through 15 min after the upgrade,
+  three BIT cycles). BEAT 2b's own report on the same episode reads
+  `duplicate`. What a scenario reset sends is not measured since the episode
+  key landed; do not say it on camera.
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
@@ -400,7 +403,7 @@ How cortex's action route answers:
    - Her report joins the open episode. On the consumer route it reads `duplicate`, and **no new case opens**: there is one open episode per fault.
    - **Say it:** "the case already exists; her record is added to that fault, not a second case."
 
-   **One take.** Once she has recorded it, the BIT card does not come back without a scenario reset or an upgrade. Each of those re-delivers the event to cortex as a new event (BEAT 0). Do not rehearse this step on the lab before the take.
+   **One take.** Once she has recorded it, the BIT card does not come back without a scenario reset or an upgrade, and the hold on resets stands. Do not rehearse this step on the lab before the take.
    `<dry run: record to "Recorded, awaiting confirmation", seconds; to the card going away, seconds>`
 3. **HQ — open the case.**
    - On HQ's maintainer view of edge-01 (`/demo?role=maintainer&edge=edge-01&asset=dis:1:1:1008`), the same fault card shows **Open maintenance case**.
