@@ -3,7 +3,7 @@
 Four browser profiles, four logins, three connected beats (the C2 picture; a
 fault report to an action; an arrival), two cuts, two heals. Roughly 21–25
 minutes of recording. Every number below was measured on 2026-09-09 unless dated
-otherwise (BEAT 2a: 2026-10-03; BEAT 2b: 2026-10-21, its record and cortex steps unmeasured; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
+otherwise (BEAT 2a: 2026-10-03; BEAT 2b: 2026-10-26 on `dis:2:1:1010`, its cortex steps unmeasured; BEAT 2c: 2026-10-15); if one disagrees on the day, **stop
 and check rather than narrate around it** — that disagreement is the finding.
 Lines marked `<dry run: …>` are placeholders the dry run fills in; do not
 record over one that is still open.
@@ -237,23 +237,21 @@ the suite measured a byte of what the read path carries. This one does.
   (`tak-client-certs.sh` output, `docs/tak-client-setup.md` §3–§4) **and the
   stream enabled** — the package imports it disabled. The device's server
   entry shows connected.
-* **No `helm upgrade` between the last fault report and the take.** Every
-  upgrade wipes Restate, and fault reports are not yet replayed from the
-  topic: after an upgrade the asset carries its BIT fault only, and BEAT 2b's
-  report must be filed again (measured 2026-10-03: the BIT-only event
-  re-appeared 3.5 minutes after the egress pods started).
-* **A scenario reset clears filed reports too**, by design. The BIT-only
-  event came back 21 s after the reset's restore (measured 2026-10-03; 22 s
-  after the reset Job ended on 2026-10-12, rev 142). After an upgrade it
-  took 4 min 46 s from the egress pods starting (2026-10-12, rev 142). Wait
-  5 minutes after an upgrade or a reset before rolling, so the HQ pane shows
-  the BIT-only event before BEAT 2b files the report.
-* **An upgrade sends the consumer nothing.** The route dedupes on the
-  episode, so a re-opened event is not a new case (measured rev 189,
-  2026-10-21: 0 to-consumer outcome lines through 15 min after the upgrade,
-  three BIT cycles). BEAT 2b's own report on the same episode reads
-  `duplicate`. What a scenario reset sends is not measured since the episode
-  key landed; do not say it on camera.
+* **An upgrade keeps filed reports and sends the consumer nothing.** Every
+  upgrade wipes Restate on the lab. Each tier then restores every reported
+  fault from its own store, with its first-observed time, so the episode is
+  the same one and the case link does not move. The route dedupes on the
+  episode: the restored report reads `duplicate`, and no new case opens
+  (measured rev 189, 2026-10-21: 0 to-consumer lines through 15 min; rev 190,
+  2026-10-25: 2 `duplicate`, one per open case, 0 delivered, both HQ case
+  links unchanged). **After an upgrade, check that the beat's asset still has
+  live telemetry:** rev 190 left 1010's fixture silent (see BEAT 2b, "Needs").
+* **A scenario reset clears filed reports**, by design. A report-only fault
+  such as 1010's is then gone, and so is its card; do not reset before
+  BEAT 2b. On 1008 the BIT-only event came back 21 s after the reset's
+  restore (measured 2026-10-03; 22 s after the reset Job ended on
+  2026-10-12, rev 142). What a scenario reset sends is not measured since
+  the episode key landed; do not say it on camera.
 
 ## BEAT 1 — four profiles, four logins (before any cut)
 
@@ -368,48 +366,49 @@ Connected; no cut yet. Two screens: the **TAK device** and the **HQ view**.
 of it about records they could see anyway. Bram's 1 of 9 is the same gate,
 reading the same records, as the liaison's 12 of 20.
 
-## BEAT 2b — one fault, connected: BIT finds it, the maintainer records it, the case opens in cortex (~3 min)
+## BEAT 2b — one fault, connected: the maintainer's report is a case in cortex, decided there, admitted at HQ (~3 min)
 
-Connected; no cut yet. Screens: **Edge-01** (Ada, `operator.atlantia`), **HQ**
-(the maintainer view of edge-01) and **cortex** (the three approvers' sign-ins).
+Connected; no cut yet. Screens: **Edge-02** (Ada, `operator.atlantia`), **HQ**
+(the maintainer view of edge-02) and **cortex** (the three approvers' sign-ins).
 
-**Rewritten 2026-10-21 for the dry run.** The beat starts from the fault BIT has already raised, not from a fresh report. The case it opens is the one cortex already holds for that fault: **use it as it is.**
-- Before the take, do not reset, do not upgrade, and do not file a test report on `dis:1:1:1008`.
-- Cortex's side has been asked not to close or release the case before the dry run.
-- Steps 1 and 3 were measured on 2026-10-21, read-only, with nothing pressed. Step 2 is not rehearsed on the lab (see "One take"). Steps 4–6 are unmeasured until the dry run.
+**Rewritten 2026-10-26 for `dis:2:1:1010`.** The beat starts from the report Ada has already filed, not from a fresh one, and it uses the case cortex already holds for that report **as it is** (`da479c74…` on the lab, delivered 2026-10-25).
+- 1010 has **no BIT source**. Its fault exists only because Ada reported it, so there is no BIT card and no **Record it** button.
+- Before the take, do not reset, and do not file a test report on `dis:2:1:1010`.
+- An upgrade keeps her report and the case link (measured rev 190). Even so, check 1010's telemetry afterwards (see "Needs").
+- Cortex's side holds the case open until the take.
+- Steps 1 and 2 were measured on 2026-10-26, read-only. The only presses were the two view toggles named below.
+- Steps 3–6 are unmeasured until the brokered walk on the case.
 
 Needs, before the camera:
 - `frontend.cortex.baseUrl` and `frontend.cortex.idp: openddil` set on the lab (chart ≥ 0.1.147).
-- The intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action` under the delegate credential. This is on the lab since 2026-10-21: one GET per case, every 30 s.
+- The intake's per-case entry pointed at cortex's `GET /cases/{case_id}/action` under the delegate credential: one GET per case, every 30 s. Its log line reads `intake case poll ... open=2 fetched=2 no_action=2 failed=0 deferred=0 forbidden=0` until the release.
+- **1010 not LOST.**
+  - On rev 190 the fixture that feeds 1010 kept sending, but nothing reached edge-02 after the roll. Every screen then read "LOST", with the constraining factor "Telemetry stale", and the 3D scene hid the asset.
+  - The card, the report and the link still drew.
+  - Check the asset header on Edge-02 before the take. If it reads LOST, do not narrate around it: restarting the fixture is a decision taken before the camera, not on it.
 
 How cortex's action route answers:
 - It answers **200 only once the case is released**.
 - Approved but not released is 404 `no_action_record`.
 - A **rejected case is 404 for good** (it never reaches HQ).
-- A case the delegate may not see is **403 `not_your_case`**.
-  - The intake treats a 403 as final: it names the case once in a WARNING and never polls it again (openddil-demo 33878a0).
-  - Until that image is on the lab, a 403 is counted as `case_fetch_failed`, with a WARNING each tick.
-  - Either way, a 403 in the intake log means the delegate's scope, not a missing action.
-`<dry run: the link lands signed in — the ?idp=openddil marker starts the brokered login; until cortex's marker build is pinned, expect one click on cortex's login page>`
+- A case the delegate may not see is **403 `not_your_case`**. The intake treats a 403 as final: it names the case once in a WARNING (`... answered HTTP 403, final, not polled again`) and never polls it again. A 403 means the delegate's scope, not a missing action.
 
-1. **Edge-01 — BIT has found the fault.** On `dis:1:1:1008`, the fault card reads:
-   *"Fault detected on tr_module: Array module fault, section 3. (MRAD-ARR-0417), 04:37Z. Record it?"*
-   It has a **Record it** button. Beside it: *"MRAD-ARR-0417 tr_module (3) · no work order on record"*.
-   **Say it:** the asset's own built-in test raised this, and nobody has reported it yet. The BIT event crossed the boundary when it was detected, so **cortex already has a case for it.**
-2. **Edge-01 — Ada records it.**
-   - **Record it** opens the fault form pre-filled with slot `tr_module` and code `MRAD-ARR-0417`. She adds a one-line note and submits.
-   - The form answers with an event id (HTTP 202).
-   - The card then reads *"Recorded, awaiting confirmation"* until the CM state shows her report. Then the BIT card goes away.
-   - Her report joins the open episode. On the consumer route it reads `duplicate`, and **no new case opens**: there is one open episode per fault.
-   - **Say it:** "the case already exists; her record is added to that fault, not a second case."
-
-   **One take.** Once she has recorded it, the BIT card does not come back without a scenario reset or an upgrade, and the hold on resets stands. Do not rehearse this step on the lab before the take.
-   `<dry run: record to "Recorded, awaiting confirmation", seconds; to the card going away, seconds>`
-3. **HQ — open the case.**
-   - On HQ's maintainer view of edge-01 (`/demo?role=maintainer&edge=edge-01&asset=dis:1:1:1008`), the same fault card shows **Open maintenance case**.
-   - It links to cortex's `/case/{case_id}?idp=openddil`, for the case cortex returned when the BIT event was delivered. Measured 2026-10-21: the link draws, with that case's id in the href.
-   - Click it: cortex opens the case.
-   - **The link is not on Edge-01's card** (measured 2026-10-21: no link there). The card reads its case list from its own origin's `/egress/cases`, and the edge tiers have no egress pane. Open the case from HQ; don't wait for it on Edge-01.
+1. **Edge-02 — the report is on the card.**
+   - On `dis:2:1:1010`, the configuration card reads *"Discrepancies 6 +1 manual"*. **View discrepancies** opens the list (a view toggle; nothing is sent).
+   - Ada's row reads *"T/R array module fails BIT on power-up; array output degraded"*. The fault code is not printed on the row; slot `tr_module` appears in the configuration rows above it.
+   - **Say it:** "nobody's test found this; she did, and she reported it. That report crossed the boundary once, under its label, and cortex opened a case for it."
+   - **Filing it again on stage** is possible: same slot, same code, on the open fault. Predicted (not measured on 1010):
+     - her second report joins the open episode;
+     - the route reads `duplicate`;
+     - **no new case opens**, and the link stays on the same case.
+   - Do not rehearse it. Rehearsing would itself add a source to the episode.
+2. **HQ — the case link.**
+   - On HQ's maintainer view of edge-02 (`/demo?role=maintainer&edge=edge-02&asset=dis:2:1:1010`), the card shows **Open maintenance case**.
+   - It links to cortex's `/case/{case_id}?idp=openddil`, for the case cortex returned when her report was delivered.
+   - Measured 2026-10-26: the link draws on first read, with that case's id in the href.
+   - **The link is not on Edge-02** (measured: none in 45 s). The card reads its case list from its own origin's `/egress/cases`, and the edge tiers keep no case list. Open the case from HQ.
+3. **Click Open maintenance case.** Cortex opens in a new tab. The `?idp=openddil` marker starts the brokered sign-in; with her OpenDDIL session open it should complete with no click.
+   `<walk: does the sign-in complete with no click; what the case page shows first>`
 4. **Cortex — one case, three people, each opens the case.** The link
    opens the case, `/case/{case_id}`; nobody approves "from the link".
    Every step is someone opening that same case under their own sign-in:
@@ -418,23 +417,24 @@ How cortex's action route answers:
    - **alice opens the case and releases**.
 
    Whoever holds the pending task sees it full-pane. The other two see the
-   case read-only, with the steps decided so far. The case for 1008 carries its case id (the door returned it on the first
-   delivery and again on the 2026-10-21 resend). OpenDDIL takes no part in the approval and acts for no
+   case read-only, with the steps decided so far. OpenDDIL takes no part in the approval and acts for no
    one.
-   `<dry run: which profile signs in as each of the three; the action text atlantia picks>`
-   `<dry run: how liaison and alice reach the case (the same link, or cortex's own task list)>`
+   `<walk: the disposition atlantia picks and how the case page shows it>`
+   `<walk: how liaison and alice reach the case (the same link, or cortex's own task list)>`
    **Say it on camera: while the case is pending, HQ's pane shows nothing
    for it.** That is by design: OpenDDIL reads the decided action, never the
    case's state.
-5. **HQ — the action arrives** on the actions pane within one intake poll
+5. **HQ — the action arrives** on the "Maintenance actions" pane within one intake poll
    of the release (30 s on the lab). The row carries the action as cortex
    released it, and **under it the approval chain**, in step order: step,
    role, approver, decision (approved/rejected), decided at. Decision:
    **ADMIT** — the same checks as before: the label matches the record it
    answers, every approver resolves and is entitled, on_behalf_of holds.
-   `<dry run: release to admitted row, seconds; the row's text and part>`
-   **FIGURE** on the row opens a cited figure only if the action cites one.
-   `<dry run: does the released action carry figure citations?>`
+   - Expected cells: Asset `dis:2:1:1010`, Task (cortex's task text), Outcome `approved`, Approved by (the chain).
+   - **Part / From may be empty**: cortex lists parts as strings, and the pane's pointers expect objects.
+   - **Cites is expected empty**: cortex carries citations under a different key from the pane's column.
+   - The pane already holds one older admitted row, for 1008's case. Point at the row with `dis:2:1:1010`.
+   `<walk: release to admitted row, seconds; the row's text; whether Part/From and Approved by fill>`
 6. **Optional: refusals.** A refused action shows its chain too — a
    refusal's chain is part of why it was refused. The lab's stand-in can
    still answer with its three flawed copies (`label_mismatch`,
@@ -445,18 +445,17 @@ How cortex's action route answers:
    shows nothing for it, ever. HQ's refusals are admission refusals of a released action.
    `<dry run: keep the stand-in entry for this shot, or drop the step>`
 
-*Ask in cortex (optional, ~30 s):* on Edge-01 the question panel's button
-reads **Ask in cortex**. It opens cortex's ask route with the question
-pre-filled, under Ada's own sign-in; nothing is sent until she sends it.
-Over 4000 characters is refused in the panel, never cut short.
+*Ask in cortex (optional, ~30 s; on stage only if it is rehearsed in the same session as the walk and answers):*
+- On 1010's maintainer view, the round **Ask the manual** button at the bottom left of the 3D view opens the question panel.
+- Measured 2026-10-26, on Edge-02 and HQ: the panel is scoped to *"DMC-ODMRAD-A-34-10-01-00A-421A-A — Array module fault, section 3"*. Its **Ask in cortex** button stays disabled until a question is typed.
+- Pressing it opens cortex's ask route with the question pre-filled, under Ada's own sign-in. Nothing is sent until she sends it in cortex.
+- Over 4000 characters is refused in the panel, never cut short.
 
-*The beat:* a fault the asset's own BIT raised at the edge was already a case
-in cortex; the maintainer recorded it, and her record joined that case rather
-than opening another; the people who own the decision each opened the case and
-chose, approved and released it there, and the action
-came back to HQ with its approval chain attached. OpenDDIL carried the
-report out once, under a label, and admitted the action only after checking
-who approved it.
+*The beat:* a fault the maintainer found and reported at the edge became a case
+in cortex. The people who own the decision each opened that case and chose,
+approved and released it there. The action came back to HQ with its approval
+chain attached. OpenDDIL carried the report out once, under a label, and
+admitted the action only after checking who approved it.
 
 ## BEAT 2c — Arrival: something observed becomes a fleet asset (~3 min)
 
