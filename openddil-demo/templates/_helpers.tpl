@@ -952,6 +952,40 @@ true
 {{- end }}
 
 {{/*
+openddil.anyIdentityReplica -- renders "true" when any tier in the tier list
+renders true for openddil.tierIdentityReplica, else nothing. Takes the chart
+root. Gates the realm-version stamps on the ROOT Keycloak and PEP, so a
+release with no replica renders exactly what it did before.
+*/}}
+{{- define "openddil.anyIdentityReplica" -}}
+{{- $root := . -}}
+{{- range $t := (include "openddil.tierList" $root | fromYamlArray) -}}
+{{- if eq (include "openddil.tierIdentityReplica" (dict "tier" $t "root" $root)) "true" -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.realmVersion -- the digest of the realm's INPUTS the chart can see:
+the content-addressed bundle that carries the realm artefact, plus the
+deployment-layer users overlay. Takes the chart root. It moves whenever the
+realm can have moved, and may move when it did not (a bundle change
+elsewhere): a false roll, never a false match. A per-file realm digest
+stamped by the bundle build is the follow-up.
+
+An unpinned bundle (no bundle.image.digest) is not content-addressed, so the
+Release.Revision is folded in and the version moves every revision, the same
+rule openddil.policyChecksum applies.
+*/}}
+{{- define "openddil.realmVersion" -}}
+{{- $root := . -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
+{{- $in := printf "%s\n%s" $bundleImage (include "openddil.realmUsersOverlay" $root) -}}
+{{- if not $digest -}}{{- $in = printf "%s\nrevision=%v" $in $root.Release.Revision -}}{{- end -}}
+sha256:{{ $in | sha256sum | trunc 16 }}
+{{- end }}
+
+{{/*
 openddil.knownTierIds -- every tier id the realm may name in a home_tiers
 attribute, as a compact JSON array: each openddil.tierList id plus the root
 node id. Takes the chart root. The tier realm import refuses a user whose

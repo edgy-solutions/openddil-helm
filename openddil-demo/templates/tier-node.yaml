@@ -1214,10 +1214,31 @@ spec:
             # only when the tier declares a public origin; a tier without one
             # is reachable in-cluster and runs in header mode, which the PEP
             # announces at boot rather than leaving to be inferred.
+            {{- if eq (include "openddil.tierIdentityReplica" (dict "tier" $tier "root" $root)) "true" }}
+            # IDENTITY REPLICA ON (ADR-0045, next increment, item 5): this
+            # tier's PEP signs in against ITS OWN Keycloak (tier-identity.yaml),
+            # reached at the tier's own origin and, in-cluster, by its own
+            # Service. The client id, secret and redirect URI below are
+            # unchanged: the tier Keycloak holds the same tier client with the
+            # same secret. Off is the rollback, and the root keeps every tier
+            # client and credential.
+            - name: OPENDDIL_OIDC_ISSUER
+              value: {{ printf "%s%s/realms/%s" ($tier.publicOrigin | trimSuffix "/") ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            - name: OPENDDIL_OIDC_INTERNAL_ISSUER
+              value: {{ printf "http://%s-tier-keycloak-%s%s:8080%s/realms/%s" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            # The digest of the realm inputs this tier's Keycloak was started
+            # from. The PEP stamps it as `realm_version` on its decision
+            # records and on /auth/me (PEP code: openddil-demo/gateway, a
+            # separate repo). Compared across tiers by
+            # scripts/check-realm-drift.sh.
+            - name: OPENDDIL_REALM_VERSION
+              value: {{ include "openddil.realmVersion" $root | quote }}
+            {{- else }}
             - name: OPENDDIL_OIDC_ISSUER
               value: {{ include "openddil.keycloakIssuer" $root | quote }}
             - name: OPENDDIL_OIDC_INTERNAL_ISSUER
               value: {{ printf "http://%s-keycloak%s:8080%s/realms/%s" $root.Release.Name (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            {{- end }}
             - name: OPENDDIL_OIDC_CLIENT_ID
               # Same helper the Keycloak realm renders its clients from, so
               # the id the PEP presents and the id the realm defines cannot
@@ -1419,6 +1440,33 @@ spec:
     - host: {{ $tierHost | quote }}
       http:
         paths:
+{{- if eq (include "openddil.tierIdentityReplica" (dict "tier" $tier "root" $root)) "true" }}
+{{- $kcBase := $root.Values.releasability.keycloak.basePath | trimSuffix "/" }}
+          # IDENTITY REPLICA ON (ADR-0045, next increment, items 1 and 5): the
+          # Keycloak base path goes to THIS tier's Keycloak, but its admin and
+          # account consoles are not routed from the tier's public origin.
+          # Longest prefix wins, so the three paths after it shadow the
+          # consoles back to the tier frontend (the same backend as `/`)
+          # instead of Keycloak. scripts/sever-tier.sh's door exception
+          # discovers backends from this Ingress, so the tier Keycloak is
+          # admitted at the door with no script change.
+          - path: {{ $kcBase }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $root.Release.Name }}-tier-keycloak-{{ $tier.id }}
+                port:
+                  number: 8080
+{{- range $shadow := (list "/admin" "/realms/master" (printf "/realms/%s/account" $root.Values.releasability.keycloak.realm)) }}
+          - path: {{ $kcBase }}{{ $shadow }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $root.Release.Name }}-tier-frontend-{{ $tier.id }}
+                port:
+                  number: 80
+{{- end }}
+{{- end }}
           - path: /
             pathType: Prefix
             backend:

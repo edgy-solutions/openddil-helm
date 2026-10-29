@@ -1657,9 +1657,15 @@ tierNode:
   #                  tier's client only and credentials only for users whose
   #                  `home_tiers` attribute names this tier. Requires
   #                  releasability.keycloak and .oidc enabled and this tier's
-  #                  publicOrigin; the render fails otherwise. NOTHING routes
-  #                  to it yet and the tier PEP still uses the root's issuer
-  #                  and client. See ADR-0045.
+  #                  publicOrigin; the render fails otherwise. The tier PEP's
+  #                  issuer moves to the tier Keycloak (same client and
+  #                  secret); the tier origin routes releasability.keycloak
+  #                  .basePath to it, with the admin and account consoles
+  #                  shadowed back to the frontend. The tier Keycloak, the
+  #                  root Keycloak and the PEPs carry the openddil.io/realm-
+  #                  version annotation / OPENDDIL_REALM_VERSION env (a digest
+  #                  of the realm inputs); scripts/check-realm-drift.sh
+  #                  compares them. Off is the rollback. See ADR-0045.
   #
   # NOTE the shape fields are read as SHAPE, never as name: nothing branches
   # on `id`. That is what makes a fourth tier render with no code change —

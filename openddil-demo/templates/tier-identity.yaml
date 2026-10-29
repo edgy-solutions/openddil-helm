@@ -7,14 +7,14 @@
 
    It imports the SAME realm artefact as the root Keycloak, through
    files/tier-realm-import.py: this tier's client only, credentials only for
-   users whose home_tiers attribute names this tier, and three refusals
-   (a required action, an unpinned user id, an unknown home_tiers value) with
-   the reason printed and Keycloak not started.
+   users whose home_tiers attribute names this tier, and four refusals
+   (a required action, a temporary credential, an unpinned user id, an
+   unknown home_tiers value) with the reason printed and Keycloak not started.
 
-   NOTHING ROUTES TO IT from the tier's public origin yet. No Ingress path is
-   added, so the admin and account consoles are unreachable from the tier
-   origin, and so is the sign-in path, until item 5 points the tier PEP at
-   it. The tier PEP is unchanged: it still uses the root issuer and client.
+   Items 5 to 7: the tier PEP's issuer points at this Keycloak and the tier
+   Ingress routes the Keycloak base path to it (tier-node.yaml), and the pod
+   carries the openddil.io/realm-version annotation that
+   scripts/check-realm-drift.sh compares across tiers.
 
    The root keeps every client and every credential, so turning the value
    off is the rollback.
@@ -29,6 +29,7 @@
 {{- $tierClient := include "openddil.keycloakTierClient" (dict "tier" $tier "root" $root) }}
 {{- $known := include "openddil.knownTierIds" $root }}
 {{- $overlay := include "openddil.realmUsersOverlay" $root }}
+{{- $realmVersion := include "openddil.realmVersion" $root }}
 ---
 # Per-tier bootstrap admin password: GENERATED PER TIER AND NEVER COPIED FROM
 # THE ROOT (ADR-0045 §2: admin credentials are not replicated). An existing
@@ -98,7 +99,10 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 8 }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum) $realmVersion)) | sha256sum | quote }}
+        # The inputs digest this pod's realm was imported from; read by
+        # scripts/check-realm-drift.sh (ADR-0045 item 6).
+        openddil.io/realm-version: {{ $realmVersion | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
@@ -126,6 +130,10 @@ spec:
               value: {{ int $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
             - name: OPENDDIL_LOGIN_THEME
               value: "openddil"
+            # Echoed in the import summary so a log shows which inputs digest
+            # this realm was staged from.
+            - name: OPENDDIL_REALM_VERSION
+              value: {{ $realmVersion | quote }}
           resources:
             {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
           volumeMounts:

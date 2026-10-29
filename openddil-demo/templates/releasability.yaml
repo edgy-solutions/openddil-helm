@@ -514,6 +514,15 @@ spec:
             # this breaks. See gateway/oidc.py, "the two-address problem".
             - name: OPENDDIL_OIDC_INTERNAL_ISSUER
               value: {{ printf "http://%s-keycloak%s:8080%s/realms/%s" $root.Release.Name (include "openddil.svcDomain" $root) ($root.Values.releasability.keycloak.basePath | trimSuffix "/") $root.Values.releasability.keycloak.realm | quote }}
+            {{- if include "openddil.anyIdentityReplica" $root }}
+            # The digest of the realm inputs the root Keycloak was started
+            # from (ADR-0045 next increment, item 6). The PEP stamps it as
+            # `realm_version` on its decision records and on /auth/me (PEP
+            # code: openddil-demo/gateway, a separate repo). Set only while a
+            # tier identity replica exists.
+            - name: OPENDDIL_REALM_VERSION
+              value: {{ include "openddil.realmVersion" $root | quote }}
+            {{- end }}
             - name: OPENDDIL_OIDC_CLIENT_ID
               value: {{ $root.Values.releasability.oidc.clientId | quote }}
             - name: OPENDDIL_OIDC_CLIENT_SECRET
@@ -921,6 +930,13 @@ spec:
         {{- /* sessionTtlSeconds is baked into the realm import (SSO lifetimes); without it here a TTL-only change never rolls Keycloak or re-imports the realm */}}
         checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
+        {{- if include "openddil.anyIdentityReplica" $root }}
+        # ADR-0045 next increment, item 6: the digest of the realm inputs this
+        # Keycloak was started from, the same value every tier replica
+        # carries; scripts/check-realm-drift.sh compares them. Stamped only
+        # while a replica exists, so a release without one renders as before.
+        openddil.io/realm-version: {{ include "openddil.realmVersion" $root | quote }}
+        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:

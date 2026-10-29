@@ -11,6 +11,7 @@ Environment:
   OPENDDIL_PEP_CLIENT_SECRET   the tier PEP's client secret (same Secret the root uses)
   OPENDDIL_SSO_TTL_SECONDS     the SSO idle and max lifetime (the chart owns it)
   OPENDDIL_LOGIN_THEME         the login theme name
+  OPENDDIL_REALM_VERSION       the chart's digest of the realm inputs (echoed only)
 
 WHAT A TIER'S REALM HOLDS (ADR-0045 §2's table, the rows this step builds):
   - every user, with their pinned id, so `sub` names one person at every tier;
@@ -203,6 +204,7 @@ def main(argv):
     print("credentials withheld (homed elsewhere or unassigned): %s" % (", ".join(withheld) or "none"))
     print("realm clients: %s" % client.get("clientId"))
     print("sso lifetimes: idle=%s max=%s" % (ttl, ttl))
+    print("realm_version: %s" % (os.environ.get("OPENDDIL_REALM_VERSION") or "unversioned"))
 
 
 if __name__ == "__main__":
