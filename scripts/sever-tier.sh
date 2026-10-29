@@ -37,6 +37,25 @@
 # cut. If that exception is ever widened to something that is not a sensor
 # stand-in, this test stops meaning anything.
 #
+# THE INGRESS EXCEPTION, and it is the same argument
+# --------------------------------------------------
+# The person in a severed-tier test is standing AT the edge. In this lab
+# their browser arrives through the cluster's ingress controller, a pod
+# outside the site, so a cut that refuses it refuses the operator too: the
+# tier's origin answers 502, and every sign-in test fails at the ingress
+# before it reaches the thing under test. Measured 2026-10-29: 0/4, all at
+# the first page, so a tier issuer could never have passed.
+#
+# So the ingress controller is admitted to the tier's DOOR, and only there:
+# the site pods that the namespace's Ingresses route to (today the tier
+# frontend, which forwards to the tier PEP inside the site), on those
+# services' target ports. It stands in for the operator's browser at the
+# site. No other site pod admits it, and the site's EGRESS is unchanged, so
+# the door still cannot reach the root; `on` proves that from the PEP. A
+# real DDIL cut takes the browser's path to the parent as well, and this
+# one does not: a severed reading in which the browser visits the root's
+# origin (a redirect to the root's sign-in page) must say so.
+#
 # A POLICY IS NOT A CUT UNTIL EVERY FLOW RE-ESTABLISHES UNDER IT
 # ---------------------------------------------------------------
 # NetworkPolicy filters CONNECTIONS, and conntrack lets ESTABLISHED ones
@@ -163,6 +182,17 @@ if [ -z "$TIER" ]; then
   echo "                 window of up to 300s. OFF by default: the default IS" >&2
   echo "                 the measurement, and the worst case is a real property" >&2
   echo "" >&2
+  echo "  DECLARED EXCEPTIONS (the only traffic the cut admits from outside the site):" >&2
+  echo "    simulators  logistics-sim and the DIS sims, in: they stand in for" >&2
+  echo "                sensors AT the site." >&2
+  echo "    ingress     the ingress controller, in, to the tier's door only (the" >&2
+  echo "                site pods an Ingress routes to, on their target ports): it" >&2
+  echo "                stands in for the operator's browser AT the site. Site" >&2
+  echo "                egress is unchanged; 'on' proves the PEP cannot reach the" >&2
+  echo "                root. Selected by OPENDDIL_SEVER_INGRESS_NAMESPACE" >&2
+  echo "                (default kube-system) and OPENDDIL_SEVER_INGRESS_LABEL" >&2
+  echo "                (default app.kubernetes.io/name=traefik)." >&2
+  echo "" >&2
   echo "  LOG IN BEFORE YOU CUT. Keycloak runs at the ROOT, so a severed tier" >&2
   echo "  cannot mint new sessions -- an existing cookie keeps working for its" >&2
   echo "  TTL, a fresh login does not. Open and authenticate every screen the" >&2
@@ -197,29 +227,79 @@ for required in "redpanda-${TIER}" "tier-pg-${TIER}" "tier-cm-${TIER}"; do
   fi
 done
 
+# --- the tier's door: the ingress exception's only target ------------------
+# Discovered, like the site: the site pods that some Ingress in the namespace
+# routes to, via each backend Service's component selector, on that Service's
+# target ports. A pod is a door because the chart routes users to it, not
+# because this script listed it.
+DOOR_POLICY="${POLICY}-door"
+INGRESS_NS="${OPENDDIL_SEVER_INGRESS_NAMESPACE:-kube-system}"
+INGRESS_LABEL="${OPENDDIL_SEVER_INGRESS_LABEL:-app.kubernetes.io/name=traefik}"
+DOOR=(); DOOR_PORTS=()
+while IFS= read -r svc; do
+  [ -z "$svc" ] && continue
+  comp="$(kubectl get svc -n "$NS" "$svc" \
+    -o jsonpath='{.spec.selector.app\.kubernetes\.io/component}' 2>/dev/null)"
+  [ -z "$comp" ] && continue
+  grep -qx -- "$comp" <<<"$(printf '%s\n' "${SITE[@]}")" || continue
+  grep -qx -- "$comp" <<<"$(printf '%s\n' "${DOOR[@]+"${DOOR[@]}"}")" || DOOR+=("$comp")
+  while IFS= read -r port; do
+    [ -z "$port" ] && continue
+    grep -qx -- "$port" <<<"$(printf '%s\n' "${DOOR_PORTS[@]+"${DOOR_PORTS[@]}"}")" || DOOR_PORTS+=("$port")
+  done < <(kubectl get svc -n "$NS" "$svc" \
+             -o jsonpath='{range .spec.ports[*]}{.targetPort}{"\n"}{end}' 2>/dev/null)
+done < <(
+  kubectl get ingress -n "$NS" \
+    -o jsonpath='{range .items[*]}{range .spec.rules[*].http.paths[*]}{.backend.service.name}{"\n"}{end}{end}' \
+    2>/dev/null | sort -u
+)
+
 status() {
   if kubectl get networkpolicy "$POLICY" -n "$NS" >/dev/null 2>&1; then
     echo "SEVERED — policy $POLICY applied to ${#SITE[@]} site component(s)"
   else
     echo "connected — no policy $POLICY"
   fi
+  if kubectl get networkpolicy "$DOOR_POLICY" -n "$NS" >/dev/null 2>&1; then
+    echo "  door policy $DOOR_POLICY present (ingress controller admitted)"
+  fi
   printf '  site (%d): %s\n' "${#SITE[@]}" "${SITE[*]}"
+  printf '  door (%d): %s\n' "${#DOOR[@]}" "${DOOR[*]+"${DOOR[*]}"}"
 }
 
 # --- two-sided reachability control ---------------------------------------
 # Run from inside a site pod. Python, because the service images have it and
 # a shell with neither nc nor curl is common in slim images.
 probe() {  # probe <host> <port> -> OPEN | SHUT
-  kubectl exec -n "$NS" "deploy/openddil-tier-cm-${TIER}" -- \
-    python -c "
-import socket
+  probe_from "openddil-tier-cm-${TIER}" "$1" "$2"
+}
+
+# probe_from <deployment> <host> <port> -> OPEN | SHUT | NOPROBE
+# Python where the image has it, else bash's /dev/tcp under `timeout` (the
+# Keycloak image has no Python). NOPROBE when neither exists: a probe that
+# cannot run must never read as SHUT, or the proof passes on a missing tool.
+probe_from() {
+  kubectl exec -n "$NS" "deploy/$1" -- sh -c '
+P="$(command -v python3 || command -v python)"
+if [ -n "$P" ]; then
+  "$P" -c "
+import socket, sys
 s = socket.socket(); s.settimeout(4)
 try:
-    s.connect(('$1', $2)); print('OPEN')
+    s.connect((sys.argv[1], int(sys.argv[2]))); print(\"OPEN\")
 except Exception:
-    print('SHUT')
-" 2>/dev/null | tr -d '\r' | tail -1
+    print(\"SHUT\")
+" "$0" "$1"
+elif command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  if timeout 4 bash -c "exec 3<>/dev/tcp/$0/$1" 2>/dev/null; then echo OPEN; else echo SHUT; fi
+else
+  echo NOPROBE
+fi' "$2" "$3" 2>/dev/null | tr -d '\r' | tail -1
 }
+
+deploy_exists() { kubectl get deploy -n "$NS" "$1" >/dev/null 2>&1; }
+
+ROOT_IDP_HOST="openddil-keycloak"; ROOT_IDP_PORT=8080
 
 ROOT_HOST="openddil-postgres-hq"; ROOT_PORT=5432
 SITE_HOST="openddil-tier-pg-${TIER}"; SITE_PORT=5432
@@ -319,6 +399,43 @@ ${sel}    - ports:
 EOF
 }
 
+render_door_policy() {
+  [ "${#DOOR[@]}" -gt 0 ] || return 0
+  local sel="" ports="" c key val
+  for c in "${DOOR[@]}"; do sel="${sel}                - ${c}"$'\n'; done
+  for c in "${DOOR_PORTS[@]}"; do ports="${ports}        - {protocol: TCP, port: ${c}}"$'\n'; done
+  key="${INGRESS_LABEL%%=*}"; val="${INGRESS_LABEL#*=}"
+  cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${DOOR_POLICY}
+  namespace: ${NS}
+  annotations:
+    openddil.io/purpose: >-
+      Test-only. The declared ingress exception to ${POLICY}: the ingress
+      controller stands in for the operator's browser at the site, admitted
+      to the tier's door only. Egress is not widened.
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+${sel}  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${INGRESS_NS}
+          podSelector:
+            matchLabels:
+              ${key}: ${val}
+      ports:
+${ports}
+EOF
+}
+
 # The tier's own outbound relay. Leaves carry `edge-hq-bridge-<id>`;
 # an intermediate carries `tier-uplink-<id>`. Probed rather than assumed, so
 # a tier kind this script has not met yet reports "none found" instead of
@@ -369,7 +486,11 @@ if [ "$DRY_RUN" = "1" ]; then
     fi
     echo
   fi
+  printf '  door (%d): %s   ports: %s   from: %s/%s\n' "${#DOOR[@]}" \
+    "${DOOR[*]+"${DOOR[*]}"}" "${DOOR_PORTS[*]+"${DOOR_PORTS[*]}"}" "$INGRESS_NS" "$INGRESS_LABEL"
+  echo
   render_policy
+  if [ "${#DOOR[@]}" -gt 0 ]; then echo "---"; render_door_policy; fi
   exit 0
 fi
 
@@ -388,9 +509,27 @@ case "$ACTION" in
       exit 1
     fi
 
+    if [ "${#DOOR[@]}" -gt 0 ] && ! kubectl get pods -n "$INGRESS_NS" -l "$INGRESS_LABEL" \
+         --no-headers 2>/dev/null | grep -q .; then
+      echo "FAIL: no pod in '$INGRESS_NS' matches '$INGRESS_LABEL'. The door" >&2
+      echo "      exception would admit nothing, and every reading taken" >&2
+      echo "      through the tier's origin would be the ingress, not the tier." >&2
+      exit 1
+    fi
     if ! render_policy | kubectl apply -f - >/dev/null; then
       echo "FAIL: policy apply rejected" >&2
       exit 1
+    fi
+    if [ "${#DOOR[@]}" -gt 0 ]; then
+      if ! render_door_policy | kubectl apply -f - >/dev/null; then
+        echo "FAIL: door policy apply rejected; removing the cut so nothing" >&2
+        echo "      is left half applied" >&2
+        kubectl delete networkpolicy "$POLICY" -n "$NS" --ignore-not-found >/dev/null
+        exit 1
+      fi
+      echo "  door admitted: ${DOOR[*]} (ports ${DOOR_PORTS[*]}) from ${INGRESS_NS}/${INGRESS_LABEL}"
+    else
+      echo "  door: no Ingress routes into this site; nothing admitted"
     fi
     sleep 3
 
@@ -450,9 +589,24 @@ case "$ACTION" in
     s="$(probe "$SITE_HOST" "$SITE_PORT")"
     echo "sever ${TIER}: root ${ROOT_HOST}:${ROOT_PORT} -> ${r:-?}   site ${SITE_HOST}:${SITE_PORT} -> ${s:-?}"
 
-    if [ "$r" = "SHUT" ] && [ "$s" = "OPEN" ]; then
+    # The identity pods, because the door exception exists for sign-in tests:
+    # the PEP the door forwards to, and the tier's own Keycloak when it runs
+    # one, must each be refused by the root identity provider.
+    idp_ok=1
+    for d in "openddil-tier-pep-${TIER}" "openddil-tier-keycloak-${TIER}"; do
+      deploy_exists "$d" || continue
+      k="$(probe_from "$d" "$ROOT_IDP_HOST" "$ROOT_IDP_PORT")"
+      echo "  ${d} -> ${ROOT_IDP_HOST}:${ROOT_IDP_PORT} -> ${k:-?}"
+      [ "$k" = "SHUT" ] || idp_ok=0
+    done
+
+    if [ "$r" = "SHUT" ] && [ "$s" = "OPEN" ] && [ "$idp_ok" = "1" ]; then
       echo "SEVERED and PROVEN — root unreachable, site intact (${#SITE[@]} components)"
       exit 0
+    fi
+    if [ "$idp_ok" != "1" ]; then
+      echo "FAIL: an identity pod still reaches (or could not probe) the root" >&2
+      echo "      identity provider. A sign-in reading taken now is void." >&2
     fi
     echo "FAIL: the sever is not what it claims." >&2
     if [ "$r" != "SHUT" ]; then
@@ -470,7 +624,7 @@ case "$ACTION" in
     ;;
 
   off)
-    kubectl delete networkpolicy "$POLICY" -n "$NS" --ignore-not-found >/dev/null
+    kubectl delete networkpolicy "$POLICY" "$DOOR_POLICY" -n "$NS" --ignore-not-found >/dev/null
     sleep 5
     r="$(probe "$ROOT_HOST" "$ROOT_PORT")"
     echo "heal ${TIER}: root ${ROOT_HOST}:${ROOT_PORT} -> ${r:-?}"
