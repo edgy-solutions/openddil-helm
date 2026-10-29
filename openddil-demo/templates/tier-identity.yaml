@@ -1,0 +1,207 @@
+{{- /*
+   tier-identity.yaml -- the TIER IDENTITY REPLICA (ADR-0045, next increment,
+   items 1 and 2)
+
+   A Keycloak at a tier, OFF BY DEFAULT, declared per tier as
+   `identity.replica` on its edges[]/regions[] entry (or tiers[] entry).
+
+   It imports the SAME realm artefact as the root Keycloak, through
+   files/tier-realm-import.py: this tier's client only, credentials only for
+   users whose home_tiers attribute names this tier, and three refusals
+   (a required action, an unpinned user id, an unknown home_tiers value) with
+   the reason printed and Keycloak not started.
+
+   NOTHING ROUTES TO IT from the tier's public origin yet. No Ingress path is
+   added, so the admin and account consoles are unreachable from the tier
+   origin, and so is the sign-in path, until item 5 points the tier PEP at
+   it. The tier PEP is unchanged: it still uses the root issuer and client.
+
+   The root keeps every client and every credential, so turning the value
+   off is the rollback.
+*/ -}}
+{{- $root := . }}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if eq (include "openddil.tierIdentityReplica" (dict "tier" $tier "root" $root)) "true" }}
+{{- $name := printf "%s-tier-keycloak-%s" $root.Release.Name $tier.id }}
+{{- $component := printf "tier-keycloak-%s" $tier.id }}
+{{- $adminName := printf "%s-tier-keycloak-admin-%s" $root.Release.Name $tier.id }}
+{{- $adminKey := $root.Values.releasability.keycloak.adminPasswordKey }}
+{{- $tierClient := include "openddil.keycloakTierClient" (dict "tier" $tier "root" $root) }}
+{{- $known := include "openddil.knownTierIds" $root }}
+{{- $overlay := include "openddil.realmUsersOverlay" $root }}
+---
+# Per-tier bootstrap admin password: GENERATED PER TIER AND NEVER COPIED FROM
+# THE ROOT (ADR-0045 §2: admin credentials are not replicated). An existing
+# value is preserved across upgrades.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $adminName }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+type: Opaque
+data:
+  {{- $existing := lookup "v1" "Secret" $root.Release.Namespace $adminName }}
+  {{- if and $existing $existing.data (hasKey $existing.data $adminKey) }}
+  {{ $adminKey }}: {{ index $existing.data $adminKey }}
+  {{- else }}
+  {{ $adminKey }}: {{ randAlphaNum 32 | b64enc }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+data:
+  tier-client.json: |
+    {{- $tierClient | nindent 4 }}
+  known-tiers.json: |
+    {{- $known | nindent 4 }}
+  {{- if $overlay }}
+  realm-users-overlay.json: |
+    {{- $overlay | nindent 4 }}
+  {{- end }}
+  tier-realm-import.py: |
+    {{- $root.Files.Get "files/tier-realm-import.py" | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 8 }}
+      annotations:
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum))) | sha256sum | quote }}
+        checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
+          ) "root" $root) | nindent 8 }}
+        # Stages this tier's realm from the bundle's realm artefact. Refuses
+        # (exit 1, reason printed) before Keycloak starts.
+        - name: import-realm
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
+          command: ["python", "-I", "/subst/tier-realm-import.py", "/bundle-realm/realm-openddil.json", "/subst/tier-client.json", "/subst/known-tiers.json", {{ if $overlay }}"/subst/realm-users-overlay.json"{{ else }}"-"{{ end }}, "/import/realm-openddil.json"]
+          env:
+            - name: OPENDDIL_TIER_ID
+              value: {{ $tier.id | quote }}
+            - name: OPENDDIL_PEP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Release.Name }}-pep-oidc
+                  key: client-secret
+            - name: OPENDDIL_SSO_TTL_SECONDS
+              value: {{ int $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_LOGIN_THEME
+              value: "openddil"
+          resources:
+            {{- toYaml $root.Values.bundle.initResources | nindent 12 }}
+          volumeMounts:
+            - { name: subst,         mountPath: /subst, readOnly: true }
+            - { name: bundle-shared, mountPath: /bundle-realm, subPath: bundle-realm }
+            - { name: import,        mountPath: /import }
+        # The sign-in theme, assembled exactly as the root Keycloak does.
+        - name: theme
+          image: {{ include "openddil.image" (dict "name" $root.Values.frontend.image.name "tag" $root.Values.frontend.image.tag "digest" $root.Values.frontend.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.frontend.image.pullPolicy "root" $root) }}
+          command: ["sh", "/theme-src/assemble.sh"]
+          volumeMounts:
+            - { name: theme-src,    mountPath: /theme-src, readOnly: true }
+            - { name: branding-src, mountPath: /branding-src, readOnly: true }
+            - { name: theme,        mountPath: /theme }
+      containers:
+        - name: keycloak
+          image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.keycloak.image.repository "tag" $root.Values.releasability.keycloak.image.tag "digest" $root.Values.releasability.keycloak.image.digest "root" $root) }}
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ $root.Values.releasability.keycloak.adminUser | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminName | quote }}
+                  key: {{ $adminKey | quote }}
+            - name: KC_HTTP_RELATIVE_PATH
+              value: {{ $root.Values.releasability.keycloak.basePath | quote }}
+            # The issuer a browser at THIS tier's origin would see.
+            - name: KC_HOSTNAME
+              value: {{ printf "%s%s" (trimSuffix "/" $tier.publicOrigin) (trimSuffix "/" $root.Values.releasability.keycloak.basePath) | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            # Explicit heap cap, as the root Keycloak: the limit alone does not bound the JVM.
+            - name: JAVA_OPTS_APPEND
+              value: {{ $root.Values.releasability.keycloak.javaOpts | quote }}
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: {{ printf "%s/realms/openddil/.well-known/openid-configuration" (trimSuffix "/" $root.Values.releasability.keycloak.basePath) }}
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            {{- toYaml $root.Values.releasability.keycloak.resources | nindent 12 }}
+          volumeMounts:
+            - name: import
+              mountPath: /opt/keycloak/data/import
+            - name: theme
+              mountPath: /opt/keycloak/themes/openddil
+              readOnly: true
+      volumes:
+        - name: subst
+          configMap:
+            name: {{ $name }}
+        - name: bundle-shared
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.keycloak.realmVolumeSize }}
+        - name: import
+          emptyDir:
+            sizeLimit: {{ $root.Values.releasability.keycloak.realmVolumeSize }}
+        - name: theme-src
+          configMap:
+            name: {{ $root.Release.Name }}-keycloak-theme
+        - name: branding-src
+          configMap:
+            name: {{ $root.Values.frontend.branding.configMap | default (printf "%s-branding" $root.Release.Name) }}
+            optional: true
+        - name: theme
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}
+{{- end }}

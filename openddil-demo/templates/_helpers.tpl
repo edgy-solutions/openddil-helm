@@ -374,18 +374,15 @@ revision={{ $root.Release.Revision }}
 {{- end }}
 
 {{/*
-Keycloak realm per-tier clients (the keycloak-realm ConfigMap's tier-clients.json;
-see the WHY comment there). A named template so keycloak's checksum/policy can
-hash exactly what the ConfigMap renders: the realm substitutions come from the
-tier list, not from anything in the keycloak pod spec, so without this a
-digest-pinned install would leave keycloak on a stale realm when a tier's
-publicOrigin changed.
+openddil.keycloakTierClient -- one tier's Keycloak PEP client, as the JSON
+object (with its trailing comma) the realm's tier-clients.json holds. Takes
+(dict "tier" <tierList entry> "root" $). Shared by the root realm's
+keycloakTierClients and the per-tier identity replica (tier-identity.yaml),
+so both render the same client from one definition.
 */}}
-{{- define "openddil.keycloakTierClients" -}}
-{{- $root := . }}
-{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
-{{- if and (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) $tier.publicOrigin }}
-{{- if $root.Values.releasability.oidc.enabled }}
+{{- define "openddil.keycloakTierClient" }}
+{{- $tier := .tier }}
+{{- $root := .root }}
     {
       "clientId": {{ include "openddil.tierClientId" (dict "id" $tier.id "root" $root) | quote }},
       "name": {{ printf "OpenDDIL tier PEP (%s)" $tier.id | quote }},
@@ -410,6 +407,21 @@ publicOrigin changed.
       "fullScopeAllowed": false,
       "defaultClientScopes": ["openid", "profile", "email", "roles"]
     },
+{{- end }}
+
+{{/*
+Keycloak realm per-tier clients (the keycloak-realm ConfigMap's tier-clients.json;
+see the WHY comment there). A named template so keycloak's checksum/policy can
+hash exactly what the ConfigMap renders: the realm substitutions come from the
+tier list, not from anything in the keycloak pod spec, so without this a
+digest-pinned install would leave keycloak on a stale realm when a tier's
+publicOrigin changed.
+*/}}
+{{- define "openddil.keycloakTierClients" -}}
+{{- $root := . }}
+{{- range $tier := (include "openddil.tierList" $root | fromYamlArray) }}
+{{- if and (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) $tier.publicOrigin }}
+{{- if $root.Values.releasability.oidc.enabled }}{{ include "openddil.keycloakTierClient" (dict "tier" $tier "root" $root) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -617,6 +629,7 @@ Usage:
       "hasChildren" (default false .hasChildren)
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
+      "identity" (default dict .identity)
       "directIngest" (default true .directIngest)
       "region" (default "" .region)) -}}
 {{- end }}
@@ -640,6 +653,7 @@ Usage:
       "hasChildren" (default true .hasChildren)
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
+      "identity" (default dict .identity)
       "directIngest" (default false .directIngest)
       "region" .id) -}}
 {{- end }}
@@ -915,6 +929,41 @@ Usage: {{ include "openddil.ingressAnnotations" (dict "root" $root "redirect" $r
 {{- if $ann }}
 {{ toYaml $ann }}
 {{- end -}}
+{{- end }}
+
+{{/*
+openddil.tierIdentityReplica -- renders "true" when tier `.tier` declares
+identity.replica: true AND the replica can take effect; renders nothing when
+the value is off. Takes (dict "tier" <tierList entry> "root" $). When the value
+is on but a precondition is missing it FAILS the render naming the tier and the
+condition, rather than silently rendering no replica.
+*/}}
+{{- define "openddil.tierIdentityReplica" -}}
+{{- $tier := .tier -}}
+{{- $root := .root -}}
+{{- if dig "replica" false (default dict $tier.identity) -}}
+{{- if not (include "openddil.isTierManaged" (dict "id" $tier.id "root" $root)) -}}{{- fail (printf "tier %s: identity.replica needs the tier to be managed (tierNode.enabled, and the id in tierNode.tiers when that is set)" $tier.id) -}}{{- end -}}
+{{- if not $tier.publicOrigin -}}{{- fail (printf "tier %s: identity.replica needs the tier's publicOrigin" $tier.id) -}}{{- end -}}
+{{- if not $root.Values.releasability.enabled -}}{{- fail (printf "tier %s: identity.replica needs releasability.enabled" $tier.id) -}}{{- end -}}
+{{- if not $root.Values.releasability.keycloak.enabled -}}{{- fail (printf "tier %s: identity.replica needs releasability.keycloak.enabled" $tier.id) -}}{{- end -}}
+{{- if not $root.Values.releasability.oidc.enabled -}}{{- fail (printf "tier %s: identity.replica needs releasability.oidc.enabled" $tier.id) -}}{{- end -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+openddil.knownTierIds -- every tier id the realm may name in a home_tiers
+attribute, as a compact JSON array: each openddil.tierList id plus the root
+node id. Takes the chart root. The tier realm import refuses a user whose
+home_tiers names an id outside this list.
+*/}}
+{{- define "openddil.knownTierIds" -}}
+{{- $ids := list -}}
+{{- range $t := (include "openddil.tierList" . | fromYamlArray) -}}
+{{- $ids = append $ids $t.id -}}
+{{- end -}}
+{{- $ids = append $ids (default "root" .Values.tierNode.rootId) -}}
+{{- toJson $ids -}}
 {{- end }}
 
 {{- define "openddil.isTierManaged" -}}
