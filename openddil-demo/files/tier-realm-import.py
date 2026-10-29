@@ -31,7 +31,11 @@ admit nobody never reaches Keycloak:
      same person, and the corpus, keyed on `sub`, would admit nobody (§2);
   3. a `home_tiers` entry naming no tier this release declares. A home that
      names nothing is a typo or a stale assignment; either way the person
-     would hold a credential nowhere but the root without anyone being told.
+     would hold a credential nowhere but the root without anyone being told;
+  4. a user with a temporary credential. They would set a new one at whichever
+     tier they first signed in, and fork the realm, as a required action does.
+     Checked on the merged set before credentials are filtered by home_tiers,
+     so a visitor's temporary credential is refused too.
 
 Every refusal is collected before exiting, so one run names every defect.
 
@@ -146,6 +150,10 @@ def main(argv):
         if actions:
             refuse("user %r carries required action(s) %s: they would change their credential at "
                    "whichever tier they first signed in, and fork the realm" % (name, ", ".join(actions)))
+        creds = u.get("credentials") or []
+        if any(isinstance(c, dict) and c.get("temporary") is True for c in creds):
+            refuse("user %r carries a temporary credential: they would set a new one at whichever "
+                   "tier they first signed in, and fork the realm" % name)
         attrs = u.get("attributes") or {}
         homes = attrs.get("home_tiers", [])
         if isinstance(homes, str):
