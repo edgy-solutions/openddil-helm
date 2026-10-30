@@ -506,6 +506,23 @@ turning it on by default would improve the demo by hiding a real property.
     (`--restart-relay-on-heal`, opt-in), the bridge was Running 13 s after the heal (run 1). Not re-read on edgy-lab;
     there, the relay retried in place in 2026-09-19's measurement (§E). Open in contracts `FOLLOW-UPS.md`.
     **On camera:** heal with the flag, or allow up to 5 minutes before showing the tier's records upstream.
+  * **Measured again with the relay gate (`relayGate`, on by default), edgy-lab2, 2026-10-30.** Edge-01 was cut from
+    its parent for 480 s and healed WITHOUT the flag. Silence after heal is the time from the heal to the first advance
+    of the bridge consumer group's committed offsets. The bridge reaches the cut in one of two ways, and which one is a
+    race against the policy's enforcement:
+    * **It starts before enforcement and retries in place** (Running, 0 restarts, "broker not connected"). This is the
+      path the 2026-09-19 edgy-lab measurement saw. Without the gate it read 9 s and 10 s (2 of 2 runs). The gate does
+      not change this path.
+    * **It starts under an enforced cut and exits at init.** Without the gate: CrashLoopBackOff, 6 restarts by the
+      heal, and **126 s** of silence after heal, because the heal waited for the next 300 s back-off start (1 run). With
+      the gate: Running, 1 restart, waiting in the gate ("unreachable; waiting, not exiting"), and **9 s** of silence
+      after heal in each of 2 runs. The silence is now set by the heal, not by the back-off clock.
+    * **The gate's own race:** a fresh pod can pass the gate's probe before the cut is enforced, and then fail
+      Connect's init one second later. That costs one restart (a 10 s back-off; seen in 2 of 2 runs), and the
+      restarted container waits in the gate. Expect a restart count of 1 on a gated bridge after a cut; it is not a
+      fault.
+    * The 300 s back-off ceiling no longer applies with the gate on. `--restart-relay-on-heal` is kept for
+      `relayGate.enabled=false`.
 
 ## G. Things that will bite if forgotten
 
