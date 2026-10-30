@@ -489,6 +489,24 @@ turning it on by default would improve the demo by hiding a real property.
   assigning a baseline — that is the one action that would make it visible.
   Full row in `FOLLOW-UPS.md`.
 
+* **Resilience: when a component retries, inside a site and across one.** Read on edgy-lab2 on 2026-10-29, in two
+  red runs (edge-01 cut from its parent with `sever-tier.sh`, then healed; 2 of 2 cuts). Neither reading loses data.
+  Both are about timing, and both can put a pod in `Error` or `CrashLoopBackOff` on screen for a short while.
+  * **Start order inside a site, run 1: Faust started before its own broker.** `sever-tier.sh on` restarts all 15 of
+    the site's pods at once. `faust-edge-edge-01` exited twice with `Unable to bootstrap from
+    openddil-redpanda-edge-01:9092` (connection refused), inside the site, then recovered with no action. A startup
+    race, not a leak: nothing crossed the cut.
+  * **Start order inside a site, run 2: the same race again.** `faust-edge-edge-01` restarted twice during the
+    all-site restart, and recovered on its own. An earlier note named Restate for this reading; it is Faust.
+  * **A healed tier's bridge resumes on its crash backoff, not on the heal.** The bridge dials its parent's broker
+    (region-east's, for edge-01), so under a cut it exits, as designed, and the kubelet restarts it on a backoff that
+    doubles up to 5 minutes. After a cut of about 3 minutes it stayed down about 30 s past the heal, then resumed on
+    its own. Nothing restarts it on the heal, and the heal's proof does not read it. After a long cut, forwarding from
+    the tier can lag the link by up to 5 minutes, with no error once it resumes. With the heal's relay restart
+    (`--restart-relay-on-heal`, opt-in), the bridge was Running 13 s after the heal (run 1). Not re-read on edgy-lab;
+    there, the relay retried in place in 2026-09-19's measurement (§E). Open in contracts `FOLLOW-UPS.md`.
+    **On camera:** heal with the flag, or allow up to 5 minutes before showing the tier's records upstream.
+
 ## G. Things that will bite if forgotten
 
 1. **LOG IN TO ALL FOUR SCREENS BEFORE THE FIRST CUT.** Keycloak runs at the
