@@ -539,8 +539,8 @@ turning it on by default would improve the demo by hiding a real property.
      discards CM history and re-bootstraps, which is not something to do on
      camera. It is also the reason `ephemeralOnUpgrade` must stay false
      anywhere intent custody will ever live (ADR-0042).
-   * **DEFECT, open 2026-10-30: a roll costs mod compliance until the
-     fixed cm-service image is live.** On a cold start, cm-service
+   * **DEFECT, CLOSED 2026-10-30 (opened the same day): a roll cost mod
+     compliance until the fixed cm-service image was live.** On a cold start, cm-service
      re-seeded only manual discrepancies from the tier store. Applied mods
      and replaced parts fell back to the baseline defaults, so an asset
      that was in compliance read not mission capable after every roll,
@@ -551,16 +551,24 @@ turning it on by default would improve the demo by hiding a real property.
      ships in `cm-service:latest` after the push. Close it when a lab2 roll
      on the new image keeps an in-compliance asset in compliance with no
      re-send. Until then, any roll before a demo means re-sending the
-     fixture assets' part and mod events.
-   * **OPEN 2026-10-30: lab2 pins cm-service by digest after the roll that
-     measures the fix.** lab2 runs `cm-service:latest` with pull policy
+     fixture assets' part and mod events. **Closed by lab2 rev 14**
+     (2026-10-30, the first roll on the new image): through the Restate
+     wipe, the in-compliance fixture asset stayed in compliance in its
+     tier store and at HQ, with its stored part and mod times
+     byte-identical, one restore line in the log, and no event re-sent.
+   * **CLOSED 2026-10-30 (opened the same day): lab2 pins cm-service by
+     digest.** lab2 runs `cm-service:latest` with pull policy
      Always and sets no `cmService.image.digest`, so every push to
      cm-service changes what the next lab2 pod start runs, unannounced.
      The other lab already pins by digest. The roll that measures the fix
      above has to take `:latest`; once it reads, set
      `cmService.image.digest` in lab2's values chain to the digest that
      roll measured. Close it when a lab2 render shows `cm-service@sha256:`
-     on every cm-service deployment.
+     on every cm-service deployment. **Closed by lab2 rev 14:** the pin
+     rode in the measuring roll itself, because without it the tier-cm pods
+     would not have rolled (their templates were otherwise unchanged). The
+     rev 14 render carries the digest on all 9 cm-service image references
+     (4 Deployments, 5 bootstrap Jobs), and all 4 cm-service pods run it.
 4. **The sever script restarts the site** — deliberate, conntrack lets
    established connections through a new policy — so expect 30–60s of pods
    restarting after each cut.
