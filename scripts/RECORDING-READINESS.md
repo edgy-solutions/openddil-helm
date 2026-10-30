@@ -539,6 +539,19 @@ turning it on by default would improve the demo by hiding a real property.
      discards CM history and re-bootstraps, which is not something to do on
      camera. It is also the reason `ephemeralOnUpgrade` must stay false
      anywhere intent custody will ever live (ADR-0042).
+   * **DEFECT, open 2026-10-30: a roll costs mod compliance until the
+     fixed cm-service image is live.** On a cold start, cm-service
+     re-seeded only manual discrepancies from the tier store. Applied mods
+     and replaced parts fell back to the baseline defaults, so an asset
+     that was in compliance read not mission capable after every roll,
+     until its part and mod events were re-sent. Seen on lab2 at every roll
+     on 2026-10-29/30. Fixed in cm-service 6535fe8: the cold start also
+     re-seeds installed parts and mod history from the same store row when
+     its baseline matches. The fix is unit-tested and not yet live: it
+     ships in `cm-service:latest` after the push. Close it when a lab2 roll
+     on the new image keeps an in-compliance asset in compliance with no
+     re-send. Until then, any roll before a demo means re-sending the
+     fixture assets' part and mod events.
 4. **The sever script restarts the site** — deliberate, conntrack lets
    established connections through a new policy — so expect 30–60s of pods
    restarting after each cut.
