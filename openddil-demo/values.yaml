@@ -481,6 +481,32 @@ relayStallProbe:
   periodSeconds: 60
   failureThreshold: 3
 
+# ---------------------------------------------------------------------------
+# relayGate -- hold the cross-tier relays until their destination answers
+# ---------------------------------------------------------------------------
+# Connect's legacy kafka output dials its brokers at init and EXITS if it
+# cannot, so under a sever the bridge/uplink exited, and the kubelet restarted
+# it on a 10 -> 300 s back-off that does not react to the network returning.
+# Heal-to-resume was 0-300 s, a property of the clock rather than the system.
+#
+# With the gate, the container waits in a shell loop (nc -z against the same
+# DEST_HOST/DEST_PORT the stall probe reads), then execs Connect, so it starts
+# within pollSeconds of the heal. Applies to edge-hq-bridge and tier-uplink
+# only; the in-site mappers do not cross a tier.
+#
+# THE TRADE-OFF. A gated relay reads Running with its restart count unchanged
+# for the whole cut. The waiting shows only in its log (one line every 15
+# probes), not as CrashLoopBackOff. That is the right trade: the back-off made
+# resume a function of when the heal landed, and a crash loop on camera was
+# the symptom of that, not information. To see it, read the pod log
+# (`kubectl logs <bridge-or-uplink pod>` and look for "relay gate:").
+# While gated Connect's metrics endpoint is not up, so the stall probe reads
+# "metrics unreadable or zero" and exits 0: the gate never trips liveness.
+# enabled: false restores the previous behaviour exactly.
+relayGate:
+  enabled: true
+  pollSeconds: 2
+
 sensorIngest:
   # Spool: sensor-ingest writes each one-shot DIS PDU (Fire, Detonation,
   # Event Report, Remove Entity, Resupply Received) to a directory before

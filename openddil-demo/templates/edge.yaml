@@ -810,6 +810,14 @@ spec:
         - name: bridge
           image: "{{ include "openddil.thirdPartyImage" $root.Values.edgeHqBridge.image }}"
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.edgeHqBridge.image.pullPolicy "root" $root) }}
+          {{- if $root.Values.relayGate.enabled }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {{- include "openddil.relayGateScript" $root | nindent 14 }}
+            - relay-gate
+          {{- end }}
           args: ["--chilled", "run", "/connect.yaml"]
           # NO bundle-loader initContainer and NO broker env vars.
           #
@@ -824,6 +832,19 @@ spec:
           # parent: directly by default, or THROUGH its own `uplink-<id>`
           # link proxy when linkControl.enabled — that is the
           # severance-injection seam, not an accident.
+          # DEST_HOST/DEST_PORT are unconditional: the relay gate (relayGate in
+          # values.yaml) reads the same env as the stall probe below, and the
+          # gate must work when the probe is off. While gated, Connect's
+          # metrics endpoint is not up, so the probe reads "metrics unreadable
+          # or zero" and exits 0; the gate never trips liveness. A gated
+          # relay reads Running with its restart count unchanged for the whole
+          # cut; the waiting is in the pod log ("relay gate:"), not in
+          # CrashLoopBackOff.
+          env:
+            - name: DEST_HOST
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | first | quote }}
+            - name: DEST_PORT
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | last | quote }}
           {{- if $root.Values.relayStallProbe.enabled }}
           # STALL -> LIVENESS. Readiness stays Connect's own notion of
           # connected; the remedy for a wedge is a restart, and restart is
@@ -832,11 +853,6 @@ spec:
           # IS NOT STALLED, which is what stops a severance becoming a crash
           # loop: under a cut this relay's output legitimately stops, because
           # buffering is the designed degraded mode.
-          env:
-            - name: DEST_HOST
-              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | first | quote }}
-            - name: DEST_PORT
-              value: {{ include "openddil.bridgeTarget" (dict "tier" $edge "root" $root) | splitList ":" | last | quote }}
           livenessProbe:
             exec:
               command: ["/bin/sh", "/probe/relay-stall-probe.sh"]

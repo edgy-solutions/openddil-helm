@@ -3086,3 +3086,35 @@ and the maps draw nothing without a word.
         path: edge-assignment.yaml
 {{- end }}
 {{- end }}
+
+{{/*
+Relay destination gate: the shell that wraps the two CROSS-TIER relays (the
+edge-hq-bridge `bridge` container and the tier-uplink `uplink` container).
+
+THE FAULT. Connect's legacy `kafka` output dials its brokers at init and EXITS
+if it cannot ("failed to init output ... client has run out of available
+brokers to talk to: connection refused"). Under a sever the relay therefore
+exits, the kubelet restarts it on a 10, 20, 40, 80, 160, then 300 s back-off,
+and a container in back-off does not react when the network returns. Heal to
+resume was 0-300 s, set by where the heal fell in a back-off window, not by
+anything the system did (scripts/RECORDING-READINESS.md "Resilience";
+scripts/sever-tier.sh --restart-relay-on-heal).
+
+THE GATE. Wait for the destination in a shell loop instead of exiting, so no
+back-off accrues, then `exec` Connect so it is PID 1 from then on. Any later
+exit is an ordinary kubelet restart; the gate removes only the one exit that
+happens at startup because the parent is unreachable. Reads DEST_HOST and
+DEST_PORT from the container env (the same env the stall probe reads). The
+Connect image is busybox: /bin/sh and /bin/nc exist.
+
+Usage: include "openddil.relayGateScript" $root
+*/}}
+{{- define "openddil.relayGateScript" -}}
+n=0
+while ! nc -z -w 2 "$DEST_HOST" "$DEST_PORT" 2>/dev/null; do
+  [ $((n % 15)) -eq 0 ] && echo "relay gate: $DEST_HOST:$DEST_PORT unreachable; waiting, not exiting (probe $n)"
+  n=$((n+1)); sleep {{ int .Values.relayGate.pollSeconds }}
+done
+[ "$n" -gt 0 ] && echo "relay gate: $DEST_HOST:$DEST_PORT reachable after $n failed probe(s); starting the relay"
+exec /redpanda-connect "$@"
+{{- end }}

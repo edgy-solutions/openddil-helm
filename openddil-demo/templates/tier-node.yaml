@@ -2424,9 +2424,28 @@ spec:
         - name: uplink
           image: "{{ include "openddil.thirdPartyImage" $root.Values.edgeHqBridge.image }}"
           imagePullPolicy: {{ $root.Values.edgeHqBridge.image.pullPolicy | default "IfNotPresent" }}
+          {{- if $root.Values.relayGate.enabled }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {{- include "openddil.relayGateScript" $root | nindent 14 }}
+            - relay-gate
+          {{- end }}
           args: ["-c", "/connect/connect.yaml"]
           resources:
             {{- toYaml $root.Values.edgeHqBridge.resources | nindent 12 }}
+          # DEST_HOST/DEST_PORT are unconditional: the relay gate (relayGate in
+          # values.yaml) reads the same env as the stall probe below. While
+          # gated, Connect's metrics endpoint is not up, so the probe exits 0
+          # ("not judging") and the gate never trips liveness. A gated uplink
+          # reads Running with its restart count unchanged for the whole cut;
+          # read the pod log ("relay gate:") to see it wait.
+          env:
+            - name: DEST_HOST
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $tier "root" $root) | splitList ":" | first | quote }}
+            - name: DEST_PORT
+              value: {{ include "openddil.bridgeTarget" (dict "tier" $tier "root" $root) | splitList ":" | last | quote }}
           {{- if $root.Values.relayStallProbe.enabled }}
           # THE RELAY DIMENSION 1 CUTS. When the region is severed from HQ,
           # THIS uplink's output legitimately stops -- buffering is the
@@ -2438,11 +2457,6 @@ spec:
           # The destination is taken from bridgeTarget, so it is whatever this
           # relay actually publishes through and a NetworkPolicy sever affects
           # the probe exactly as it affects the relay.
-          env:
-            - name: DEST_HOST
-              value: {{ include "openddil.bridgeTarget" (dict "tier" $tier "root" $root) | splitList ":" | first | quote }}
-            - name: DEST_PORT
-              value: {{ include "openddil.bridgeTarget" (dict "tier" $tier "root" $root) | splitList ":" | last | quote }}
           livenessProbe:
             exec:
               command: ["/bin/sh", "/probe/relay-stall-probe.sh"]
