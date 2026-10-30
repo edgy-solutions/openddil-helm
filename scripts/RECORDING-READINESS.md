@@ -552,6 +552,15 @@ turning it on by default would improve the demo by hiding a real property.
      on the new image keeps an in-compliance asset in compliance with no
      re-send. Until then, any roll before a demo means re-sending the
      fixture assets' part and mod events.
+   * **OPEN 2026-10-30: lab2 pins cm-service by digest after the roll that
+     measures the fix.** lab2 runs `cm-service:latest` with pull policy
+     Always and sets no `cmService.image.digest`, so every push to
+     cm-service changes what the next lab2 pod start runs, unannounced.
+     The other lab already pins by digest. The roll that measures the fix
+     above has to take `:latest`; once it reads, set
+     `cmService.image.digest` in lab2's values chain to the digest that
+     roll measured. Close it when a lab2 render shows `cm-service@sha256:`
+     on every cm-service deployment.
 4. **The sever script restarts the site** — deliberate, conntrack lets
    established connections through a new policy — so expect 30–60s of pods
    restarting after each cut.
