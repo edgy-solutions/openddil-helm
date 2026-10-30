@@ -170,6 +170,15 @@ RESTART_RELAY="${RESTART_RELAY:-0}"
 # restart on by default would improve the demo by hiding the finding, which
 # is the move this corpus exists to refuse. The flag makes the choice
 # explicit and the readiness doc records BOTH numbers.
+#
+# UPDATE (relayGate). With relayGate.enabled (the chart default) the relay no
+# longer exits at startup under a cut: its container waits in a destination
+# gate (nc -z against the parent, templates/_helpers.tpl
+# openddil.relayGateScript) and execs Connect within pollSeconds of the heal,
+# so no back-off accrues and the figure above stops being a property of the
+# clock. This flag is then redundant, and is kept for relayGate.enabled=false,
+# where the history above still describes the behaviour. The 2026-09-19
+# measurement stays as the record of what the gate replaces.
 
 if [ -z "$TIER" ]; then
   echo "usage: $0 <tier-id> on|off|status [namespace] [--from-parent|--isolate] [--dry-run]" >&2
