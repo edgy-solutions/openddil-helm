@@ -626,7 +626,7 @@ spec:
         {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:
-            name: {{ $root.Release.Name }}-cm-fault-codes
+            name: {{ include "openddil.faultCatalogConfigMapName" $root }}
         {{- end }}
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
@@ -639,15 +639,19 @@ spec:
 # Shared by every PEP that mounts it -- root pep and every tier-pep -- so
 # there is exactly one catalog, not one per tier.
 #
-# The ConfigMap's own name stays `-cm-fault-codes` (not `-cm-fault-catalog`)
-# on purpose, to avoid an object rename on upgrade; only its data key and
-# the mounted filename changed.
+# The name carries a hash of the catalog content, so a new pod can never mount
+# a cached older catalog under the same name (kubelet can serve its cached copy
+# of a same-named ConfigMap to a pod rolled by a checksum, and the PEP reads the
+# catalog once at import). A catalog change therefore renames the object (helm
+# deletes the old one on upgrade), and that rename is itself what rolls every
+# PEP that mounts it. `immutable` because the content never changes in place.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $root.Release.Name }}-cm-fault-codes
+  name: {{ include "openddil.faultCatalogConfigMapName" $root }}
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
+immutable: true
 data:
   cm-fault-catalog.json: {{ toJson $root.Values.cmReports.faultCatalog | quote }}
 {{- end }}

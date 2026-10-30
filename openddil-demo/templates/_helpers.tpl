@@ -3118,3 +3118,12 @@ done
 [ "$n" -gt 0 ] && echo "relay gate: $DEST_HOST:$DEST_PORT reachable after $n failed probe(s); starting the relay"
 exec /redpanda-connect "$@"
 {{- end }}
+
+{{/*
+Fault-catalog ConfigMap name, carrying the first 10 hex of the sha256 of the
+exact string the ConfigMap data is built from (toJson of cmReports.faultCatalog),
+so the name tracks the data. Takes the root context.
+*/}}
+{{- define "openddil.faultCatalogConfigMapName" -}}
+{{ .Release.Name }}-cm-fault-codes-{{ toJson .Values.cmReports.faultCatalog | sha256sum | trunc 10 }}
+{{- end }}

@@ -1355,7 +1355,7 @@ spec:
         {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
         - name: cm-fault-codes
           configMap:
-            name: {{ $root.Release.Name }}-cm-fault-codes
+            name: {{ include "openddil.faultCatalogConfigMapName" $root }}
         {{- end }}
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
