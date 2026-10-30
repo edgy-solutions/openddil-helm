@@ -577,6 +577,35 @@ turning it on by default would improve the demo by hiding a real property.
    and a cleanup can make the served shape *bigger*. Measured: a table went
    11 MB → 64 kB while its shape stayed at 10 MB until Electric restarted.
    `check-shape-sizes.sh` is the only instrument that sees this.
+6. **A pod rolled by a checksum can start on the previous ConfigMap.** A
+   checksum annotation decides whether a pod rolls, not what it mounts:
+   kubelet can mount its cached copy of a same-named ConfigMap and sync the
+   new content milliseconds after the process has read the old one.
+   Measured on a lab cluster: the container started 65 ms before the data
+   directory's write, and the process ran the previous revision's script.
+   The fault catalog is now content-named and immutable
+   (`openddil.faultCatalogConfigMapName`), so a catalog edit renames the
+   object and a new PEP cannot mount an older one.
+   * **OPEN 2026-10-30: the rest of the class.** 24 more ConfigMaps mounted
+     into pods are same-named and covered by a checksum, so they have the same
+     race. Five are covered by no checksum at all: `topaz-hq-config`,
+     `relay-stall-probe`, `exercise-loop-record` (not mounted),
+     `tier-frontend-config-<tier>` and `tier-topaz-config-<tier>`.
+     `destinations-deployment` is covered only when live reload is off, and
+     `ontology-deployment` only in part. `toxiproxy-config`,
+     `edge-hq-bridge-config` and `restate-config` mount by subPath, which
+     never updates in place. Convert the ones read once at start first. The
+     check that closes each one: the new pod's start is after its data
+     directory's write, and the served file's hash equals the render's.
+7. **OPEN 2026-10-30: compacted Electric shapes serve frozen rows.** The
+   PEP requests every shape with `experimental_compaction=true`
+   (`OPENDDIL_ELECTRIC_COMPACTION`, default on). After a shape's first
+   compaction, a fresh read serves some keys frozen at an old value with no
+   error, while the table moves on. Measured on both lab clusters: most
+   compacted shapes stale, by up to days. Compaction waits on log volume, so
+   a cleared Electric is correct only until its busy shapes first compact,
+   which can be within hours. Until this is decided, clear the Electric state
+   right before a session and read the compacted shapes against their tables.
 
 ### UD-14, narrowed 2026-09-19
 
