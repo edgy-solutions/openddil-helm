@@ -606,6 +606,26 @@ turning it on by default would improve the demo by hiding a real property.
    a cleared Electric is correct only until its busy shapes first compact,
    which can be within hours. Until this is decided, clear the Electric state
    right before a session and read the compacted shapes against their tables.
+8. **OPEN 2026-10-31, a pre-existing condition: an edge Electric at 512Mi is
+   one open drilldown away from an OOMKill.** Measured on a lab cluster with
+   compaction off. With no element shape open, the edge Electric's working
+   set is about 236 Mi. One open drilldown (one changes-only element shape)
+   adds about 185 Mi on every element tick, peaking at 420-428 Mi. That cost
+   stays after the screen closes, because the shape stays open. A second
+   element shape, or one large read during a tick, crosses the limit: three
+   OOMKills in two hours.
+   * On the other lab cluster (compaction on), the edge-01 Electric is
+     already OOMKilled with no measured trigger: the current pod restarted
+     31 times between 10-27 and 10-31 03:16Z, and the pod before it 36
+     times in two days. The current container has run since then, at
+     316 Mi. Every OOMKill restarts the Electric and drops its live
+     subscribers.
+   * Raising the limit is not the fix. The fix is the element-state redesign:
+     a screen subscribes only to the nodes it shows, and element rows are
+     written on change. Until it ships, open at most one asset drilldown on
+     an edge screen per session (closing a drilldown does not release its
+     shape; clearing the Electric's store does), and read the edge
+     Electrics' restart counts before a session.
 
 ### UD-14, narrowed 2026-09-19
 
