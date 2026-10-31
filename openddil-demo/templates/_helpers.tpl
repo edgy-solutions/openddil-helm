@@ -1762,7 +1762,11 @@ mappings:
     table: asset_element_telemetry
     consumer_group: tier-projector-element-telemetry-{{ $tier.id }}
     decode_as: json
-    mode: upsert
+    # The handler writes the per-asset row plus change-only element rows in
+    # one transaction (custom: it owns its I/O). Element rows are pruned
+    # only when the per-asset row is gone, so the TTL is required.
+    mode: custom
+    asset_ttl_hours: 24
   - topic: asset-element-inventory
     handler: asset_element_inventory
     table: inventory_items

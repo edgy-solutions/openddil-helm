@@ -45,7 +45,7 @@ inspect() {
 import sys, json, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
 cms = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
-state_ok = band_n = band_ok = mapped = other_state = 0
+state_ok = band_n = band_ok = mapped = other_state = ttl_ok = 0
 bad = []
 for d in docs:
     if d.get("kind") != "Deployment":
@@ -74,6 +74,13 @@ for d in docs:
             text = "".join(cms[cfgname]["data"].values()) if cfgname in cms else ""
             if "handler: asset_element_telemetry" in text:
                 mapped += 1
+                maps = [m for t in cms[cfgname]["data"].values()
+                        for m in ((yaml.safe_load(t) or {}).get("mappings") or [])
+                        if m.get("handler") == "asset_element_telemetry"]
+                if maps and all(m.get("mode") == "custom" and m.get("asset_ttl_hours") == 24 for m in maps):
+                    ttl_ok += 1
+                else:
+                    bad.append(f"{name}: element mapping not custom/24")
                 if len(st) != 1:
                     bad.append(f"{name}: ELEMENT_STATE_JSON x{len(st)}")
                 else:
@@ -92,6 +99,7 @@ for d in docs:
             other_state += 1   # the hub or an edge projector
 print(f"mapping_projectors={mapped}")
 print(f"state_ok={state_ok}")
+print(f"custom_ttl_ok={ttl_ok}")
 print(f"faust_edges={band_n}")
 print(f"bands_ok={band_ok}")
 print(f"other_projectors_with_state={other_state}")
@@ -107,9 +115,9 @@ got="$(inspect "$TMP/default.yaml")"
 echo "$got" | sed 's/^/  /'
 mapped="$(val "$got" mapping_projectors)"; ok="$(val "$got" state_ok)"
 fe="$(val "$got" faust_edges)"; bok="$(val "$got" bands_ok)"
-if [ "${mapped:-0}" -ge 1 ] && [ "$mapped" = "$ok" ] && [ "${fe:-0}" -ge 1 ] && [ "$fe" = "$bok" ] \
+if [ "${mapped:-0}" -ge 1 ] && [ "$mapped" = "$ok" ] && [ "$mapped" = "$(val "$got" custom_ttl_ok)" ] && [ "${fe:-0}" -ge 1 ] && [ "$fe" = "$bok" ] \
    && [ "$(val "$got" other_projectors_with_state)" = 0 ] && [ "$(val "$got" problems)" = none ]; then
-  echo "PASS A defaults: $ok/$mapped tier projectors carry ELEMENT_STATE_JSON once, $bok/$fe faust-edges carry ELEMENT_BANDS_JSON once, hub none"
+  echo "PASS A defaults: $ok/$mapped tier projectors carry ELEMENT_STATE_JSON once, $bok/$fe faust-edges carry ELEMENT_BANDS_JSON once, hub none; $(val "$got" custom_ttl_ok)/$mapped element mappings are custom with asset_ttl_hours 24"
 else
   echo "FAIL A defaults"; FAIL=1
 fi
