@@ -2135,6 +2135,21 @@ releasability:
   # both label columns must appear here, and every table here must have
   # them. Adding a table to the read path without labels is meant to be
   # noisy.
+  # Element-state shapes (asset_element_state). The table is served by edge
+  # PEPs only: the edge tier template adds it to that PEP's labelled tables,
+  # and it is deliberately NOT in labeledTables below.
+  elementShapes:
+    # Electric serves shape DELETE only when its integration-testing flag is
+    # on; this stays false until that is decided. While false, a released view
+    # is forgotten by the PEP and the upstream shape is left alone.
+    deleteUpstream: false
+    # Distinct element views one principal may hold.
+    viewerMax: 8
+    # Seconds a view with no holder is kept before it is released.
+    graceS: 30
+    # Seconds a holder may go unseen before it is dropped.
+    holderIdleS: 120
+
   # --- CLASS 1: nation-filtered. The ADR-0029 predicate applies. ---
   labeledTables:
     - telemetry_latest_state
@@ -2326,6 +2341,8 @@ releasability:
     # table grows by that sample every tick. Changing it does not touch shapes
     # that already exist: clear the Electric storage after the change.
     electricCompaction: true
+    # Port of the PEP's own /metrics listener (not the serving port).
+    metricsPort: 9464
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 300m, memory: 256Mi }

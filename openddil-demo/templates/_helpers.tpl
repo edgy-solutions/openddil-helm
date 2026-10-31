@@ -2778,6 +2778,31 @@ at the price of shape logs that grow without bound. Every PEP gets the same valu
 {{- end }}
 
 {{/*
+openddil.pepElementEnv -- the element-state env every PEP gets: its tier id
+(a metrics label), the metrics port, and the element-shape bounds. Takes
+(dict "root" $root "tier" <tier id>).
+*/}}
+{{- define "openddil.pepElementEnv" -}}
+{{- $es := .root.Values.releasability.elementShapes -}}
+{{- $du := toString $es.deleteUpstream -}}
+{{- if not (has $du (list "true" "false")) -}}
+{{- fail (printf "releasability.elementShapes.deleteUpstream must be true or false, got %q" $du) -}}
+{{- end -}}
+- name: OPENDDIL_PEP_TIER
+  value: {{ .tier | quote }}
+- name: OPENDDIL_PEP_METRICS_PORT
+  value: {{ .root.Values.releasability.pep.metricsPort | quote }}
+- name: OPENDDIL_PEP_ELEMENT_DELETE_UPSTREAM
+  value: {{ $du | quote }}
+- name: OPENDDIL_PEP_VIEWER_SHAPE_MAX
+  value: {{ $es.viewerMax | quote }}
+- name: OPENDDIL_PEP_ELEMENT_GRACE_S
+  value: {{ $es.graceS | quote }}
+- name: OPENDDIL_PEP_HOLDER_IDLE_S
+  value: {{ $es.holderIdleS | quote }}
+{{- end }}
+
+{{/*
 openddil.arrivalsPepEnv -- the env block every PEP gets for the arrivals
 routes. Takes (dict "root" $root "url" <intake URL or ""> "edges" <csv>
 "owningTier" <id>). Roles and units come from values `arrivals`.

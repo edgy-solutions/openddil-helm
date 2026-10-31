@@ -1193,6 +1193,7 @@ spec:
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
             {{- include "openddil.pepCompactionEnv" $root | nindent 12 }}
+            {{- include "openddil.pepElementEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
             # --- asset arrivals (ADR-0050): only a leaf tier (an edge) takes
             # declarations, through its own intake; a region tier owns none.
             {{- if $tier.hasChildren }}
@@ -1271,7 +1272,9 @@ spec:
               # served. Anything else is refused with cause `unlabelable` —
               # a statement about the DATA, identical for every subject,
               # rather than a decision against the viewer.
-              value: {{ join "," $root.Values.releasability.labeledTables | quote }}
+              # An edge PEP also serves the element-state table; hub and
+              # regional PEPs do not list it and so refuse it pre-PDP.
+              value: {{ join "," (ternary (append $root.Values.releasability.labeledTables "asset_element_state") $root.Values.releasability.labeledTables (eq $tier.kind "edge")) | quote }}
             - name: OPENDDIL_ROLE_SERVED_TABLES
               # No nation filter. Declared position; see values.yaml.
               value: {{ join "," $root.Values.releasability.roleServedTables | quote }}
@@ -1329,6 +1332,8 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: {{ int $root.Values.releasability.pep.metricsPort }}
+              name: metrics
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 3

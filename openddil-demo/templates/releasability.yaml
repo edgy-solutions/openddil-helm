@@ -472,6 +472,7 @@ spec:
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
             {{- include "openddil.pepCompactionEnv" $root | nindent 12 }}
+            {{- include "openddil.pepElementEnv" (dict "root" $root "tier" "hub") | nindent 12 }}
             # --- asset arrivals (ADR-0050): the edges this PEP owns are the
             # ones with no tier of their own; the rest go to their tier's PEP.
             {{- $arrEdges := include "openddil.arrivalsRootEdges" $root }}
@@ -593,6 +594,8 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: {{ int $root.Values.releasability.pep.metricsPort }}
+              name: metrics
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 3
