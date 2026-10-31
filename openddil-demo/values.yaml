@@ -2261,6 +2261,13 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # true: every shape the PEPs create asks Electric for a compacted log.
+    # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
+    # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2
+    # and 1.8.1); plain logs grow without bound, and a shape over a per-tick sample
+    # table grows by that sample every tick. Changing it does not touch shapes
+    # that already exist: clear the Electric storage after the change.
+    electricCompaction: true
     resources:
       requests: { cpu: 50m,  memory: 64Mi }
       limits:   { cpu: 300m, memory: 256Mi }

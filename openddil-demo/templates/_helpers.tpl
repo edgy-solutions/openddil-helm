@@ -2757,6 +2757,23 @@ adds the same names merges onto these.
 {{- end }}
 
 {{/*
+openddil.pepCompactionEnv -- whether this PEP asks Electric for compacted
+shape logs. The PEP adds experimental_compaction=true to every shape it creates
+unless OPENDDIL_ELECTRIC_COMPACTION is false, and drops the param when a client
+sends it, so this value is the only switch. Off is for a cluster that must not
+serve the frozen rows a compacted shape returns to fresh reads (electric-sql/electric#4848),
+at the price of shape logs that grow without bound. Every PEP gets the same value.
+*/}}
+{{- define "openddil.pepCompactionEnv" -}}
+{{- $c := toString .Values.releasability.pep.electricCompaction -}}
+{{- if not (has $c (list "true" "false")) -}}
+{{- fail (printf "releasability.pep.electricCompaction must be true or false, got %q" $c) -}}
+{{- end -}}
+- name: OPENDDIL_ELECTRIC_COMPACTION
+  value: {{ $c | quote }}
+{{- end }}
+
+{{/*
 openddil.arrivalsPepEnv -- the env block every PEP gets for the arrivals
 routes. Takes (dict "root" $root "url" <intake URL or ""> "edges" <csv>
 "owningTier" <id>). Roles and units come from values `arrivals`.
