@@ -674,6 +674,13 @@ spec:
             # falls back to the baked-in 11-topic root config.
             - name: PROJECTOR_CONFIG
               value: /tier-config/projector_config.yaml
+            {{- if contains "handler: asset_element_telemetry" (include "openddil.tierProjectorConfig" (dict "tier" $tier "root" $root)) }}
+            # Declared deadbands, health bands and heartbeat for the change-only
+            # element rows (values: elementState). The projector refuses to start
+            # without it whenever it maps asset_element_telemetry.
+            - name: ELEMENT_STATE_JSON
+              value: {{ include "openddil.elementState.stateJson" $root | quote }}
+            {{- end }}
             - name: OPENDDIL_EDGE_ID
               value: {{ $tier.id | quote }}
             - name: OPENDDIL_REGION_ID

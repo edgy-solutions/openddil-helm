@@ -1,0 +1,3 @@
+{{- /* Renders nothing. Exists so openddil.elementState.validate runs on every
+   render, with or without a consumer enabled. */ -}}
+{{- include "openddil.elementState.validate" . -}}

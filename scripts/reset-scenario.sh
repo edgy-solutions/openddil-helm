@@ -1296,6 +1296,7 @@ TABLES=(
   asset_telemetry_windows
   asset_registry
   asset_element_telemetry
+  asset_element_state
   region_fleet_summary
   region_top_factors
   region_wear_trends

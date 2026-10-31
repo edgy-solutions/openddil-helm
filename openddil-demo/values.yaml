@@ -1156,6 +1156,64 @@ logisticsSim:
           tick_drift_temp: 1.5
           tick_drift_load: 5.0
 
+# ---------------------------------------------------------------------------
+# Element state (change-only per-element rows). Declares, per element layer,
+# how each field is treated when the owning tier decides whether a new
+# element row is worth writing. Rendered into two consumers: the tier
+# projectors (ELEMENT_STATE_JSON) and the faust-edge apps (ELEMENT_BANDS_JSON).
+# A bad declaration fails the render (openddil.elementState.validate), so no
+# pod ever starts on one.
+#
+# Field classes:
+#   value       a number; a new row is written when it moves by more than its
+#               deadband. Needs `deadband` > 0 and a `measured` note saying
+#               where the number came from. Hysteresis equals the deadband.
+#   band        a number cut into named bands by elementState.healthBands.
+#   transition  a flag or label; any change writes a row.
+# Window keys (valueWindow*, window*) are refused on band and transition
+# fields: only value fields can be windowed.
+# Layers are keyed by profile, then layer name, and must cover every layer in
+# logisticsSim.config.asset_profiles[].layers. The projector keys deadbands by
+# layer name alone, so one layer name in two profiles must carry the same
+# deadbands.
+# ---------------------------------------------------------------------------
+elementState:
+  # A proposal. The per-asset row's heartbeat must be far below the
+  # projector's asset_ttl_hours, or a quiet asset's row would be pruned.
+  heartbeatS: 300
+  # Health rises toward worse. Limits match the frontend's yellow > 0.90 and
+  # red > 0.97.
+  healthBands:
+    limits: [0.90, 0.97]
+    names: [green, yellow, red]
+    hysteresis: 0.01
+    severity: { green: info, yellow: warn, red: crit }
+  kinds:
+    mrad:
+      "RADAR UNIT": &mradLayerFields
+        temp_c:
+          class: value
+          deadband: 11.19
+          measured: "2026-10-31, logistics-sim generator, stationary healthy asset, max |delta| over n=1896960 element pairs"
+        load_pct:
+          class: value
+          deadband: 38.7
+          measured: "2026-10-31, logistics-sim generator, stationary healthy asset, max |delta| over n=1896960 element pairs"
+        health: { class: band }
+        tx_active: { class: transition }
+        rx_active: { class: transition }
+        moved_by: { class: transition }
+      "BACKPLANE": *mradLayerFields
+      "PROCESSOR BANK": *mradLayerFields
+      "GAN MMIC CHIP": *mradLayerFields
+  # Where element state is read. The PEP consumes `screen` in a later phase;
+  # nothing renders it yet.
+  destinations:
+    screen: { valueWindowS: 1 }
+    upstream: { valueWindow: none }
+    local: { valueWindowS: 0 }
+    egress: {}
+
 frontend:
   image:
     name: frontend

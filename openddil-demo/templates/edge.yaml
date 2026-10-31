@@ -674,6 +674,10 @@ spec:
               value: "/app"
             - name: FAUST_APP_ID
               value: {{ $faustEdgeAppId | quote }}
+            # Health bands for the edge's band transitions (values: elementState).
+            # Absent would mean off; invalid is fatal.
+            - name: ELEMENT_BANDS_JSON
+              value: {{ include "openddil.elementState.bandsJson" $root | quote }}
             - name: KAFKA_BROKERS
               value: {{ $edgeBroker | quote }}
             - name: OPENDDIL_EDGE_ID
