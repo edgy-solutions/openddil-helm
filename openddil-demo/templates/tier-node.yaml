@@ -875,6 +875,10 @@ spec:
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- with (dig "maxShapes" $tier.kind nil ($root.Values.electric | default dict)) }}
+            - name: ELECTRIC_MAX_SHAPES
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- include "openddil.electricEnv" $root | nindent 12 }}
           ports:
             - containerPort: 3000

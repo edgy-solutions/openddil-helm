@@ -316,6 +316,15 @@ electric:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
+  # Shape ceiling per Electric, by tier kind (ELECTRIC_MAX_SHAPES). Beyond it
+  # Electric evicts the least recently used shapes every 60 s; a reader of an
+  # evicted shape gets 409 must-refetch and refetches. null = no ceiling.
+  # Edge: 256, chosen from a shape census (about 150 shapes with four viewers
+  # each on one asset's full drilldown; highest total seen on any Electric
+  # under 100). Region and hub carry none for now.
+  maxShapes:
+    edge: 256
+    region: null
   port: 5133
   # Shape logs and Electric's KV live under /app/persistent. Without a volume
   # they count as the pod's ephemeral storage (evictions) and every restart
