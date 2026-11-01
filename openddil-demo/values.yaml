@@ -1315,6 +1315,8 @@ linkStatus:
   heartbeatPeriodS: 2     # seconds between heartbeats
   idleAfterS: 30          # traffic sum unchanged this long => idle
   downAfterS: 15          # no heartbeat arrival this long at the measuring tier => down
+  heartbeatS: 30          # seconds between liveness-only writes of an unchanged link row; the frontend's stale window is derived from it
+  trafficHoldS: 10        # a traffic band change is written only after it holds this long
   # There is no topic list to set: each link counts the topics its own relay
   # carries (derived from the relay's topic list, rollups included), on the
   # sender's broker, excluding the heartbeat itself. The log-end offsets are

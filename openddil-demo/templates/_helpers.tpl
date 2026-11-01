@@ -2113,12 +2113,12 @@ copies the image's /terrain into the emptyDir mounted at /dst.
 
 {{/*
 openddil.frontendDeploymentJsonWanted -- "true" when the hub frontend gets a
-deployment.json: any configured pane, releasability, any HQ child
+deployment.json: any configured pane, link status (the declared heartbeat), releasability, any HQ child
 link (whose shape places its header row), or any declared move-panel input
 (movement units/standards, effector declared load), frontend.cortex.baseUrl, or frontend.terrain. Empty otherwise.
 */}}
 {{- define "openddil.frontendDeploymentJsonWanted" -}}
-{{- if or .Values.frontend.releasedRecordsPanes .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) (include "openddil.frontendTerrainJson" .) }}true{{- end -}}
+{{- if or .Values.frontend.releasedRecordsPanes .Values.linkStatus.enabled .Values.releasability.enabled (ne (include "openddil.hqChildLinks" .) "[]") .Values.movement.units .Values.movement.standards .Values.effectors.declaredLoad.asset .Values.effectors.declaredLoad.variant (include "openddil.frontendCortexJson" .) (include "openddil.frontendTerrainJson" .) }}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -2152,6 +2152,9 @@ browser can tell "declared empty" from "an older chart".
 {{- $childLinks := include "openddil.hqChildLinks" . | fromJsonArray -}}
 {{- if $childLinks -}}
 {{- $_ := set $d "childLinks" $childLinks -}}
+{{- end -}}
+{{- if .Values.linkStatus.enabled -}}
+{{- $_ := set $d "linkStatus" (dict "heartbeat_s" .Values.linkStatus.heartbeatS) -}}
 {{- end -}}
 {{- $tierTree := include "openddil.hqTierTreeJson" . | fromJsonArray -}}
 {{- if $tierTree -}}

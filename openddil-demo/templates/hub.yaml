@@ -1092,6 +1092,10 @@ spec:
               value: {{ include "openddil.linkDeclaredIdleIds" . | quote }}
             - name: LINK_DOWN_AFTER_S
               value: {{ .Values.linkStatus.downAfterS | quote }}
+            - name: LINK_STATUS_HEARTBEAT_S
+              value: {{ .Values.linkStatus.heartbeatS | quote }}
+            - name: LINK_TRAFFIC_HOLD_S
+              value: {{ .Values.linkStatus.trafficHoldS | quote }}
             # declared-load reload path + the
             # Detonation timeout sweep's window, same two env vars on
             # every projector that carries the effector_launch mapping.

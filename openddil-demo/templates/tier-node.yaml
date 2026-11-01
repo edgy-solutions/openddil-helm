@@ -774,6 +774,10 @@ spec:
               value: {{ $kids := splitList "," (include "openddil.childTierIds" (dict "tier" $tier "root" $root)) }}{{ $idle := list }}{{ range (splitList "," (include "openddil.linkDeclaredIdleIds" $root)) }}{{ if and . (has . $kids) }}{{ $idle = append $idle . }}{{ end }}{{ end }}{{ join "," $idle | quote }}
             - name: LINK_DOWN_AFTER_S
               value: {{ $root.Values.linkStatus.downAfterS | quote }}
+            - name: LINK_STATUS_HEARTBEAT_S
+              value: {{ $root.Values.linkStatus.heartbeatS | quote }}
+            - name: LINK_TRAFFIC_HOLD_S
+              value: {{ $root.Values.linkStatus.trafficHoldS | quote }}
             - name: PYTHONPATH
               value: "/proto:/app/src"
             - name: LOG_LEVEL
@@ -1082,6 +1086,10 @@ data:
       },
       {{- /* Same keys as the hub's deployment.json (effectors, movement, and cortex/terrain when set), one definition. */}}
       "effectors": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).effectors | toJson }},
+      {{- /* The measuring tier's declared heartbeat: the frontend derives its stale window from it. Only a tier that runs a link monitor (has children) reads link_status. */}}
+      {{- if and $root.Values.linkStatus.enabled (include "openddil.childTierIds" (dict "tier" $tier "root" $root)) }}
+      "linkStatus": {"heartbeat_s": {{ $root.Values.linkStatus.heartbeatS }}},
+      {{- end }}
       "movement": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).movement | toJson }}{{ with include "openddil.frontendCortexJson" $root }},
       "cortex": {{ . }}{{ end }}{{ with include "openddil.frontendTerrainJson" $root }},
       "terrain": {{ . }}{{ end }}
