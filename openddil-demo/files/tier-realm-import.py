@@ -9,7 +9,9 @@ not start.
 Environment:
   OPENDDIL_TIER_ID             the tier this replica serves
   OPENDDIL_PEP_CLIENT_SECRET   the tier PEP's client secret (same Secret the root uses)
-  OPENDDIL_SSO_TTL_SECONDS     the SSO idle and max lifetime (the chart owns it)
+  OPENDDIL_SSO_IDLE_SECONDS    the SSO idle lifetime (the chart owns it)
+  OPENDDIL_SSO_MAX_SECONDS     the SSO max lifespan (the chart owns it)
+  OPENDDIL_SSO_TTL_SECONDS     fallback for both when the two above are unset
   OPENDDIL_LOGIN_THEME         the login theme name
   OPENDDIL_REALM_VERSION       the chart's digest of the realm inputs (echoed only)
 
@@ -65,6 +67,8 @@ def main(argv):
     tier = os.environ.get("OPENDDIL_TIER_ID", "")
     secret = os.environ.get("OPENDDIL_PEP_CLIENT_SECRET", "")
     ttl = os.environ.get("OPENDDIL_SSO_TTL_SECONDS", "")
+    sso_idle = os.environ.get("OPENDDIL_SSO_IDLE_SECONDS", ttl)
+    sso_max = os.environ.get("OPENDDIL_SSO_MAX_SECONDS", ttl)
     theme = os.environ.get("OPENDDIL_LOGIN_THEME", "")
     refusals = []
 
@@ -82,8 +86,10 @@ def main(argv):
         refuse("OPENDDIL_TIER_ID is empty")
     if not secret or not re.fullmatch(r"[A-Za-z0-9._~-]+", secret):
         refuse("the tier PEP client secret is empty or has a character outside [A-Za-z0-9._~-]")
-    if not ttl.isdigit():
-        refuse("OPENDDIL_SSO_TTL_SECONDS is not a whole number: %r" % ttl)
+    if not sso_idle.isdigit():
+        refuse("OPENDDIL_SSO_IDLE_SECONDS is not a whole number: %r" % sso_idle)
+    if not sso_max.isdigit():
+        refuse("OPENDDIL_SSO_MAX_SECONDS is not a whole number: %r" % sso_max)
     if refusals:
         halt()
 
@@ -185,8 +191,8 @@ def main(argv):
     client = json.loads(json.dumps(clients[0]).replace("__PEP_CLIENT_SECRET__", secret))
     doc["users"] = merged
     doc["clients"] = [client]
-    doc["ssoSessionIdleTimeout"] = int(ttl)
-    doc["ssoSessionMaxLifespan"] = int(ttl)
+    doc["ssoSessionIdleTimeout"] = int(sso_idle)
+    doc["ssoSessionMaxLifespan"] = int(sso_max)
     if theme:
         doc["loginTheme"] = theme
 
@@ -203,7 +209,7 @@ def main(argv):
     print("credentials kept (homed here): %s" % (", ".join(kept) or "none"))
     print("credentials withheld (homed elsewhere or unassigned): %s" % (", ".join(withheld) or "none"))
     print("realm clients: %s" % client.get("clientId"))
-    print("sso lifetimes: idle=%s max=%s" % (ttl, ttl))
+    print("sso lifetimes: idle=%s max=%s" % (sso_idle, sso_max))
     print("realm_version: %s" % (os.environ.get("OPENDDIL_REALM_VERSION") or "unversioned"))
 
 

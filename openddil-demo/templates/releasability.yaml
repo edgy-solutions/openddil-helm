@@ -542,6 +542,12 @@ spec:
             # enough to bound a stolen cookie" — a deployment decision.
             - name: OPENDDIL_SESSION_TTL_SECONDS
               value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_SESSION_MODE
+              value: {{ include "openddil.sessionMode" $root | quote }}
+            - name: OPENDDIL_SESSION_IDLE_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionIdleSeconds | quote }}
+            - name: OPENDDIL_SESSION_MAX_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionMaxSeconds | quote }}
             # HOW LONG BEFORE THE RENEWAL POINT (the ID token's expiry, or the
             # ceiling if sooner) renewal is attempted — see REFRESH_LEAD_S in
             # oidc.py. Lets a live tab renew ahead of it instead of racing it.
@@ -821,7 +827,7 @@ data:
       echo "FATAL: the bundle realm already sets an SSO lifetime; the chart owns it" >&2
       exit 1
     fi
-    sed -i 's|"realm": "openddil",|"realm": "openddil",\n  "ssoSessionIdleTimeout": {{ int $root.Values.releasability.oidc.sessionTtlSeconds }},\n  "ssoSessionMaxLifespan": {{ int $root.Values.releasability.oidc.sessionTtlSeconds }},|' /tmp/realm.json
+    sed -i 's|"realm": "openddil",|"realm": "openddil",\n  "ssoSessionIdleTimeout": {{ include "openddil.ssoIdleSeconds" $root }},\n  "ssoSessionMaxLifespan": {{ include "openddil.ssoMaxSeconds" $root }},|' /tmp/realm.json
     # The client secret and the redirect URI are the two values the realm
     # cannot know. Substituting them here — rather than committing them —
     # keeps the realm file reviewable and the secret out of the repository.
@@ -870,12 +876,12 @@ data:
       exit 1
     fi
     echo "realm prepared: $(grep -c '\"id\"' /import/realm-openddil.json) pinned ids"
-    if [ "$(grep -c '"ssoSessionIdleTimeout": {{ int $root.Values.releasability.oidc.sessionTtlSeconds }},' /import/realm-openddil.json)" != 1 ] \
-       || [ "$(grep -c '"ssoSessionMaxLifespan": {{ int $root.Values.releasability.oidc.sessionTtlSeconds }},' /import/realm-openddil.json)" != 1 ]; then
+    if [ "$(grep -c '"ssoSessionIdleTimeout": {{ include "openddil.ssoIdleSeconds" $root }},' /import/realm-openddil.json)" != 1 ] \
+       || [ "$(grep -c '"ssoSessionMaxLifespan": {{ include "openddil.ssoMaxSeconds" $root }},' /import/realm-openddil.json)" != 1 ]; then
       echo "FATAL: the prepared realm does not carry exactly one SSO idle and one SSO max lifetime" >&2
       exit 1
     fi
-    echo "sso lifetimes: idle={{ int $root.Values.releasability.oidc.sessionTtlSeconds }} max={{ int $root.Values.releasability.oidc.sessionTtlSeconds }}"
+    echo "sso lifetimes: idle={{ include "openddil.ssoIdleSeconds" $root }} max={{ include "openddil.ssoMaxSeconds" $root }}"
     # Report the CLIENT count too: a spliced fragment that produced no
     # clients renders a valid realm and a broken tier, and the two are
     # indistinguishable in "realm prepared" alone.
@@ -935,8 +941,8 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
       annotations:
-        {{- /* sessionTtlSeconds is baked into the realm import (SSO lifetimes); without it here a TTL-only change never rolls Keycloak or re-imports the realm */}}
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
+        {{- /* the session mode, TTL, idle and max are baked into the realm import (SSO lifetimes); without them here a change to any never rolls Keycloak or re-imports the realm */}}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
         {{- if include "openddil.anyIdentityReplica" $root }}
         # ADR-0045 next increment, item 6: the digest of the realm inputs this

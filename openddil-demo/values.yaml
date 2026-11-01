@@ -2105,6 +2105,14 @@ releasability:
     # window sets this in its own overlay, not here.
     # Also sets the Keycloak SSO idle and max lifetimes in the realm import.
     sessionTtlSeconds: 900
+    # fixed: the session ends at sign-in + sessionTtlSeconds (the default).
+    # sliding: it ends after sessionIdleSeconds with no request from the viewer, or at
+    # sessionMaxSeconds after sign-in, whichever is first; activity never extends the maximum.
+    # In sliding the Keycloak SSO idle and max follow sessionIdleSeconds and the effective
+    # maximum, and the session cookie lives for the maximum.
+    sessionMode: fixed
+    sessionIdleSeconds: 900      # sliding only
+    sessionMaxSeconds: 0         # sliding only; 0 = sessionTtlSeconds
     # How long before the session's renewal point (the ID token's expiry,
     # or the ceiling if sooner) renewal is attempted — see get_session in
     # oidc.py. Keeps a tab that is making requests right up

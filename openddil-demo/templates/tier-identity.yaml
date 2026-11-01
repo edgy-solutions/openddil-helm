@@ -99,7 +99,7 @@ spec:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 8 }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (toString $root.Values.releasability.oidc.sessionTtlSeconds) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum) $realmVersion)) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum) $realmVersion)) | sha256sum | quote }}
         # The inputs digest this pod's realm was imported from; read by
         # scripts/check-realm-drift.sh (ADR-0045 item 6).
         openddil.io/realm-version: {{ $realmVersion | quote }}
@@ -126,8 +126,10 @@ spec:
                 secretKeyRef:
                   name: {{ $root.Release.Name }}-pep-oidc
                   key: client-secret
-            - name: OPENDDIL_SSO_TTL_SECONDS
-              value: {{ int $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_SSO_IDLE_SECONDS
+              value: {{ include "openddil.ssoIdleSeconds" $root | quote }}
+            - name: OPENDDIL_SSO_MAX_SECONDS
+              value: {{ include "openddil.ssoMaxSeconds" $root | quote }}
             - name: OPENDDIL_LOGIN_THEME
               value: "openddil"
             # Echoed in the import summary so a log shows which inputs digest

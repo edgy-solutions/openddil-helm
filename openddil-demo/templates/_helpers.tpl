@@ -3173,3 +3173,58 @@ so the name tracks the data. Takes the root context.
 {{- define "openddil.faultCatalogConfigMapName" -}}
 {{ .Release.Name }}-cm-fault-codes-{{ toJson .Values.cmReports.faultCatalog | sha256sum | trunc 10 }}
 {{- end }}
+
+{{/*
+  Session lifetime (releasability.oidc.sessionMode). ONE place decides the
+  mode, the effective maximum and the SSO lifetimes, so the PEP env, the hub
+  realm sed, its check and the tier realm import cannot disagree. A mode that
+  is not fixed or sliding, or a sliding idle outside 60 .. max, fails the
+  render. Every consumer goes through openddil.sessionMode, so the checks run
+  wherever any of these values is used.
+*/}}
+{{- define "openddil.sessionMode" -}}
+{{- $o := .Values.releasability.oidc -}}
+{{- $mode := toString $o.sessionMode -}}
+{{- if not (has $mode (list "fixed" "sliding")) -}}
+{{- fail (printf "releasability.oidc.sessionMode must be fixed or sliding, got %q" $mode) -}}
+{{- end -}}
+{{- if eq $mode "sliding" -}}
+{{- $max := int (default $o.sessionTtlSeconds $o.sessionMaxSeconds) -}}
+{{- if lt (int $o.sessionIdleSeconds) 60 -}}
+{{- fail (printf "releasability.oidc.sessionIdleSeconds must be at least 60 in sliding mode, got %d" (int $o.sessionIdleSeconds)) -}}
+{{- end -}}
+{{- if gt (int $o.sessionIdleSeconds) $max -}}
+{{- fail (printf "releasability.oidc.sessionIdleSeconds (%d) must not exceed the session maximum (%d) in sliding mode" (int $o.sessionIdleSeconds) $max) -}}
+{{- end -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{/* The effective session maximum: sessionMaxSeconds, or sessionTtlSeconds when it is 0. */}}
+{{- define "openddil.sessionMaxSeconds" -}}
+{{- $o := .Values.releasability.oidc -}}
+{{- int (default $o.sessionTtlSeconds $o.sessionMaxSeconds) -}}
+{{- end -}}
+
+{{/* Keycloak SSO idle lifetime: sessionIdleSeconds when sliding, sessionTtlSeconds when fixed. */}}
+{{- define "openddil.ssoIdleSeconds" -}}
+{{- if eq (include "openddil.sessionMode" .) "sliding" -}}
+{{- int .Values.releasability.oidc.sessionIdleSeconds -}}
+{{- else -}}
+{{- int .Values.releasability.oidc.sessionTtlSeconds -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Keycloak SSO max lifespan: the effective maximum when sliding, sessionTtlSeconds when fixed. */}}
+{{- define "openddil.ssoMaxSeconds" -}}
+{{- if eq (include "openddil.sessionMode" .) "sliding" -}}
+{{- include "openddil.sessionMaxSeconds" . -}}
+{{- else -}}
+{{- int .Values.releasability.oidc.sessionTtlSeconds -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The values that shape a session, as one string for checksum annotations. */}}
+{{- define "openddil.sessionChecksumItems" -}}
+{{- list (toString .Values.releasability.oidc.sessionTtlSeconds) (include "openddil.sessionMode" .) (toString .Values.releasability.oidc.sessionIdleSeconds) (toString .Values.releasability.oidc.sessionMaxSeconds) | toJson -}}
+{{- end -}}

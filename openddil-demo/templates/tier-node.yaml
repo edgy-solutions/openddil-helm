@@ -1266,6 +1266,12 @@ spec:
               value: {{ printf "%s/auth/callback" ($tier.publicOrigin | trimSuffix "/") | quote }}
             - name: OPENDDIL_SESSION_TTL_SECONDS
               value: {{ $root.Values.releasability.oidc.sessionTtlSeconds | quote }}
+            - name: OPENDDIL_SESSION_MODE
+              value: {{ include "openddil.sessionMode" $root | quote }}
+            - name: OPENDDIL_SESSION_IDLE_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionIdleSeconds | quote }}
+            - name: OPENDDIL_SESSION_MAX_SECONDS
+              value: {{ $root.Values.releasability.oidc.sessionMaxSeconds | quote }}
             # HOW LONG BEFORE THE RENEWAL POINT (the ID token's expiry, or the
             # ceiling if sooner) renewal is attempted — see REFRESH_LEAD_S in
             # oidc.py. Lets a live tab renew ahead of it instead of racing it.
