@@ -55,6 +55,11 @@ renders, so a bad declaration is refused whether or not a consumer is on.
 {{- $_ := set $sig $field $db -}}
 {{- end -}}
 {{- end -}}
+{{- /* Refusal 7: the tier projector refuses any layer whose value fields are not exactly temp_c and load_pct. */ -}}
+{{- $keys := join "," (keys $sig | sortAlpha) -}}
+{{- if ne $keys "load_pct,temp_c" -}}
+{{- fail (printf "elementState.kinds.%s.%q: value fields must be exactly temp_c and load_pct (got %q); the tier projector refuses anything else at startup" $profile $layer $keys) -}}
+{{- end -}}
 {{- /* Refusal 6: the projector keys deadbands by layer name alone. */ -}}
 {{- $sigJson := toJson $sig -}}
 {{- if hasKey $sigs $layer -}}

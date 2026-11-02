@@ -1212,6 +1212,8 @@ elementState:
     names: [green, yellow, red]
     hysteresis: 0.01
     severity: { green: info, yellow: warn, red: crit }
+  # A kind is declared by adding it here or in any values file, keyed by the
+  # profile name. Each layer's value fields are exactly temp_c and load_pct.
   kinds:
     mrad:
       "RADAR UNIT": &mradLayerFields
