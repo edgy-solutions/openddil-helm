@@ -7,10 +7,14 @@
 #
 # Cases:
 #   A. each edge tier Electric has exactly one ELECTRIC_MAX_SHAPES, "256".
-#   B. the region tier Electric and the hub Electric have none.
-#   C. electric.maxShapes.edge=40 -> edges read "40"; electric.maxShapes.region=99
-#      -> the region reads "99" and the hub still has none.
-#   D. electric.maxShapes.edge=null -> no Electric has it.
+#   B. the region tier Electric and the hub Electric each have exactly one, "256".
+#   C. electric.maxShapes.edge=40 -> edges read "40", region and hub stay "256";
+#      electric.maxShapes.region=99 -> the region reads "99", edges and hub stay
+#      "256"; electric.maxShapes.hub=77 -> the hub reads "77", edges and region
+#      stay "256".
+#   D. electric.maxShapes.edge=null -> edges have none, region and hub stay "256";
+#      all three tiers null -> no Electric has it; electric.maxShapes=null (the
+#      whole map absent) renders with none.
 #   E. no rendered manifest contains ELECTRIC_ENABLE_INTEGRATION_TESTING.
 # ===========================================================================
 set -u
@@ -72,27 +76,45 @@ f="$(electric_facts "$TMP/default.yaml")"
 
 check "A edge-a1 has one, 256" "$(line "$f" t-tier-electric-edge-a1)" 'n=1 val=256'
 check "A edge-a2 has one, 256" "$(line "$f" t-tier-electric-edge-a2)" 'n=1 val=256'
-check "B region has none"      "$(line "$f" t-tier-electric-region-a)" 'n=0 val=-'
-check "B hub has none"         "$(line "$f" t-electric-sync)" 'n=0 val=-'
+check "B region has one, 256"  "$(line "$f" t-tier-electric-region-a)" 'n=1 val=256'
+check "B hub has one, 256"     "$(line "$f" t-electric-sync)" 'n=1 val=256'
 
 render "$TMP/c1.yaml" --set electric.maxShapes.edge=40
 f="$(electric_facts "$TMP/c1.yaml")"
 check "C edge=40: edge-a1" "$(line "$f" t-tier-electric-edge-a1)" 'n=1 val=40'
 check "C edge=40: edge-a2" "$(line "$f" t-tier-electric-edge-a2)" 'n=1 val=40'
+check "C edge=40: region 256" "$(line "$f" t-tier-electric-region-a)" 'n=1 val=256'
+check "C edge=40: hub 256" "$(line "$f" t-electric-sync)" 'n=1 val=256'
 
 render "$TMP/c2.yaml" --set electric.maxShapes.region=99
 f="$(electric_facts "$TMP/c2.yaml")"
 check "C region=99: region" "$(line "$f" t-tier-electric-region-a)" 'n=1 val=99'
-check "C region=99: hub none" "$(line "$f" t-electric-sync)" 'n=0 val=-'
+check "C region=99: hub 256" "$(line "$f" t-electric-sync)" 'n=1 val=256'
+check "C region=99: edge-a1 256" "$(line "$f" t-tier-electric-edge-a1)" 'n=1 val=256'
+check "C region=99: edge-a2 256" "$(line "$f" t-tier-electric-edge-a2)" 'n=1 val=256'
+
+render "$TMP/c3.yaml" --set electric.maxShapes.hub=77
+f="$(electric_facts "$TMP/c3.yaml")"
+check "C hub=77: hub" "$(line "$f" t-electric-sync)" 'n=1 val=77'
+check "C hub=77: region 256" "$(line "$f" t-tier-electric-region-a)" 'n=1 val=256'
+check "C hub=77: edge-a1 256" "$(line "$f" t-tier-electric-edge-a1)" 'n=1 val=256'
+check "C hub=77: edge-a2 256" "$(line "$f" t-tier-electric-edge-a2)" 'n=1 val=256'
 
 render "$TMP/d.yaml" --set electric.maxShapes.edge=null
 f="$(electric_facts "$TMP/d.yaml")"
-check "D edge=null: no Electric has it" "$(printf '%s\n' "$f" | sed -E 's/^[^ ]+ //' | sort -u)" 'n=0 val=-'
+check "D edge=null: edge-a1 none" "$(line "$f" t-tier-electric-edge-a1)" 'n=0 val=-'
+check "D edge=null: edge-a2 none" "$(line "$f" t-tier-electric-edge-a2)" 'n=0 val=-'
+check "D edge=null: region 256" "$(line "$f" t-tier-electric-region-a)" 'n=1 val=256'
+check "D edge=null: hub 256" "$(line "$f" t-electric-sync)" 'n=1 val=256'
+
+render "$TMP/d3.yaml" --set electric.maxShapes.edge=null --set electric.maxShapes.region=null --set electric.maxShapes.hub=null
+f="$(electric_facts "$TMP/d3.yaml")"
+check "D all three null: no Electric has it" "$(printf '%s\n' "$f" | sed -E 's/^[^ ]+ //' | sort -u)" 'n=0 val=-'
 
 render "$TMP/e.yaml" --set electric.maxShapes=null
 check "D maxShapes absent: renders, none" "$(electric_facts "$TMP/e.yaml" | sed -E 's/^[^ ]+ //' | sort -u)" 'n=0 val=-'
 
-for x in default c1 c2 d e; do
+for x in default c1 c2 c3 d d3 e; do
   check "E no integration-testing flag ($x)" "$(grep -c ELECTRIC_ENABLE_INTEGRATION_TESTING "$TMP/$x.yaml")" "0"
 done
 
