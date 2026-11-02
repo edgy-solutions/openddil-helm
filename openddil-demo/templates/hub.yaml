@@ -114,6 +114,10 @@ spec:
             # ElectricSQL bind port — explicit so it matches the Service.
             - name: ELECTRIC_PORT
               value: {{ .Values.electric.port | quote }}
+            {{- with (dig "maxShapes" "hub" nil (.Values.electric | default dict)) }}
+            - name: ELECTRIC_MAX_SHAPES
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- include "openddil.electricEnv" . | nindent 12 }}
           ports:
             - name: http

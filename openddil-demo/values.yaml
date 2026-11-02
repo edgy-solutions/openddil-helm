@@ -321,10 +321,16 @@ electric:
   # evicted shape gets 409 must-refetch and refetches. null = no ceiling.
   # Edge: 256, chosen from a shape census (about 150 shapes with four viewers
   # each on one asset's full drilldown; highest total seen on any Electric
-  # under 100). Region and hub carry none for now.
+  # under 100). Region and hub are also 256, from a census of their own (33
+  # shapes on the hub, 30 on a region, one HQ screen): about 8x headroom, at
+  # the same count whose memory was measured on an edge (265Mi of 512Mi at 256
+  # shapes). The ceiling also bounds stale definitions: a where or column
+  # change in a frontend leaves the old shape growing with no reader until it
+  # is evicted or cleared (see clearToken below).
   maxShapes:
     edge: 256
-    region: null
+    region: 256
+    hub: 256
   port: 5133
   # Shape logs and Electric's KV live under /app/persistent. Without a volume
   # they count as the pod's ephemeral storage (evictions) and every restart
