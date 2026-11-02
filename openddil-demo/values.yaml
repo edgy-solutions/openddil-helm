@@ -331,6 +331,15 @@ electric:
     edge: 256
     region: 256
     hub: 256
+  # One-time storage clear per Electric, keyed by instance: "hub" for the
+  # hub Electric, the tier id (edge-01, region-east, ...) for a tier
+  # Electric. A new value clears that Electric's /app/persistent once,
+  # in an init container, before Electric starts; its readers get 409
+  # must-refetch and refetch. The same value again is a no-op (a marker
+  # file records the last applied token). Only with a PVC: without one,
+  # a restart already clears. Use it to retire the old shape a frontend
+  # where/column change leaves behind.
+  clearToken: {}
   port: 5133
   # Shape logs and Electric's KV live under /app/persistent. Without a volume
   # they count as the pod's ephemeral storage (evictions) and every restart

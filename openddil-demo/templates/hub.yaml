@@ -95,6 +95,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with include "openddil.electricClearInit" (dict "root" . "instance" "hub") }}{{ . | nindent 6 }}{{- end }}
       containers:
         - name: electric
           image: "{{ include "openddil.thirdPartyImage" .Values.electric.image }}"

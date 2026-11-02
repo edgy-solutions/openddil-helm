@@ -3024,6 +3024,51 @@ volumeMounts:
 {{- end }}
 {{- end }}
 
+{{/*
+One-time storage clear for a PVC-backed Electric. Args: dict "root" "instance"
+("hub" or the tier id). Renders nothing without a PVC or without a token for
+the instance. The token is in the pod template, so a new value restarts the
+pod, and Recreate means the old pod is gone before this runs. A marker file
+records the last applied token so the same value is a no-op.
+*/}}
+{{- define "openddil.electricClearInit" -}}
+{{- $token := dig "clearToken" .instance "" (.root.Values.electric | default dict) -}}
+{{- if and (include "openddil.electricPvcActive" .root) $token }}
+initContainers:
+  - name: electric-clear
+    image: {{ include "openddil.thirdPartyImage" .root.Values.electric.image | quote }}
+    imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .root.Values.electric.image.pullPolicy "root" .root) }}
+    env:
+      - name: INSTANCE
+        value: {{ .instance | quote }}
+      - name: CLEAR_TOKEN
+        value: {{ $token | toString | quote }}
+    volumeMounts:
+      - name: electric-data
+        mountPath: /app/persistent
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { cpu: 100m, memory: 64Mi }
+    command:
+      - sh
+      - -c
+      - |
+        set -u
+        d=/app/persistent
+        m="$d/.openddil-clear-token"
+        if [ ! -d "$d" ]; then echo "NOT-CLEARED: $INSTANCE $d is not mounted"; exit 1; fi
+        have="$(cat "$m" 2>/dev/null || true)"
+        if [ "$have" = "$CLEAR_TOKEN" ]; then echo "CLEAR-SKIP: $INSTANCE token=$CLEAR_TOKEN already applied"; exit 0; fi
+        count() { find "$d" -mindepth 1 -maxdepth 1 ! -name lost+found | wc -l | tr -d ' '; }
+        before="$(count)"
+        find "$d" -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +
+        after="$(count)"
+        [ "$after" = 0 ] || { echo "NOT-CLEARED: $INSTANCE token=$CLEAR_TOKEN entries_after=$after"; exit 1; }
+        printf '%s' "$CLEAR_TOKEN" > "$m"
+        echo "CLEARED: $INSTANCE token=$CLEAR_TOKEN entries_before=$before entries_after=$after"
+{{- end }}
+{{- end }}
+
 {{- define "openddil.electricVolumes" -}}
 {{- $p := .root.Values.electric.persistence }}
 {{- if $p.enabled }}
