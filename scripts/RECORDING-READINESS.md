@@ -540,6 +540,14 @@ turning it on by default would improve the demo by hiding a real property.
       fault.
     * The 300 s back-off ceiling no longer applies with the gate on. `--restart-relay-on-heal` is kept for
       `relayGate.enabled=false`.
+  * **A long store outage against a projector, 2026-11-03.** Two readings, side by side:
+    * **Its retry loops could overflow computing their backoff at attempt 1,024, about 8.8 hours in,** and the worker
+      died while the pod read Running. Fix: `openddil-projector` 9647105. A pod running an image without it needs a
+      restart after an outage that long.
+    * **A Fire during a tier store outage is lost at that tier.** Custom mode commits past the error, so
+      `effector_launch` and `munition_track` skip the record, and group lag reads 0: skipped, not healthy. Upstream tiers
+      write theirs. **Not fixed; the fix follows the walk.** Open in contracts `FOLLOW-UPS.md`.
+      **On camera:** do not fire during a store outage and then show that tier's launch count.
 
 ## G. Things that will bite if forgotten
 
