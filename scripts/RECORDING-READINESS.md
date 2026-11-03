@@ -96,6 +96,10 @@ from inside the suite.
 
 The sixth was added on 2026-11-03, after every lag gate read near zero while CM's
 handler ran half a day behind its own stream, and the rows it writes went with it.
+An upgrade with `restate.ephemeralOnUpgrade` wipes Restate, and intake then resumes at
+the group offset, so whatever a key's handler had not reached is never handled. Read
+this check before such an upgrade: after one, a lost event reads like a handled one.
+
 Group lag is intake: Restate has taken the record, and its handler may not have run
 it. The position is in the journal, so `check_handler_position.py` reads it there.
 It reads each key in a window at each partition's head and fails if any key is

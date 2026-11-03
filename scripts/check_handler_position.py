@@ -68,6 +68,10 @@ WHAT THIS DOES NOT ESTABLISH:
     cannot be read.
   * That an IDLE key on an event topic was ever handled: a key handled long
     ago and one never handled read the same.
+  * That nothing was lost to a Restate wipe: the journals go with it, so an
+    event that was handled and one that was not both read UNREAD for the
+    record's first hour and then IDLE, which passes. Read this before a wipe.
+    After one it says only that handlers run at the head.
   * That the group's own lag is low; check-advancing and the group's
     describe read that.
   * Anything about a stage after the handler (the store, the projector, the
