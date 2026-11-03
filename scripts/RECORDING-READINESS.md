@@ -101,7 +101,9 @@ it. The position is in the journal, so `check_handler_position.py` reads it ther
 It reads each key in a window at each partition's head and fails if any key is
 behind, because keys of one handler can differ by hours. It reads twice, `--interval`
 seconds apart, and a key whose last handled record has no journal left is listed as
-IDLE by name, not passed silently. **It has
+IDLE by name, not passed silently. Event topics (`effector-events`, `cm-events`) get
+no tolerance, since their records are not snapshots and nothing re-sends one; a key
+1 behind there fails, and IDLE there is listed by name as unproven. **It has
 not yet been run as part of a recorded pre-flight**, so no result is recorded for it.
 
 **The gate covers every store by default now.** It used to default to the root

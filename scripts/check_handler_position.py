@@ -40,6 +40,12 @@ UNREAD, OK, IDLE: any BEHIND key fails the row.
     UNREAD  any key unread, a node-level read failure, or no     FAIL
             key readable and a young or unknown head
 
+Event topics (effector-events, cm-events) have no tolerance: their records are
+not snapshots and nothing re-sends one, so a key even 1 behind is BEHIND. An
+event key caught mid-handling fails that run and a re-run settles it. IDLE on an
+event topic cannot tell a key handled long ago from one never handled; those keys
+are listed by name after the counts.
+
 IDLE exists because completed invocations are retained about 2 h, so a quiet
 key's last handled record has no journal left. It cannot be proven, so it is
 declared, never silently passed.
@@ -53,13 +59,15 @@ Every subprocess has two timeouts. The remote one is the rule
 leaves the process running in the pod. The local one (N+10) is the backstop.
 
     python scripts/check_handler_position.py [namespace]
-        [--tolerance N]   offsets, default 100
+        [--tolerance N]   offsets, default 100; snapshot topics only
         [--interval S]    seconds between the passes, default 60 (min 30)
 
 WHAT THIS DOES NOT ESTABLISH:
   * That a handler's work is correct, only how far it has got.
   * That a quiet partition's handler is alive: IDLE is declared because it
     cannot be read.
+  * That an IDLE key on an event topic was ever handled: a key handled long
+    ago and one never handled read the same.
   * That the group's own lag is low; check-advancing and the group's
     describe read that.
   * Anything about a stage after the handler (the store, the projector, the
@@ -92,6 +100,8 @@ PY_REMOTE = 150
 JOB_CHUNK = 40
 STATES = ("EMPTY", "OK", "BEHIND", "IDLE", "UNREAD")
 FAILING = ("BEHIND", "UNREAD")
+# Not snapshots: nothing re-sends one of these records, so no tolerance applies.
+EVENT_TOPICS = ("effector-events", "cm-events")
 
 # In-pod scripts (standard library only), fed to `python -u -` on stdin.
 SUBS_SCRIPT = """\
@@ -304,7 +314,8 @@ def evaluate_node(node: str, read: NodeRead, tolerance: int, now_ms: int) -> lis
                 if position is None and err:
                     state, note = "UNREAD", err
                 else:
-                    state = key_verdict(position, klast, kms, now_ms, tolerance)
+                    state = key_verdict(position, klast, kms, now_ms,
+                                        0 if topic in EVENT_TOPICS else tolerance)
                 ts = pos[1] if pos else None
                 key_rows.append({
                     "key": key, "position": position, "last": klast,
@@ -342,7 +353,8 @@ def compare_passes(first: list[dict], second: list[dict], tolerance: int,
         for k in r["key_rows"]:
             b = before.get(k["key"])
             if (b and b["state"] == "OK" and k["state"] == "OK"
-                    and k["last"] - b["last"] > tolerance
+                    and k["last"] - b["last"] > (0 if r["topic"] in EVENT_TOPICS
+                                                 else tolerance)
                     and k["position"] == b["position"]):
                 k["state"] = "BEHIND"
                 k["note"] = "position unmoved while high advanced"
@@ -354,6 +366,22 @@ def compare_passes(first: list[dict], second: list[dict], tolerance: int,
             r.update(summarize(r["key_rows"]))
             r["keys_skipped"] = skipped
     return second
+
+
+def event_idle_keys(rows: list[dict]) -> list[dict]:
+    """Keys on event topics whose state is IDLE: passed, but not proven."""
+    return [{"node": r["node"], "handler": r["handler"], "topic": r["topic"],
+             "partition": r["partition"], "key": k["key"], "last": k["last"]}
+            for r in rows if r["topic"] in EVENT_TOPICS
+            for k in r["key_rows"] if k["state"] == "IDLE"]
+
+
+def print_event_idle(rows: list[dict]) -> None:
+    idle = event_idle_keys(rows)
+    print("event topics, IDLE, handler not proven: %d" % len(idle))
+    for i in idle:
+        print("  %-8s %s %s/%d key=%s last=%s" % (
+            i["node"], i["handler"], i["topic"], i["partition"], i["key"], i["last"]))
 
 
 def counts(rows: list[dict]) -> dict:
@@ -549,6 +577,8 @@ def print_not_established() -> None:
     print("  * That a handler's work is correct, only how far it has got.")
     print("  * That a quiet partition's handler is alive: IDLE is declared")
     print("    because it cannot be read.")
+    print("  * That an IDLE key on an event topic was ever handled: a key handled")
+    print("    long ago and one never handled read the same.")
     print("  * That the group's own lag is low; check-advancing and the")
     print("    group's describe read that.")
     print("  * Anything about a stage after the handler (the store, the")
@@ -603,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     first, stats1 = one_pass(ns, nodes, a.tolerance)
     print_pass(1, first, stats1)
     if not passes(first):
+        print_event_idle(first)
         print_not_established()
         print("handler position: FAIL (pass 1: %s)" % summary(first))
         return 1
@@ -611,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     rows2, stats2 = one_pass(ns, nodes, a.tolerance)
     second = compare_passes(first, rows2, a.tolerance)
     print_pass(2, second, stats2)
+    print_event_idle(second)
     if not passes(second):
         print_not_established()
         print("handler position: FAIL (pass 2: %s)" % summary(second))

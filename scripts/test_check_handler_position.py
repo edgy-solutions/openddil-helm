@@ -48,15 +48,15 @@ def keys_of(lasts):
 
 
 def read(position=None, start=0, high=1000, head=NOW - 5_000, failed=None, subs=True,
-         key_ms=None):
+         key_ms=None, topic="t"):
     """One key, `K`, whose own last record is high - 1."""
     r = chp.NodeRead(failed=list(failed or []))
     if subs:
-        r.subs = [("Svc", "h", "b", "t")]
+        r.subs = [("Svc", "h", "b", topic)]
         kl = {"K": (high - 1, key_ms or head)} if head is not None else {}
-        r.parts[("b", "t")] = {0: (start, high, head, kl, 0)}
+        r.parts[("b", topic)] = {0: (start, high, head, kl, 0)}
     if position is not None:
-        r.positions[("Svc", "h", "t", 0, "K")] = (position, NOW - 1000)
+        r.positions[("Svc", "h", topic, 0, "K")] = (position, NOW - 1000)
     return r
 
 
@@ -267,6 +267,44 @@ class PerKey(unittest.TestCase):
         r = multi({"a": 999}, {}, 1000)
         chp.apply_job_results(r, text)
         self.assertEqual(states(r), ["UNREAD"])
+
+
+class EventTopicTests(unittest.TestCase):
+    def one(self, topic, **kw):
+        return chp.evaluate_node("n", read(topic=topic, **kw), TOL, NOW)
+
+    def test_effector_events_six_behind_is_behind(self):
+        rows = self.one("effector-events", position=994, high=1001)
+        self.assertEqual(rows[0]["state"], "BEHIND")
+
+    def test_cm_events_one_behind_is_behind(self):
+        rows = self.one("cm-events", position=999, high=1001)
+        self.assertEqual(rows[0]["state"], "BEHIND")
+
+    def test_snapshot_topic_keeps_tolerance(self):
+        rows = self.one("raw-sensor-stream", position=994, high=1001)
+        self.assertEqual(rows[0]["state"], "OK")
+        rows = self.one("raw-sensor-stream", position=1000 - TOL - 1, high=1001)
+        self.assertEqual(rows[0]["state"], "BEHIND")
+
+    def test_event_topic_caught_up_is_ok(self):
+        rows = self.one("effector-events", position=1000, high=1001)
+        self.assertEqual(rows[0]["state"], "OK")
+
+    def test_event_topic_idle_passes_and_is_named(self):
+        old = NOW - 2 * 3600 * 1000
+        rows = self.one("effector-events", high=1001, head=old, key_ms=old)
+        self.assertEqual(rows[0]["state"], "IDLE")
+        self.assertTrue(chp.passes(rows))
+        idle = chp.event_idle_keys(rows)
+        self.assertEqual([(i["topic"], i["key"]) for i in idle],
+                         [("effector-events", "K")])
+
+    def test_snapshot_topic_idle_not_listed(self):
+        old = NOW - 2 * 3600 * 1000
+        rows = self.one("raw-sensor-stream", high=1001, head=old, key_ms=old)
+        self.assertEqual(rows[0]["state"], "IDLE")
+        self.assertEqual(chp.event_idle_keys(rows), [])
 
 
 if __name__ == "__main__":
