@@ -98,8 +98,10 @@ The sixth was added on 2026-11-03, after every lag gate read near zero while CM'
 handler ran half a day behind its own stream, and the rows it writes went with it.
 Group lag is intake: Restate has taken the record, and its handler may not have run
 it. The position is in the journal, so `check_handler_position.py` reads it there.
-It reads twice, `--interval` seconds apart, and a quiet partition whose last handled
-record has no journal left is listed as IDLE by name, not passed silently. **It has
+It reads each key in a window at each partition's head and fails if any key is
+behind, because keys of one handler can differ by hours. It reads twice, `--interval`
+seconds apart, and a key whose last handled record has no journal left is listed as
+IDLE by name, not passed silently. **It has
 not yet been run as part of a recorded pre-flight**, so no result is recorded for it.
 
 **The gate covers every store by default now.** It used to default to the root

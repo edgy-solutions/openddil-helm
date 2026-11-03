@@ -13,23 +13,40 @@ invocation's journal, and that is what this reads.
 For every node (the hub, and each tier from check_tier_feed.tiers) it reads
 the subscriptions from that node's Restate admin API, the partitions and head
 keys from the source broker, and then, per handler and key, the journal of the
-newest completed invocation. A handler's position on a partition is the
-maximum offset across its readings.
+newest completed invocation.
+
+A handler's position belongs to a KEY, not to a tier. Positions on one
+partition were measured 28,000 offsets apart (2026-11-03): three keys 7 s
+behind and three keys 6.5 h behind, on the same handler at the same moment.
+The first version of this check took the maximum across three sampled keys and
+passed that partition; its proof run found that. Keys appear to drain in
+groups; that they are Restate's partitions is not established.
+
+So every distinct key in the last HEAD_WINDOW offsets of each partition is
+read, and each is compared to ITS OWN newest record in that window, never to
+the partition's high (the head is another key's record). Per key:
+
+    OK      a reading, and key last - position <= tolerance
+    BEHIND  a reading, and key last - position >  tolerance
+    IDLE    no reading, the key's own last record older than 3600 s
+    UNREAD  no reading and a younger record, or a journal query error
+
+Per (subscription, partition) the worst key decides, in the order BEHIND,
+UNREAD, OK, IDLE: any BEHIND key fails the row.
 
     EMPTY   no records on the partition                          pass
-    OK      a reading, and last - position <= tolerance          pass
-    BEHIND  a reading, and last - position >  tolerance          FAIL
-    IDLE    no reading, head older than 3600 s                   pass, named
-    UNREAD  no reading and a young head, an unknown head, or     FAIL
-            any node-level read failure
+    OK/IDLE as above                                             pass
+    BEHIND  any key behind                                       FAIL
+    UNREAD  any key unread, a node-level read failure, or no     FAIL
+            key readable and a young or unknown head
 
 IDLE exists because completed invocations are retained about 2 h, so a quiet
-partition's last handled record has no journal left. It cannot be proven, so
-it is declared, never silently passed.
+key's last handled record has no journal left. It cannot be proven, so it is
+declared, never silently passed.
 
-It reads twice, --interval seconds apart. It also fails as BEHIND a partition
-that was OK on pass 1, whose high advanced by more than the tolerance, while
-the handler's position did not move at all.
+It reads twice, --interval seconds apart. It also fails as BEHIND a key that
+was OK on pass 1, whose own last record advanced by more than the tolerance,
+while its position did not move at all.
 
 Every subprocess has two timeouts. The remote one is the rule
 (`kubectl exec ... -- timeout N cmd`): a local timeout kills kubectl and
@@ -49,6 +66,10 @@ WHAT THIS DOES NOT ESTABLISH:
     screen).
   * That the position holds: it is a reading at two moments, and a passing
     tier can fall behind afterwards.
+  * Every key: a key with no record in the last HEAD_WINDOW offsets of a
+    partition is not read, so a key that has gone quiet can sit behind
+    unseen. The window's coverage is the count printed, and it is not a
+    census of the tier's keys.
 """
 from __future__ import annotations
 
@@ -65,10 +86,10 @@ from check_tier_feed import kubectl, require_cluster, tiers
 KEY_RE = re.compile(r"[A-Za-z0-9:._-]+")
 NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 IDLE_AFTER_S = 3600
-HEAD_WINDOW = 30
-MAX_KEYS = 3
+HEAD_WINDOW = 400
 RPK_REMOTE = 20
-PY_REMOTE = 120
+PY_REMOTE = 150
+JOB_CHUNK = 40
 STATES = ("EMPTY", "OK", "BEHIND", "IDLE", "UNREAD")
 FAILING = ("BEHIND", "UNREAD")
 
@@ -134,24 +155,34 @@ def parse_describe(text: str) -> list[tuple[int, int, int]]:
     return out
 
 
-def parse_consume(text: str) -> tuple[list[str], int | None]:
-    """`rpk topic consume -f '%p %o %d %k\\n'` -> (newest distinct safe keys,
-    the last line's timestamp in ms). Keys not matching KEY_RE are skipped:
-    the key goes into SQL."""
+class KeyLasts(dict):
+    """key -> (last_offset, last_ms), newest first; `skipped` counts records
+    whose key was unusable."""
+    skipped = 0
+
+
+def parse_consume(text: str) -> tuple[KeyLasts, int | None]:
+    """`rpk topic consume -f '%p %o %d %k\\n'` -> (key_lasts, head_ms).
+
+    key_lasts maps every distinct key matching KEY_RE to (its own newest
+    offset, its own newest timestamp in ms), newest first, with no cap.
+    head_ms is the last line's timestamp. Records whose key does not match
+    KEY_RE (the key goes into SQL) or is empty are skipped and counted in
+    key_lasts.skipped."""
     recs = []
     for line in text.replace("\r", "").splitlines():
         f = line.split()
         if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
-            recs.append((int(f[2]), f[3] if len(f) > 3 else ""))
+            recs.append((int(f[1]), int(f[2]), f[3] if len(f) > 3 else ""))
+    out = KeyLasts()
     if not recs:
-        return [], None
-    keys: list[str] = []
-    for _, k in reversed(recs):
-        if k and KEY_RE.fullmatch(k) and k not in keys:
-            keys.append(k)
-            if len(keys) == MAX_KEYS:
-                break
-    return keys, recs[-1][0]
+        return out, None
+    for off, ms, k in reversed(recs):
+        if not (k and KEY_RE.fullmatch(k)):
+            out.skipped += 1
+        elif k not in out:
+            out[k] = (off, ms)
+    return out, recs[-1][1]
 
 
 def parse_journal(entry) -> dict | None:
@@ -181,18 +212,32 @@ def parse_sink(sink: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-def verdict(position: int | None, start: int, high: int, head_ms: int | None,
-            now_ms: int, tolerance: int, node_failed: bool = False) -> str:
-    """One (subscription, partition). last = high - 1."""
+def key_verdict(position: int | None, key_last: int, key_last_ms: int | None,
+                now_ms: int, tolerance: int) -> str:
+    """One key on one partition, against that key's OWN last record."""
+    if position is not None:
+        return "OK" if max(0, key_last - position) <= tolerance else "BEHIND"
+    if key_last_ms is not None and (now_ms - key_last_ms) / 1000.0 > IDLE_AFTER_S:
+        return "IDLE"
+    return "UNREAD"
+
+
+def partition_state(key_rows: list, start: int, high: int, head_ms: int | None,
+                    now_ms: int, node_failed: bool = False) -> str:
+    """One (subscription, partition). key_rows: dicts with "state" (or bare
+    state strings). The worst key decides: BEHIND, UNREAD, OK, IDLE."""
     if node_failed:
         return "UNREAD"
     if high <= start:
         return "EMPTY"
-    last = high - 1
-    if position is not None:
-        return "OK" if max(0, last - position) <= tolerance else "BEHIND"
-    if head_ms is not None and (now_ms - head_ms) / 1000.0 > IDLE_AFTER_S:
-        return "IDLE"
+    sts = {(r["state"] if isinstance(r, dict) else r) for r in key_rows}
+    if not sts:
+        if head_ms is not None and (now_ms - head_ms) / 1000.0 > IDLE_AFTER_S:
+            return "IDLE"
+        return "UNREAD"
+    for st in ("BEHIND", "UNREAD", "OK", "IDLE"):
+        if st in sts:
+            return st
     return "UNREAD"
 
 
@@ -205,34 +250,75 @@ def nodes_for(tier_names: list[str]) -> list[str] | None:
 class NodeRead:
     failed: list[str] = field(default_factory=list)
     subs: list[tuple[str, str, str, str]] = field(default_factory=list)  # svc, handler, broker, topic
-    parts: dict = field(default_factory=dict)      # (broker, topic) -> {p: (start, high, head_ms)}
-    positions: dict = field(default_factory=dict)  # (svc, handler, topic, p) -> (offset, ts)
+    # (broker, topic) -> {p: (start, high, head_ms, key_lasts, keys_skipped)}
+    parts: dict = field(default_factory=dict)
+    # (svc, handler, topic, p, key) -> (offset, ts)
+    positions: dict = field(default_factory=dict)
+    # (svc, handler, topic, key) -> error type name from the journal query
+    key_errors: dict = field(default_factory=dict)
+    jobs: int = 0
+    positions_seconds: float = 0.0
+
+
+def summarize(key_rows: list[dict]) -> dict:
+    """Row fields taken from the worst key, plus the key counts."""
+    behind = sorted((r for r in key_rows if r["state"] == "BEHIND"),
+                    key=lambda r: -r["behind"])
+    oks = sorted((r for r in key_rows if r["state"] == "OK"),
+                 key=lambda r: -r["behind"])
+    rest = [r for r in key_rows if r["state"] in ("UNREAD", "IDLE")]
+    w = (behind or oks or rest or [None])[0]
+
+    def n(st):
+        return sum(1 for r in key_rows if r["state"] == st)
+    return {"key": w["key"] if w else None, "position": w["position"] if w else None,
+            "last": w["last"] if w else None, "behind": w["behind"] if w else None,
+            "age_ms": w["age_ms"] if w else None, "note": w["note"] if w else "",
+            "keys_read": len(key_rows), "keys_behind": n("BEHIND"),
+            "keys_idle": n("IDLE"), "keys_unread": n("UNREAD"),
+            "behind_keys": [r["key"] for r in behind], "key_rows": key_rows}
+
+
+def failed_row(node: str, why: str) -> dict:
+    return {"node": node, "service": "-", "handler": "-", "topic": "-",
+            "partition": -1, "key": None, "position": None, "last": None, "high": None,
+            "start": None, "head_ms": None, "behind": None, "age_ms": None,
+            "state": "UNREAD", "note": why, "keys_read": 0, "keys_behind": 0,
+            "keys_idle": 0, "keys_unread": 0, "keys_skipped": 0, "behind_keys": [],
+            "key_rows": []}
 
 
 def evaluate_node(node: str, read: NodeRead, tolerance: int, now_ms: int) -> list[dict]:
-    rows = []
-    for why in read.failed:
-        rows.append({"node": node, "service": "-", "handler": "-", "topic": "-",
-                     "partition": -1, "position": None, "last": None, "high": None,
-                     "behind": None, "age_ms": None, "state": "UNREAD", "note": why})
+    rows = [failed_row(node, why) for why in read.failed]
     if not read.subs and not read.failed:
-        rows.append({"node": node, "service": "-", "handler": "-", "topic": "-",
-                     "partition": -1, "position": None, "last": None, "high": None,
-                     "behind": None, "age_ms": None, "state": "UNREAD",
-                     "note": "zero subscriptions"})
+        rows.append(failed_row(node, "zero subscriptions"))
     for svc, handler, broker, topic in read.subs:
-        for p, (start, high, head_ms) in sorted(read.parts.get((broker, topic), {}).items()):
-            pos = read.positions.get((svc, handler, topic, p))
-            position = pos[0] if pos else None
-            state = verdict(position, start, high, head_ms, now_ms, tolerance,
-                            bool(read.failed))
-            last = high - 1
-            ts = pos[1] if pos else None
-            rows.append({"node": node, "service": svc, "handler": handler, "topic": topic,
-                         "partition": p, "position": position, "last": last, "high": high,
-                         "behind": (max(0, last - position) if position is not None else None),
-                         "age_ms": (now_ms - ts) if ts else None, "state": state,
-                         "note": ""})
+        for p, (start, high, head_ms, key_lasts, skipped) in sorted(
+                read.parts.get((broker, topic), {}).items()):
+            key_rows = []
+            for key, (klast, kms) in key_lasts.items():
+                pos = read.positions.get((svc, handler, topic, p, key))
+                err = read.key_errors.get((svc, handler, topic, key))
+                position = pos[0] if pos else None
+                note = ""
+                if position is None and err:
+                    state, note = "UNREAD", err
+                else:
+                    state = key_verdict(position, klast, kms, now_ms, tolerance)
+                ts = pos[1] if pos else None
+                key_rows.append({
+                    "key": key, "position": position, "last": klast,
+                    "behind": (max(0, klast - position) if position is not None else None),
+                    "age_ms": (now_ms - ts) if ts else None, "state": state, "note": note})
+            state = partition_state(key_rows, start, high, head_ms, now_ms,
+                                    bool(read.failed))
+            row = {"node": node, "service": svc, "handler": handler, "topic": topic,
+                   "partition": p, "high": high, "start": start, "head_ms": head_ms,
+                   "state": state, "keys_skipped": skipped}
+            row.update(summarize(key_rows))
+            if not key_rows:
+                row["last"] = high - 1
+            rows.append(row)
     return rows
 
 
@@ -240,16 +326,33 @@ def row_key(r: dict) -> tuple:
     return (r["node"], r["service"], r["handler"], r["topic"], r["partition"])
 
 
-def compare_passes(first: list[dict], second: list[dict], tolerance: int) -> list[dict]:
-    """A row OK on pass 1 whose high advanced by more than tolerance while the
-    handler's position did not move at all becomes BEHIND on pass 2."""
+def compare_passes(first: list[dict], second: list[dict], tolerance: int,
+                   now_ms: int | None = None) -> list[dict]:
+    """Per key: a key OK on both passes whose own last record advanced by more
+    than tolerance while its position did not move at all becomes BEHIND, and
+    the row is decided again. Keys present on only one pass are not compared."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     old = {row_key(r): r for r in first}
     for r in second:
         o = old.get(row_key(r))
-        if (o and o["state"] == "OK" and r["state"] == "OK"
-                and r["high"] - o["high"] > tolerance and r["position"] == o["position"]):
-            r["state"] = "BEHIND"
-            r["note"] = "position unmoved while high advanced"
+        if not o:
+            continue
+        before = {k["key"]: k for k in o["key_rows"]}
+        changed = False
+        for k in r["key_rows"]:
+            b = before.get(k["key"])
+            if (b and b["state"] == "OK" and k["state"] == "OK"
+                    and k["last"] - b["last"] > tolerance
+                    and k["position"] == b["position"]):
+                k["state"] = "BEHIND"
+                k["note"] = "position unmoved while high advanced"
+                changed = True
+        if changed:
+            skipped = r["keys_skipped"]
+            r["state"] = partition_state(r["key_rows"], r["start"], r["high"],
+                                         r["head_ms"], now_ms, False)
+            r.update(summarize(r["key_rows"]))
+            r["keys_skipped"] = skipped
     return second
 
 
@@ -325,7 +428,7 @@ def read_node(ns: str, node: str) -> NodeRead:
     if not read.subs:
         return read
 
-    keys: dict = {}  # (broker, topic) -> {p: keys}
+    keys: dict = {}  # (broker, topic) -> {p: key_lasts}
     for broker, topic in sorted({(b, t) for _, _, b, t in read.subs}):
         bpod, parts = "openddil-redpanda-" + broker + "-0", {}
         d = exec_in(ns, bpod, "redpanda", RPK_REMOTE,
@@ -336,7 +439,7 @@ def read_node(ns: str, node: str) -> NodeRead:
             continue
         keys[(broker, topic)] = {}
         for p, start, high in desc:
-            ks, head = [], None
+            ks, head = KeyLasts(), None
             if high > start:
                 lo = max(start, high - HEAD_WINDOW)
                 c = exec_in(ns, bpod, "redpanda", RPK_REMOTE,
@@ -344,7 +447,7 @@ def read_node(ns: str, node: str) -> NodeRead:
                              "%d:%d" % (lo, high), "-f", "%p %o %d %k\\n"])
                 if c and c[0] == 0:
                     ks, head = parse_consume(c[1])
-            parts[p] = (start, high, head)
+            parts[p] = (start, high, head, ks, ks.skipped)
             keys[(broker, topic)][p] = ks
         read.parts[(broker, topic)] = parts
 
@@ -355,24 +458,36 @@ def read_node(ns: str, node: str) -> NodeRead:
                 if (svc, handler, topic, k) not in seen:
                     seen.add((svc, handler, topic, k))
                     jobs.append({"service": svc, "handler": handler, "key": k, "topic": topic})
-    if jobs:
+    read.jobs = len(jobs)
+    t0 = time.time()
+    for i in range(0, len(jobs), JOB_CHUNK):
         res = exec_in(ns, pod, "cm-service", PY_REMOTE,
-                      ["python", "-u", "-", admin, json.dumps(jobs)], POS_SCRIPT.encode())
+                      ["python", "-u", "-", admin, json.dumps(jobs[i:i + JOB_CHUNK])],
+                      POS_SCRIPT.encode())
         if not res or res[0] != 0:
             read.failed.append("positions unreadable")
-            return read
-        for line in res[1].splitlines():
-            try:
-                j = json.loads(line)
-            except ValueError:
-                continue
-            if j.get("error"):
-                read.failed.append("journal read error: " + str(j["error"]))
-            elif j.get("offset") is not None and j.get("partition") is not None:
-                k = (j["service"], j["handler"], j["topic"], j["partition"])
-                if k not in read.positions or j["offset"] > read.positions[k][0]:
-                    read.positions[k] = (j["offset"], j.get("timestamp"))
+            break
+        apply_job_results(read, res[1])
+    read.positions_seconds = time.time() - t0
     return read
+
+
+def apply_job_results(read: NodeRead, text: str) -> None:
+    """Journal-read output lines -> read.positions / read.key_errors. A job
+    that errored makes only its own key UNREAD."""
+    for line in text.splitlines():
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(j, dict):
+            continue
+        if j.get("error"):
+            read.key_errors[(j.get("service"), j.get("handler"), j.get("topic"),
+                             j.get("key"))] = str(j["error"])
+        elif j.get("offset") is not None and j.get("partition") is not None:
+            k = (j["service"], j["handler"], j["topic"], j["partition"], j["key"])
+            read.positions[k] = (j["offset"], j.get("timestamp"))
 
 
 # -------------------------------------------------------------------- output
@@ -384,19 +499,44 @@ def fmt_age(ms) -> str:
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%dm" % m
 
 
-def print_pass(n: int, rows: list[dict]) -> None:
+def key_totals(rows: list[dict]) -> dict:
+    return {"read": sum(r["keys_read"] for r in rows),
+            "behind": sum(r["keys_behind"] for r in rows),
+            "idle": sum(r["keys_idle"] for r in rows),
+            "unread": sum(r["keys_unread"] for r in rows),
+            "skipped": sum(r["keys_skipped"] for r in rows)}
+
+
+def print_pass(n: int, rows: list[dict], stats: list | None = None) -> None:
     print("pass %d" % n)
     for r in rows:
         if r["state"] in ("EMPTY",):
             continue
-        print("  %-8s %s/%s %s/%s position=%s last=%s behind=%s age=%s %s%s" % (
+        extra = ""
+        if r["key_rows"] or r["keys_skipped"]:
+            extra = " keys behind %d/%d" % (r["keys_behind"], r["keys_read"])
+            for label, f in (("idle", "keys_idle"), ("unread", "keys_unread"),
+                             ("skipped", "keys_skipped")):
+                if r[f]:
+                    extra += " %s %d" % (label, r[f])
+        print("  %-8s %s/%s %s/%s %s key=%s position=%s last=%s behind=%s age=%s%s%s" % (
             r["node"], r["service"], r["handler"], r["topic"],
-            r["partition"] if r["partition"] >= 0 else "-", r["position"], r["last"],
-            r["behind"], fmt_age(r["age_ms"]), r["state"],
+            r["partition"] if r["partition"] >= 0 else "-", r["state"], r["key"],
+            r["position"], r["last"], r["behind"], fmt_age(r["age_ms"]), extra,
             (" (" + r["note"] + ")") if r["note"] else ""))
+        if r["state"] == "BEHIND":
+            for k in sorted((k for k in r["key_rows"] if k["state"] == "BEHIND"),
+                            key=lambda k: -k["behind"]):
+                print("      %s position=%s behind=%s age=%s" % (
+                    k["key"], k["position"], k["behind"], fmt_age(k["age_ms"])))
     c = counts(rows)
     print("  counts: " + " ".join("%s=%d" % (s, c[s]) for s in STATES)
           + " rows=%d" % len(rows))
+    t = key_totals(rows)
+    print("  keys: read=%(read)d behind=%(behind)d idle=%(idle)d "
+          "unread=%(unread)d skipped=%(skipped)d" % t)
+    for node, jobs, secs in (stats or []):
+        print("  %-8s positions read: %d jobs, %.1f s" % (node, jobs, secs))
     idle = [r for r in rows if r["state"] == "IDLE"]
     for r in idle:
         print("  IDLE (declared, not read): %s %s/%s %s/%d" % (
@@ -415,13 +555,19 @@ def print_not_established() -> None:
     print("    projector, the screen).")
     print("  * That the position holds: it is a reading at two moments, and")
     print("    a passing tier can fall behind afterwards.")
+    print("  * Every key: a key with no record in the last %d offsets of a" % HEAD_WINDOW)
+    print("    partition is not read, so a key that has gone quiet can sit behind")
+    print("    unseen. The window's coverage is the count printed, and it is not")
+    print("    a census of the tier's keys.")
 
 
-def one_pass(ns: str, nodes: list[str], tolerance: int) -> list[dict]:
-    rows = []
+def one_pass(ns: str, nodes: list[str], tolerance: int) -> tuple[list[dict], list]:
+    rows, stats = [], []
     for node in nodes:
-        rows += evaluate_node(node, read_node(ns, node), tolerance, int(time.time() * 1000))
-    return rows
+        rd = read_node(ns, node)
+        rows += evaluate_node(node, rd, tolerance, int(time.time() * 1000))
+        stats.append((node, rd.jobs, rd.positions_seconds))
+    return rows, stats
 
 
 def summary(rows: list[dict]) -> str:
@@ -454,16 +600,17 @@ def main(argv: list[str] | None = None) -> int:
         print("handler position: FAIL (no tier nodes)")
         return 1
 
-    first = one_pass(ns, nodes, a.tolerance)
-    print_pass(1, first)
+    first, stats1 = one_pass(ns, nodes, a.tolerance)
+    print_pass(1, first, stats1)
     if not passes(first):
         print_not_established()
         print("handler position: FAIL (pass 1: %s)" % summary(first))
         return 1
 
     time.sleep(a.interval)
-    second = compare_passes(first, one_pass(ns, nodes, a.tolerance), a.tolerance)
-    print_pass(2, second)
+    rows2, stats2 = one_pass(ns, nodes, a.tolerance)
+    second = compare_passes(first, rows2, a.tolerance)
+    print_pass(2, second, stats2)
     if not passes(second):
         print_not_established()
         print("handler position: FAIL (pass 2: %s)" % summary(second))
