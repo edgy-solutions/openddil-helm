@@ -5,14 +5,14 @@ was checked. **Re-measured in full 2026-09-19 against the repaired cluster**
 (helm revision 50), replacing the 2026-09-09 version whose §C and §D had both
 been superseded.
 
-**Re-run the five pre-flight checks immediately before recording.** Everything
-else here is stable across a night; those five are the ones that have twice
+**Re-run the six pre-flight checks immediately before recording.** Everything
+else here is stable across a night; those six are the ones that have twice
 been green while something was broken, and they are the ones that found it
 both times.
 
 ---
 
-## The pre-flight — five checks, in this order
+## The pre-flight — six checks, in this order
 
 ```
 bash scripts/check-advancing.sh openddil 40
@@ -20,6 +20,7 @@ bash scripts/check-derive-stage.sh 60        # publishes the verdict §5 reads
 python scripts/check_tier_feed.py openddil
 bash scripts/check-shape-sizes.sh openddil
 bash scripts/check-releasability-completeness.sh -n openddil
+python scripts/check_handler_position.py openddil
 ```
 
 **Measured 2026-09-19, all five green:**
@@ -92,6 +93,14 @@ stages read green while fusion had received zero invocations, ever.
 `check-shape-sizes` after that whole write-path suite read green while every
 panel on every screen showed FEED UNAVAILABLE. Neither absence was visible
 from inside the suite.
+
+The sixth was added on 2026-11-03, after every lag gate read near zero while CM's
+handler ran half a day behind its own stream, and the rows it writes went with it.
+Group lag is intake: Restate has taken the record, and its handler may not have run
+it. The position is in the journal, so `check_handler_position.py` reads it there.
+It reads twice, `--interval` seconds apart, and a quiet partition whose last handled
+record has no journal left is listed as IDLE by name, not passed silently. **It has
+not yet been run as part of a recorded pre-flight**, so no result is recorded for it.
 
 **The gate covers every store by default now.** It used to default to the root
 and require `--all-tiers`; the flag existed, the checklist did not use it, and
