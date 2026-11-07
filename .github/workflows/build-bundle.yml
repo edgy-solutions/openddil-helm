@@ -101,6 +101,13 @@ jobs:
           repository: ${{ github.repository_owner }}/openddil-demo
           path: openddil-demo
 
+      # The chart validates algorithm overrides against its own copy of each
+      # unit.yaml; the bundle ships the tactical-agents copy. They must be the
+      # same file. Exit 2 (checkout absent) fails here too: the checkout is
+      # always present in this job, so a SKIP would mean the path is wrong.
+      - name: Check algorithm declarations match the chart copy
+        run: bash openddil-helm/scripts/check-algorithm-declarations.sh openddil-tactical-agents
+
       # openddil-contracts gitignores gen/ (per its .gitignore: "Generated
       # Protobuf code is built on demand via `make` and never committed").
       # The bundle Dockerfile COPYs openddil-contracts/gen/python/, so we
