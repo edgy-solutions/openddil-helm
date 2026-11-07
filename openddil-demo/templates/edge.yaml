@@ -619,6 +619,11 @@ spec:
 {{- range (list "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "derived-sustainment") }}
 {{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id .) }}
 {{- end }}
+{{- $faustEdgeBandTopic := "" }}
+{{- if include "openddil.isTierManaged" (dict "id" $edge.id "root" $root) }}
+{{- $faustEdgeBandTopic = "element-band-events" }}
+{{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id $faustEdgeBandTopic) }}
+{{- end }}
 {{- range (include "openddil.faustEdgeTables" . | fromYamlArray) }}
 {{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id (include "openddil.faustChangelogTopic" (dict "appId" $faustEdgeAppId "table" .))) }}
 {{- end }}
@@ -644,6 +649,9 @@ metadata:
     # registered into this same Faust app). Plus one changelog per Faust
     # Table this app keeps (openddil.faustEdgeTables above). All on this
     # edge's own broker.
+    # A tier-managed edge also sends the per-element band transitions to
+    # element-band-events, held on this edge's broker (on no bridge list);
+    # an unmanaged edge keeps them on tactical-events.
     openddil.io/produces-topics: {{ join " " $faustEdgeProduces | quote }}
 spec:
   replicas: 1
@@ -684,6 +692,10 @@ spec:
               value: {{ $edge.id | quote }}
             - name: OPENDDIL_REGION_ID
               value: {{ $edge.region | quote }}
+            {{- if $faustEdgeBandTopic }}
+            - name: ELEMENT_BAND_EVENTS_TOPIC
+              value: {{ $faustEdgeBandTopic | quote }}
+            {{- end }}
             {{- range $k, $v := $root.Values.faustEdge.prognosticsEnv }}
             - name: {{ printf "PROGNOSTICS_%s" $k | quote }}
               value: {{ $v | quote }}

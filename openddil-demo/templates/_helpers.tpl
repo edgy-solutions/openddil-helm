@@ -1715,6 +1715,18 @@ mappings:
     # SHORTER window than a leaf, not a longer one: the region is where the
     # volume lands and where the shape is read from.
     retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
+  {{- if not $tier.hasChildren }}
+  # The owning tier's copy of the per-element band transitions. The topic is
+  # on no bridge or uplink list, so only the asset-level bandcount on
+  # tactical-events crosses.
+  - topic: element-band-events
+    handler: tactical_events
+    table: tactical_events
+    consumer_group: tier-projector-element-band-events-{{ $tier.id }}
+    decode_as: cloudevents.json
+    mode: append
+    retention_hours: {{ $root.Values.eventRetention.edgeHours }}
+  {{- end }}
   # DIS Fire/Detonation launch records. mode: custom,
   # same as the root default's entry (openddil-projector
   # src/config/projector_config.yaml) -- the handler owns its own Postgres
@@ -2241,7 +2253,7 @@ for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
-  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000"   "element-band-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "munition-tracks|-p 4 -r 1 -c retention.ms=86400000"   "asset-declarations|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"   "asset-fielding|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \

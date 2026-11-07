@@ -60,6 +60,16 @@ topics:
       fusion holds (never derives) an asset whose inputs name no producing
       edge, so an unstamped capability-only asset would never get a status.
 
+  element-band-events:
+    status: declared
+    tiers: [region, hq]
+    reason: >-
+      Produced only by a tier-managed edge's faust-edge, which sends the
+      per-element band transitions here and holds them on that edge's broker.
+      The shared topic init creates it on every broker, so it is idle by
+      design on a region and on hq. An unmanaged edge keeps its per-element
+      events on tactical-events, so the topic is empty there too.
+
   asset-element-telemetry:
     status: declared
     tiers: [region]
