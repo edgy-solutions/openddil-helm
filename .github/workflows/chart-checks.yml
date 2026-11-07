@@ -228,6 +228,11 @@ jobs:
       - name: Link traffic and tier tree render test
         run: bash scripts/tests/test_link_traffic_render.sh
 
+      # The per-element band events stay on an edge-local topic: routed by a tier-managed edge only, read by the
+      # owning leaf tier projector, on no bridge or uplink list. Exit 2 (no python with PyYAML) fails the step.
+      - name: Element band events render test
+        run: bash scripts/tests/test_element_band_events_render.sh
+
       # One plant: the tier tree helper with every parent forced to root (the declared tree, not the uplink
       # tree, would fail the same check). The test must exit non-zero AND print the tiers check it breaks.
       - name: Tier tree red-check
