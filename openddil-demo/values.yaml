@@ -736,8 +736,11 @@ algorithms:
   # Declared analytic units the faust-edge runner loads from the bundle
   # (/bundle/agents/algorithms/<unit>/). Each name needs a chart copy of its
   # declaration at files/algorithms/<unit>/unit.yaml (render check).
-  enabled: [wear]
+  enabled: [wear, thermal]
   units:
+    thermal:
+      # Declared defaults (algorithms/thermal/unit.yaml); override a param here by name.
+      params: {}
     wear:
       # Overrides of declared params only; an unknown name, wrong type or a value
       # outside the declared minimum/maximum fails the render. Empty = declared defaults.
