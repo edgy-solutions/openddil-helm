@@ -3276,3 +3276,69 @@ so the name tracks the data. Takes the root context.
 {{- define "openddil.sessionChecksumItems" -}}
 {{- list (toString .Values.releasability.oidc.sessionTtlSeconds) (include "openddil.sessionMode" .) (toString .Values.releasability.oidc.sessionIdleSeconds) (toString .Values.releasability.oidc.sessionMaxSeconds) | toJson -}}
 {{- end -}}
+
+{{/*
+ELECTRIC SECURE MODE. Electric requires a secret on /v1/shape when
+ELECTRIC_SECRET is set, and refuses to boot if ELECTRIC_SECRET and
+ELECTRIC_INSECURE are both set, so secure mode swaps one for the other.
+Only the PEP in front of each Electric holds the secret.
+*/}}
+{{- define "openddil.electricSecure" -}}
+{{- if .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/* Name of the Secret holding one key per Electric instance. */}}
+{{- define "openddil.electricSecretName" -}}
+{{- if .Values.electric.secure.existingSecret -}}
+{{ .Values.electric.secure.existingSecret }}
+{{- else -}}
+{{ printf "%s-electric-secret" .Release.Name }}
+{{- end -}}
+{{- end }}
+
+{{/*
+True when the Electric NetworkPolicies render: the older release flag or
+secure mode. Used only for the two Electric policies.
+*/}}
+{{- define "openddil.electricLockdown" -}}
+{{- if or .Values.releasability.lockDownElectric .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/*
+The Electric instances this release renders, as a JSON list of keys: "hub"
+plus each rendered tier id (same filter as tier-node.yaml).
+*/}}
+{{- define "openddil.electricInstances" -}}
+{{- $out := list "hub" -}}
+{{- if .Values.tierNode.enabled -}}
+{{- $tn := .Values.tierNode -}}
+{{- range $tier := (include "openddil.tierList" . | fromYamlArray) -}}
+{{- if or (not $tn.tiers) (has $tier.id $tn.tiers) -}}
+{{- $out = append $out $tier.id -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}
+
+{{/* Fails when secure mode has an Electric with no PEP in front of it. */}}
+{{- define "openddil.electricSecureGuard" -}}
+{{- if and .Values.electric.secure.enabled (not .Values.releasability.enabled) -}}
+{{- range $i := (include "openddil.electricInstances" . | fromJsonArray) -}}
+{{- fail (printf "electric.secure.enabled needs a PEP in front of every Electric (releasability.enabled); %s has none" $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entry for an Electric container. Args: dict "root" "key" "name".
+Secure: the secret from the Secret. Otherwise ELECTRIC_INSECURE (name is
+"ELECTRIC_SECRET" or "OPENDDIL_ELECTRIC_SECRET" for the PEP).
+*/}}
+{{- define "openddil.electricSecretRef" -}}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "openddil.electricSecretName" .root | quote }}
+      key: {{ .key | quote }}
+{{- end }}

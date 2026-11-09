@@ -459,6 +459,9 @@ spec:
           env:
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
+            {{- end }}
             # THE EGRESS PANE -- PA. egress.yaml's egress-pane-api Service
             # renders under the same `releasability.enabled` condition this
             # whole PEP does, so the two arrive together; see hub.yaml's
@@ -1118,7 +1121,7 @@ spec:
           emptyDir:
             sizeLimit: 16Mi
 {{- end }}
-{{- if $root.Values.releasability.lockDownElectric }}
+{{- if include "openddil.electricLockdown" $root }}
 ---
 # BYPASS PREVENTION. Without this the PEP is a suggestion: any pod in the
 # namespace — including a browser reaching a port-forward — can talk to
@@ -1146,6 +1149,8 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.electric.port }}
+{{- end }}
+{{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION, SAME REASON, SECOND SURFACE -- PA. Without this, the
 # egress pane (egress.yaml's egress-pane-api) is reachable by any pod in the

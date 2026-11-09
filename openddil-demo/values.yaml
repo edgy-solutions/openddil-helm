@@ -310,9 +310,17 @@ toxiproxy:
 electric:
   image:
     repository: electricsql/electric
-    tag: "1.6.2"
-    digest: ""
+    tag: "1.8.1"
+    digest: "sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
     pullPolicy: IfNotPresent
+  # Secure mode. Electric then requires a secret on /v1/shape and only the PEP
+  # in front of each Electric holds it; the Electric NetworkPolicies render too.
+  # Needs releasability.enabled (a PEP in front of every Electric). The Secret
+  # holds one key per instance: `hub` for the hub Electric, the tier id for
+  # each tier Electric.
+  secure:
+    enabled: false          # true: Electric requires a secret on /v1/shape; only the PEPs hold it
+    existingSecret: ""      # optional: a Secret holding one key per Electric instance (see above)
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
