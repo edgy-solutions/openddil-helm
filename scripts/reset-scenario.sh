@@ -1581,6 +1581,9 @@ measure_restate_cadence() {
 #   client  only `curl` is present (`wget` is not installed).
 #   shape   /v1/shape?table=<t>&offset=-1 answers 200 with an
 #           `electric-handle` response header and a JSON array body.
+#   secure  under electric.secure.enabled the read carries the pod's own
+#           ELECTRIC_SECRET, expanded by the shell in the pod, so the value
+#           never leaves it (not in argv, not in this script's output).
 # ---------------------------------------------------------------------------
 ELECTRIC_SHAPE_TABLE="${ELECTRIC_SHAPE_TABLE:-telemetry_latest_state}"
 
@@ -1597,7 +1600,7 @@ electric_shape() {
   local pod="$1" port="$2"
   [ -z "$port" ] && return 0
   kubectl exec -n "$NS" "$pod" -- sh -c \
-    "curl -s -m 15 -D /dev/stderr 'http://127.0.0.1:${port}/v1/shape?table=${ELECTRIC_SHAPE_TABLE}&offset=-1'" \
+    "curl -s -m 15 -D /dev/stderr \"http://127.0.0.1:${port}/v1/shape?table=${ELECTRIC_SHAPE_TABLE}&offset=-1\${ELECTRIC_SECRET:+&secret=\$ELECTRIC_SECRET}\"" \
     2>&1 || true
 }
 
@@ -1633,7 +1636,7 @@ electric_shape_rows() {
   local pod="$1" port="$2"
   [ -z "$port" ] && return 0
   kubectl exec -i -n "$NS" "$pod" -- sh -s "$port" "$ELECTRIC_SHAPE_TABLE" 2>/dev/null <<'REPLAY' || true
-u="http://127.0.0.1:$1/v1/shape?table=$2"; off=-1; h=""; ins=0; del=0; n=0
+u="http://127.0.0.1:$1/v1/shape?table=$2${ELECTRIC_SECRET:+&secret=$ELECTRIC_SECRET}"; off=-1; h=""; ins=0; del=0; n=0
 b=/tmp/shape-rows.$$.b; hd=/tmp/shape-rows.$$.h
 while :; do
   n=$((n + 1)); [ "$n" -gt 2000 ] && break

@@ -320,6 +320,7 @@ electric:
   # each tier Electric.
   secure:
     enabled: false          # true: Electric requires a secret on /v1/shape; only the PEPs hold it
+    # Secret values must be URL-safe (letters and digits): the scripts pass them unencoded.
     existingSecret: ""      # optional: a Secret holding one key per Electric instance (see above)
   resources:
     requests: { cpu: 100m, memory: 256Mi }
