@@ -1057,6 +1057,10 @@ spec:
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
+            {{- $changeOnly := include "openddil.telemetryChangeOnlyEnv" $root }}
+            {{- if $changeOnly }}
+            {{- $changeOnly | nindent 12 }}
+            {{- end }}
             {{- if $root.Values.edgeAssignment.configMap }}
             {{- include "openddil.edgeAssignmentEnv" $root | nindent 12 }}
             {{- end }}

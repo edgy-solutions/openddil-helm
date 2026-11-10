@@ -3276,3 +3276,60 @@ so the name tracks the data. Takes the root context.
 {{- define "openddil.sessionChecksumItems" -}}
 {{- list (toString .Values.releasability.oidc.sessionTtlSeconds) (include "openddil.sessionMode" .) (toString .Values.releasability.oidc.sessionIdleSeconds) (toString .Values.releasability.oidc.sessionMaxSeconds) | toJson -}}
 {{- end -}}
+
+{{/*
+Metres per platform_variant for the projector's telemetry position deadband,
+as compact JSON: {"<variant>": <m>, ..., "*": <m>}. Only variants that set
+movement.standards.<variant>.positionDeadbandM appear, plus "*" when
+movement.positionDeadbandDefaultM is not null. {} when there are none. Fails
+the render on a value that is not a number >= 0; the message names the variant
+only, never the value.
+*/}}
+{{- define "openddil.telemetryPositionDeadbandJson" -}}
+{{- $out := dict -}}
+{{- range $variant, $std := (.Values.movement.standards | default dict) -}}
+{{- if and (kindIs "map" $std) (hasKey $std "positionDeadbandM") (not (kindIs "invalid" $std.positionDeadbandM)) -}}
+{{- $m := $std.positionDeadbandM -}}
+{{- if not (or (kindIs "float64" $m) (kindIs "int64" $m) (kindIs "int" $m)) -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- if lt (float64 $m) 0.0 -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- $_ := set $out $variant $m -}}
+{{- end -}}
+{{- end -}}
+{{- $d := .Values.movement.positionDeadbandDefaultM -}}
+{{- if not (kindIs "invalid" $d) -}}
+{{- if not (or (kindIs "float64" $d) (kindIs "int64" $d) (kindIs "int" $d)) -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- if lt (float64 $d) 0.0 -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- $_ := set $out "*" $d -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end }}
+
+{{/*
+The projector's two change-only env entries, for the caller to nindent into a
+container env list. Renders nothing when projector.telemetryChangeOnly.heartbeatS
+is 0, so the default leaves every projector pod spec as it was. Fails the
+render when heartbeatS is not a number, is below 0, or is above 15.
+*/}}
+{{- define "openddil.telemetryChangeOnlyEnv" -}}
+{{- $h := (.Values.projector.telemetryChangeOnly | default dict).heartbeatS | default 0 -}}
+{{- if not (or (kindIs "float64" $h) (kindIs "int64" $h) (kindIs "int" $h)) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if or (lt (float64 $h) 0.0) (gt (float64 $h) 15.0) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if gt (float64 $h) 0.0 -}}
+- name: TELEMETRY_CHANGE_ONLY_HEARTBEAT_S
+  value: {{ $h | quote }}
+- name: TELEMETRY_POSITION_DEADBAND_M
+  value: {{ include "openddil.telemetryPositionDeadbandJson" . | quote }}
+{{- end -}}
+{{- end }}
