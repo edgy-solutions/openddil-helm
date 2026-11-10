@@ -23,6 +23,9 @@ on:
       - "scripts/tests/sensor_ingest_docs.py"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
+      - "scripts/check-algorithm-declarations.sh"
+      - "scripts/tests/test_algorithms_render.sh"
+      - "openddil-demo/files/algorithms/**"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
       - "values-artifactory.yaml"
@@ -36,6 +39,9 @@ on:
       - "scripts/tests/sensor_ingest_docs.py"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
+      - "scripts/check-algorithm-declarations.sh"
+      - "scripts/tests/test_algorithms_render.sh"
+      - "openddil-demo/files/algorithms/**"
       - "scripts/check-mirror-coverage.sh"
       - "scripts/mirror-to-artifactory.ps1"
       - "values-artifactory.yaml"
@@ -241,6 +247,22 @@ jobs:
           grep -qF -- "FAIL H tiers rendered with parents" /tmp/ltr-red.log \
             || { cat /tmp/ltr-red.log; echo "RED CHECK FAILED: failed, but without the tiers line"; exit 1; }
           echo "red-check green: FAIL H tiers rendered with parents"
+
+      # Declared algorithm units: overrides, wiring, and the ten render refusals. Exit 2 (no python with
+      # PyYAML) fails the step: a skip would read green.
+      - name: Algorithms render test
+        run: bash scripts/tests/test_algorithms_render.sh
+
+      # One plant: the guard template emptied. Every C case (the refusals) must turn red, so the test must
+      # exit non-zero AND print the C1 line it breaks.
+      - name: Algorithms guard red-check
+        run: |
+          cp -r openddil-demo /tmp/alg-noguard
+          : > /tmp/alg-noguard/templates/algorithms-guard.yaml
+          if CHART=/tmp/alg-noguard bash scripts/tests/test_algorithms_render.sh > /tmp/alg-red.log 2>&1; then
+            cat /tmp/alg-red.log; echo "RED CHECK FAILED: the plant passed"; exit 1; fi
+          grep -qF -- "FAIL C1 " /tmp/alg-red.log             || { cat /tmp/alg-red.log; echo "RED CHECK FAILED: failed, but without the C1 line"; exit 1; }
+          echo "red-check green: FAIL C1 prognosticsEnv present"
 
       # Does the render actually carry the DIS entity allow-list that
       # sensorIngest.entityAssignment (values.yaml) declares?

@@ -616,10 +616,14 @@ spec:
    in produces-topics, so none of the three can drift from the others. */ -}}
 {{- $faustEdgeAppId := printf "openddil-%s" $edge.id }}
 {{- $faustEdgeProduces := list }}
-{{- range (list "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "derived-sustainment") }}
+{{- /* The three literals are CODE DEFAULTS of the app; the declared units'
+   output topics (e.g. derived-sustainment) are read from their declarations
+   (openddil.algorithms.outputTopics), not written here. */ -}}
+{{- range (concat (list "telemetry-latest-state" "asset-telemetry-windows" "tactical-events") (include "openddil.algorithms.outputTopics" $root | fromYamlArray)) }}
 {{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id .) }}
 {{- end }}
-{{- range (include "openddil.faustEdgeTables" . | fromYamlArray) }}
+{{- /* asset_state is a code-default table; the declared units' state tables follow. */ -}}
+{{- range (concat (include "openddil.faustEdgeTables" . | fromYamlArray) (include "openddil.algorithms.stateTables" $root | fromYamlArray)) }}
 {{- $faustEdgeProduces = append $faustEdgeProduces (printf "%s/%s" $edge.id (include "openddil.faustChangelogTopic" (dict "appId" $faustEdgeAppId "table" .))) }}
 {{- end }}
 # ===========================================================================
@@ -637,13 +641,13 @@ metadata:
     # (Faust defaults a consumer group to the app's own app_id).
     openddil.io/consumer-groups: {{ printf "%s/%s" $edge.id $faustEdgeAppId | quote }}
     # openddil.io/produces-topics --
-    # the four topics this app sends to, all CODE DEFAULTS in the app
-    # rather than values this chart sets: telemetry-latest-state (decoded
-    # state), asset-telemetry-windows (window summaries), tactical-events
-    # (threshold events) and derived-sustainment (the prognostics agent,
-    # registered into this same Faust app). Plus one changelog per Faust
-    # Table this app keeps (openddil.faustEdgeTables above). All on this
-    # edge's own broker.
+    # the topics this app sends to: telemetry-latest-state (decoded
+    # state), asset-telemetry-windows (window summaries) and tactical-events
+    # (threshold events), all CODE DEFAULTS in the app rather than values this
+    # chart sets, plus the output topics of the declared wear unit
+    # (algorithms.enabled), read from its declaration (derived-sustainment).
+    # Plus one changelog per Faust Table this app keeps (openddil.faustEdgeTables
+    # and the declared units' state tables). All on this edge's own broker.
     openddil.io/produces-topics: {{ join " " $faustEdgeProduces | quote }}
 spec:
   replicas: 1
@@ -663,6 +667,7 @@ spec:
       initContainers:
         {{- include "openddil.bundleInit" (dict "paths" (list
             (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
+            (dict "src" "agents/algorithms" "dst" "algorithms")
           ) "root" $root) | nindent 8 }}
       containers:
         - name: faust-edge
@@ -684,10 +689,15 @@ spec:
               value: {{ $edge.id | quote }}
             - name: OPENDDIL_REGION_ID
               value: {{ $edge.region | quote }}
-            {{- range $k, $v := $root.Values.faustEdge.prognosticsEnv }}
-            - name: {{ printf "PROGNOSTICS_%s" $k | quote }}
-              value: {{ $v | quote }}
-            {{- end }}
+            # Where the runner loads declared units from (mount below).
+            - name: ALGORITHMS_DIR
+              value: "/opt/openddil/algorithms"
+            # The units the runner starts (values: algorithms.enabled).
+            - name: ALGORITHMS_ENABLED
+              value: {{ include "openddil.algorithms.enabledCsv" $root | quote }}
+            # Overrides of declared params, {unit: {param: value}} (values: algorithms.units).
+            - name: ALGORITHM_PARAMS_JSON
+              value: {{ include "openddil.algorithms.paramsJson" $root | quote }}
           volumeMounts:
             # The generated openddil/ proto package is subPath-mounted into
             # /app (PYTHONPATH=/app). google.protobuf is NOT bundled — it
@@ -696,6 +706,12 @@ spec:
             - name: bundle-shared
               mountPath: /app/openddil
               subPath: app-openddil
+            # The runner loads units from here. Units are data plus guarded
+            # code shipped in the bundle, not in the image.
+            - name: bundle-shared
+              mountPath: /opt/openddil/algorithms
+              subPath: algorithms
+              readOnly: true
           resources:
             {{- toYaml $root.Values.faustEdge.resources | nindent 12 }}
       volumes:
