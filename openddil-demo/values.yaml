@@ -310,9 +310,25 @@ toxiproxy:
 electric:
   image:
     repository: electricsql/electric
-    tag: "1.6.2"
-    digest: ""
+    tag: "1.8.1"
+    digest: "sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
     pullPolicy: IfNotPresent
+  # Secure mode. Electric then requires a secret on /v1/shape and only the PEP
+  # in front of each Electric holds it; the Electric NetworkPolicies render too.
+  # Needs releasability.enabled (a PEP in front of every Electric). The Secret
+  # holds one key per instance: `hub` for the hub Electric, the tier id for
+  # each tier Electric.
+  secure:
+    enabled: false          # true: Electric requires a secret on /v1/shape; only the PEPs hold it
+    # Secret values must be URL-safe (letters and digits): the scripts pass them unencoded.
+    existingSecret: ""      # optional: a Secret holding one key per Electric instance (see above)
+  # Shape DELETE (/v1/shape by handle). Electric 1.6.2 and 1.8.1 enable it only
+  # through ELECTRIC_ENABLE_INTEGRATION_TESTING; in both, that flag gates shape
+  # deletion and nothing else (config/runtime.exs derives only
+  # allow_shape_deletion? from it). A PEP that retires a shape deletes it by
+  # handle so its log leaves disk. Requires secure.enabled: with the secret and
+  # the PEP-only NetworkPolicy, only the PEPs can reach DELETE.
+  allowShapeDeletion: false
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
@@ -2175,9 +2191,9 @@ releasability:
   # PEPs only: the edge tier template adds it to that PEP's labelled tables,
   # and it is deliberately NOT in labeledTables below.
   elementShapes:
-    # Electric serves shape DELETE only when its integration-testing flag is
-    # on; this stays false until that is decided. While false, a released view
-    # is forgotten by the PEP and the upstream shape is left alone.
+    # Needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it).
+    # While false, a released view is forgotten by the PEP and the upstream
+    # shape is left alone.
     deleteUpstream: false
     # Distinct element views one principal may hold.
     viewerMax: 8

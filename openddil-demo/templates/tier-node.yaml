@@ -878,8 +878,12 @@ spec:
             # the atlas image in this file).
             - name: DATABASE_URL
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "ELECTRIC_SECRET" "key" $tier.id) | nindent 12 }}
+            {{- else }}
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- end }}
             {{- with (dig "maxShapes" $tier.kind nil ($root.Values.electric | default dict)) }}
             - name: ELECTRIC_MAX_SHAPES
               value: {{ . | toString | quote }}
@@ -1179,6 +1183,9 @@ spec:
             # THIS TIER'S Electric, which is the whole point.
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" $tier.id) | nindent 12 }}
+            {{- end }}
             # THIS TIER'S OWN PDP — and this line is the difference between a
             # degraded mode and an outage.
             #
@@ -1401,7 +1408,7 @@ spec:
 # ===========================================================================
 {{ include "openddil.declarationIntake" (dict "root" $root "name" (printf "tier-declaration-intake-%s" $tier.id) "component" (printf "tier-declaration-intake-%s" $tier.id) "pepComponent" (printf "tier-pep-%s" $tier.id) "broker" $broker "brokerId" $tier.id) }}
 {{- end }}
-{{- if $root.Values.releasability.lockDownElectric }}
+{{- if include "openddil.electricLockdown" $root }}
 ---
 # BYPASS PREVENTION AT THE TIER. Slice 1's policy named the ROOT's
 # electric-sync and left every tier's Electric uncovered — so a tier node

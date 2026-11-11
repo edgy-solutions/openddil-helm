@@ -110,8 +110,12 @@ spec:
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: LOGICAL_PUBLISHER_HOST
               value: {{ printf "%s-electric-sync%s" .Release.Name (include "openddil.svcDomain" .) | quote }}
+            {{- if include "openddil.electricSecure" . }}
+            {{- include "openddil.electricSecretRef" (dict "root" . "name" "ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
+            {{- else }}
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- end }}
             # ElectricSQL bind port — explicit so it matches the Service.
             - name: ELECTRIC_PORT
               value: {{ .Values.electric.port | quote }}
