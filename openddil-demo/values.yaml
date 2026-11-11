@@ -784,6 +784,12 @@ faustEdge:
     BARREL_LIFE_TOTAL_ROUNDS: "1000"
 
 projector:
+  telemetryChangeOnly:
+    # 0 = write telemetry_latest_state on every message (today). >0 = suppress
+    # rows that change only motion within the deadband or freshness, with a
+    # write at least this often (seconds). At most 15: half the reporting
+    # sweep's 30 s stale window. Deadbands: movement.standards.<variant>.positionDeadbandM.
+    heartbeatS: 0
   image:
     name: projector
     tag: ""
@@ -845,8 +851,14 @@ munitionTracks:
 movement:
   # per variant: marchOrderS, emplaceS (seconds), fuelTank {value, unit},
   # fuelBurnPerKm {value, unit}; any key may be omitted (the panel then
-  # names it as missing)
+  # names it as missing). Each variant may also carry positionDeadbandM
+  # (metres, a number >= 0): the distance a position must move from the last
+  # written one before the projector writes a telemetry row, used only when
+  # projector.telemetryChangeOnly.heartbeatS is on. The move panel ignores it.
   standards: {}
+  # the "*" fallback deadband (metres) for variants with no positionDeadbandM;
+  # null means such variants compare exactly
+  positionDeadbandDefaultM: null
   # [{id, label, members: [asset_id, ...], plannedMoveKm}]
   units: []
 
