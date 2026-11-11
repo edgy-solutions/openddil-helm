@@ -2793,6 +2793,32 @@ at the price of shape logs that grow without bound. Every PEP gets the same valu
 {{- end }}
 
 {{/*
+openddil.pepExtraEnv -- releasability.pep.env as env entries, sorted by key.
+Takes the root. A null value is skipped (a later -f null renders as a literal
+null). Fails on a key that is not an env var name, a key the chart sets itself
+on the PEP (LOG_LEVEL, OPENDDIL_*), and a map or list value.
+*/}}
+{{- define "openddil.pepExtraEnv" -}}
+{{- $m := .Values.releasability.pep.env | default dict -}}
+{{- range $k := keys $m | sortAlpha -}}
+{{- $v := get $m $k -}}
+{{- if not (kindIs "invalid" $v) -}}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: not a valid environment variable name" $k) -}}
+{{- end -}}
+{{- if or (eq $k "LOG_LEVEL") (hasPrefix "OPENDDIL_" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: set by the chart; use its own value" $k) -}}
+{{- end -}}
+{{- if or (kindIs "map" $v) (kindIs "slice" $v) -}}
+{{- fail (printf "releasability.pep.env.%s: must be a scalar, not a map or list" $k) -}}
+{{- end }}
+- name: {{ $k }}
+  value: {{ $v | toString | quote }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.pepElementEnv -- the element-state env every PEP gets: its tier id
 (a metrics label), the metrics port, and the element-shape bounds. Takes
 (dict "root" $root "tier" <tier id>).

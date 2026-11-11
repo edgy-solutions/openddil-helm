@@ -1348,6 +1348,7 @@ spec:
               # anywhere to say why.
               value: {{ include "openddil.tierCookieSecure" (dict "origin" $tier.publicOrigin) | quote }}
             {{- end }}
+            {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
           ports:
             - containerPort: 8080
               name: http

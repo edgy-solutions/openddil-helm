@@ -2370,6 +2370,18 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # Extra env vars for every PEP container: the hub PEP and each tier PEP.
+    # A map, not a list like egress.forwarder.extraEnv: maps merge across -f
+    # files, so an overlay can add a variable without dropping the default, and
+    # a key set to null is skipped. Values are rendered as strings. LOG_LEVEL
+    # and OPENDDIL_* names are set by the chart and refuse here.
+    # MALLOC_ARENA_MAX=2 is the default because the PEP is a threaded server
+    # under glibc: each request thread can allocate in its own malloc arena
+    # (up to 8 per CPU) and glibc keeps an arena's high-water mark, so memory
+    # grows with screen loads until the container limit kills it. Raising the
+    # limit only moves that; capping the arenas bounds what is retained.
+    env:
+      MALLOC_ARENA_MAX: "2"
     # true: every shape the PEPs create asks Electric for a compacted log.
     # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
     # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2

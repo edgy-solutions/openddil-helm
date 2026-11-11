@@ -197,6 +197,10 @@ jobs:
           REALM: ${{ github.workspace }}/produces-repos/openddil-demo/policy/realm-openddil.json
         run: bash scripts/tests/test_deployment_layer_users.sh
 
+      # releasability.pep.env: the default, an overlay, a null, and the refusals, piped (the render is never saved).
+      - name: PEP env render test
+        run: bash scripts/tests/test_pep_env_render.sh
+
       # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
       # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments
       # swapped (overlay merged into, realm read as the overlay).

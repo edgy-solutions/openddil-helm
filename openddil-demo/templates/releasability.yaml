@@ -597,6 +597,7 @@ spec:
             - name: OPENDDIL_EXERCISE_CONTROL_URL
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
             {{- end }}
+            {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
           ports:
             - containerPort: 8080
               name: http
