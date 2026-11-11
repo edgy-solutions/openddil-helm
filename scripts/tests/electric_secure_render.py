@@ -321,6 +321,12 @@ G4 = ("releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above 
 G5 = "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0"
 CEIL_ENV = "OPENDDIL_PEP_SHAPE_CEILING_S"
 ROT_ENV = "OPENDDIL_PEP_SHAPE_ROTATE_S"
+IDLE_ENV = "OPENDDIL_PEP_SHAPE_IDLE_S"
+G6 = ("releasability.pep.shapeRotation.idlePeriodSeconds needs electric.allowShapeDeletion "
+      "(Electric answers DELETE with 405 without it)")
+G7 = "releasability.pep.shapeRotation.idlePeriodSeconds must be a number of seconds >= 0"
+G8 = "releasability.pep.shapeRotation.idlePeriodSeconds (900) must be above the longest session"
+IDLE = "releasability.pep.shapeRotation.idlePeriodSeconds="
 PERIOD = "releasability.pep.shapeRotation.periodSeconds="
 CEILING = "releasability.pep.shapeRotation.ceilingSeconds="
 DELUP = ["--set", "releasability.elementShapes.deleteUpstream=true"]
@@ -332,7 +338,7 @@ def t7():
     for k, n, c in containers(docs):
         if FLAG in envmap(c):
             p.append("%s/%s/%s: has %s" % (k, n, c["name"], FLAG))
-        for v in (CEIL_ENV, ROT_ENV):
+        for v in (CEIL_ENV, ROT_ENV, IDLE_ENV):
             if v in envmap(c):
                 p.append("%s/%s/%s: has %s" % (k, n, c["name"], v))
     case("T7 deletion default off", p)
@@ -408,7 +414,7 @@ def shape_env_check(args, want, p):
         p.append("expected hub + tier PEPs, found %d" % len(pd))
     for n, (key, c) in pd.items():
         env = envmap(c)
-        for v in (CEIL_ENV, ROT_ENV):
+        for v in (CEIL_ENV, ROT_ENV, IDLE_ENV):
             if v in want:
                 if env.get(v, {}).get("value") != want[v]:
                     p.append("%s: %s not %s" % (n, v, want[v]))
@@ -416,7 +422,7 @@ def shape_env_check(args, want, p):
                 p.append("%s: has %s" % (n, v))
     for k, n, c in containers(docs):
         if c["name"] != "pep":
-            for v in (CEIL_ENV, ROT_ENV):
+            for v in (CEIL_ENV, ROT_ENV, IDLE_ENV):
                 if v in envmap(c):
                     p.append("%s/%s/%s: has %s" % (k, n, c["name"], v))
     return len(pd)
@@ -441,6 +447,23 @@ def t15():
     expect_refusal(SECURE + ALLOW + ["--set", PERIOD + "5400", "--set", CEILING + "5400"], G4, p, "period equal to ceiling")
     expect_refusal(SECURE + ALLOW + ["--set", CEILING + "-1"], G5, p, "negative ceiling")
     case("T15 shape rotation refusals", p)
+
+
+def t16():
+    p = []
+    n = shape_env_check(SECURE + ALLOW + ["--set", IDLE + "1800"], {IDLE_ENV: "1800"}, p)
+    case("T16 idle sweep period (%d PEPs)" % n, p)
+    p = []
+    n = shape_env_check(SECURE + ALLOW + ["--set", IDLE + "0"], {}, p)
+    case("T16 idle 0 renders no env (%d PEPs)" % n, p)
+
+
+def t17():
+    p = []
+    expect_refusal(SECURE + ["--set", IDLE + "1800"], G6, p, "idle without flag")
+    expect_refusal(SECURE + ALLOW + ["--set", IDLE + "abc"], G7, p, "non-number idle")
+    expect_refusal(SECURE + ALLOW + ["--set", IDLE + "900"], G8, p, "idle not above the session")
+    case("T17 idle sweep refusals", p)
 
 
 def t12():
@@ -487,6 +510,6 @@ def t12():
 
 
 if __name__ == "__main__":
-    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15):
+    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17):
         t()
     sys.exit(0 if all(RESULTS) else 1)
