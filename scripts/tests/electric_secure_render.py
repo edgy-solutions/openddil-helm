@@ -7,8 +7,10 @@ Exit 0 when every case passes, 1 otherwise.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -23,7 +25,11 @@ NO_PEP = ["--set", "tierNode.enabled=true", "--set", "electric.secure.enabled=tr
 
 
 def render(args):
-    p = subprocess.run(["helm", "template", REL, CHART] + args,
+    return render_chart(CHART, args)
+
+
+def render_chart(chart, args):
+    p = subprocess.run(["helm", "template", REL, chart] + args,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = p.stdout.decode("utf-8", "replace")
     docs = [d for d in yaml.safe_load_all(out) if d] if p.returncode == 0 else []
@@ -303,8 +309,124 @@ def t6():
         p.append("direct electric test pod rendered")
     case("T6 lockDownElectric alone", p)
 
+FLAG = "ELECTRIC_ENABLE_INTEGRATION_TESTING"
+ALLOW = ["--set", "electric.allowShapeDeletion=true"]
+G1 = "electric.allowShapeDeletion needs electric.secure.enabled: shape DELETE must be reachable only by the PEPs"
+G2 = ("releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion "
+      "(Electric answers DELETE with 405 without it)")
+G3 = ("OPENDDIL_PEP_SHAPE_ROTATE_S needs electric.allowShapeDeletion "
+      "(Electric answers DELETE with 405 without it)")
+DELUP = ["--set", "releasability.elementShapes.deleteUpstream=true"]
+ROTATE = "releasability.pep.env.OPENDDIL_PEP_SHAPE_ROTATE_S="
+
+
+def t7():
+    docs = must_render(BASE)
+    p = []
+    for k, n, c in containers(docs):
+        if FLAG in envmap(c):
+            p.append("%s/%s/%s: has %s" % (k, n, c["name"], FLAG))
+    case("T7 deletion default off", p)
+
+
+def t8():
+    docs = must_render(SECURE + ALLOW)
+    p = []
+    ed = electric_deploys(docs)
+    if len(ed) < 3:
+        p.append("expected hub + tier Electrics, found %d" % len(ed))
+    shown = None
+    for n, (key, c) in ed.items():
+        e = envmap(c).get(FLAG)
+        if e is None or e.get("value") != "true":
+            p.append("%s: %s not \"true\"" % (n, FLAG))
+        elif shown is None:
+            shown = "%s: name=%s value=%s" % (n, e["name"], e["value"])
+    for k, n, c in containers(docs):
+        if c["name"] != "electric" and FLAG in envmap(c):
+            p.append("%s/%s/%s: has %s" % (k, n, c["name"], FLAG))
+    nps = named(docs, "NetworkPolicy")
+    if REL + "-electric-pep-only" not in nps:
+        p.append("hub Electric policy missing")
+    if not any("tier-electric-pep-only" in n for n in nps):
+        p.append("no tier Electric policy")
+    case("T8 secure + allowShapeDeletion (%d Electrics)" % len(ed), p)
+    if shown:
+        print("  found " + shown)
+
+
+def expect_refusal(args, msg, p, what):
+    rc, _, err = render(args)
+    if rc == 0:
+        p.append("%s: render succeeded" % what)
+    elif msg not in err:
+        p.append("%s: guard message not in stderr" % what)
+
+
+def expect_render(args, p, what):
+    rc, _, err = render(args)
+    if rc != 0:
+        p.append("%s: render failed" % what)
+
+
+def t9():
+    p = []
+    expect_refusal(BASE + ALLOW, G1, p, "flag without secure")
+    case("T9 allowShapeDeletion without secure", p)
+
+
+def t10():
+    p = []
+    expect_refusal(SECURE + DELUP, G2, p, "deleteUpstream without flag")
+    expect_render(SECURE + DELUP + ALLOW, p, "deleteUpstream with flag")
+    case("T10 deleteUpstream needs the flag", p)
+
+
+def t11():
+    p = []
+    expect_refusal(SECURE + ["--set-string", ROTATE + "3600"], G3, p, "rotate 3600 without flag")
+    expect_render(SECURE + ["--set-string", ROTATE + "0"], p, "rotate 0")
+    expect_render(SECURE + ALLOW + ["--set-string", ROTATE + "3600"], p, "rotate 3600 with flag")
+    case("T11 rotation period needs the flag", p)
+
+
+def t12():
+    """Flag off: Electric Deployments are the same as with the c0021a1 helpers."""
+    p = []
+    repo = os.path.abspath(os.path.join(CHART, ".."))
+    rel = "openddil-demo/templates/_helpers.tpl"
+    old = subprocess.run(["git", "-C", repo, "show", "c0021a1:" + rel],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if old.returncode != 0:
+        p.append("git show c0021a1 failed")
+    else:
+        tmp = tempfile.mkdtemp()
+        try:
+            copy = os.path.join(tmp, "chart")
+            shutil.copytree(CHART, copy)
+            with open(os.path.join(copy, "templates", "_helpers.tpl"), "wb") as f:
+                f.write(old.stdout)
+            for label, args in (("default", BASE), ("secure", SECURE)):
+                new_docs = must_render(args)
+                rc, old_docs, err = render_chart(copy, args)
+                if rc != 0:
+                    p.append("%s: old chart render failed" % label)
+                    continue
+                a = {n: c.get("env") for n, (_, c) in electric_deploys(new_docs).items()}
+                b = {n: c.get("env") for n, (_, c) in electric_deploys(old_docs).items()}
+                if not a or a != b:
+                    p.append("%s: Electric env lists differ from c0021a1 (%d vs %d)" % (label, len(a), len(b)))
+                da = named(new_docs, "Deployment")
+                db = named(old_docs, "Deployment")
+                for n in a:
+                    if da.get(n) != db.get(n):
+                        p.append("%s: Deployment %s differs" % (label, n))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    case("T12 byte-identity with flag off", p)
+
 
 if __name__ == "__main__":
-    for t in (t1, t2, t3, t4, t5, t6):
+    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12):
         t()
     sys.exit(0 if all(RESULTS) else 1)

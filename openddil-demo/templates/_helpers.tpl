@@ -3012,8 +3012,34 @@ index is SQLite and needs POSIX locks.
 {{- end }}
 
 {{- define "openddil.electricEnv" -}}
+{{- include "openddil.electricDeletionGuard" . -}}
 - name: ELECTRIC_STORAGE_DIR
   value: /app/persistent
+{{- if .Values.electric.allowShapeDeletion }}
+- name: ELECTRIC_ENABLE_INTEGRATION_TESTING
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
+Refusals for shape deletion: it needs secure mode, and the PEP settings that
+delete by handle need it on. Renders nothing.
+*/}}
+{{- define "openddil.electricDeletionGuard" -}}
+{{- $allow := .Values.electric.allowShapeDeletion -}}
+{{- $rel := .Values.releasability | default dict -}}
+{{- /* Deletion without secure mode would leave DELETE open to every pod. */ -}}
+{{- if and $allow (not (include "openddil.electricSecure" .)) -}}
+{{- fail "electric.allowShapeDeletion needs electric.secure.enabled: shape DELETE must be reachable only by the PEPs" -}}
+{{- end -}}
+{{- /* Upstream deletion with Electric's DELETE off would be answered 405. */ -}}
+{{- if and (eq (toString (dig "elementShapes" "deleteUpstream" "false" $rel)) "true") (not $allow) -}}
+{{- fail "releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- /* A rotating PEP deletes retired shapes; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "env" "OPENDDIL_PEP_SHAPE_ROTATE_S" "0" $rel))) 0.0) (not $allow) -}}
+{{- fail "OPENDDIL_PEP_SHAPE_ROTATE_S needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
 {{- end }}
 
 {{- define "openddil.electricMount" -}}
