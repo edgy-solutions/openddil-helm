@@ -3068,16 +3068,17 @@ default.
 {{- end -}}
 {{- $p := float64 (toString $period) -}}
 {{- $i := float64 (toString $idle) -}}
-{{- /* The longest session, as the PEP computes it (oidc.py SESSION_CEILING). */ -}}
+{{- /* The time after which a session with no requests has ended: the TTL in
+fixed mode, the inactivity period in sliding mode. The PEP refuses at import
+when idle is not above it. */ -}}
 {{- $oidc := dig "oidc" dict (.Values.releasability | default dict) -}}
-{{- $ttl := int (default 900 $oidc.sessionTtlSeconds) -}}
-{{- $life := $ttl -}}
+{{- $floorKey := "sessionTtlSeconds" -}}
 {{- if eq (toString (default "fixed" $oidc.sessionMode)) "sliding" -}}
-{{- $life = int (default $ttl $oidc.sessionMaxSeconds) -}}
+{{- $floorKey = "sessionIdleSeconds" -}}
 {{- end -}}
-{{- /* The PEP refuses at import when idle is not above the longest session. */ -}}
-{{- if and (gt $i 0.0) (le $i (float64 $life)) -}}
-{{- fail (printf "releasability.pep.shapeRotation.idlePeriodSeconds (%v) must be above the longest session (%d s, from releasability.oidc.sessionTtlSeconds / sessionMaxSeconds)" $idle $life) -}}
+{{- $floor := int (default 900 (get $oidc $floorKey)) -}}
+{{- if and (gt $i 0.0) (le $i (float64 $floor)) -}}
+{{- fail (printf "releasability.pep.shapeRotation.idlePeriodSeconds (%v) must be above the session's inactivity end (%d s, from releasability.oidc.%s)" $idle $floor $floorKey) -}}
 {{- end -}}
 {{- $c := float64 (toString $ceiling) -}}
 {{- /* A period without a ceiling above it has no checked bound. */ -}}

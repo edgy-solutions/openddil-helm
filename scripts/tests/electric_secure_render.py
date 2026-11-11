@@ -325,7 +325,10 @@ IDLE_ENV = "OPENDDIL_PEP_SHAPE_IDLE_S"
 G6 = ("releasability.pep.shapeRotation.idlePeriodSeconds needs electric.allowShapeDeletion "
       "(Electric answers DELETE with 405 without it)")
 G7 = "releasability.pep.shapeRotation.idlePeriodSeconds must be a number of seconds >= 0"
-G8 = "releasability.pep.shapeRotation.idlePeriodSeconds (900) must be above the longest session"
+G8 = "releasability.pep.shapeRotation.idlePeriodSeconds (900) must be above the session's inactivity end"
+G9 = "releasability.pep.shapeRotation.idlePeriodSeconds (1800) must be above the session's inactivity end (1800 s, from releasability.oidc.sessionIdleSeconds)"
+SLIDING = ["--set", "releasability.oidc.sessionMode=sliding", "--set", "releasability.oidc.sessionIdleSeconds=1800",
+           "--set", "releasability.oidc.sessionMaxSeconds=28800"]
 IDLE = "releasability.pep.shapeRotation.idlePeriodSeconds="
 PERIOD = "releasability.pep.shapeRotation.periodSeconds="
 CEILING = "releasability.pep.shapeRotation.ceilingSeconds="
@@ -456,6 +459,9 @@ def t16():
     p = []
     n = shape_env_check(SECURE + ALLOW + ["--set", IDLE + "0"], {}, p)
     case("T16 idle 0 renders no env (%d PEPs)" % n, p)
+    p = []
+    n = shape_env_check(SECURE + ALLOW + SLIDING + ["--set", IDLE + "2400"], {IDLE_ENV: "2400"}, p)
+    case("T16 sliding idle 2400 (%d PEPs)" % n, p)
 
 
 def t17():
@@ -463,6 +469,7 @@ def t17():
     expect_refusal(SECURE + ["--set", IDLE + "1800"], G6, p, "idle without flag")
     expect_refusal(SECURE + ALLOW + ["--set", IDLE + "abc"], G7, p, "non-number idle")
     expect_refusal(SECURE + ALLOW + ["--set", IDLE + "900"], G8, p, "idle not above the session")
+    expect_refusal(SECURE + ALLOW + SLIDING + ["--set", IDLE + "1800"], G9, p, "sliding idle at the inactivity end")
     case("T17 idle sweep refusals", p)
 
 

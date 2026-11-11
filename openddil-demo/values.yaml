@@ -2396,9 +2396,8 @@ releasability:
       ceilingSeconds: 0
       # The PEP deletes upstream any shape handle it bound that no client has read
       # for this many seconds, so a shape nobody reads any more stops growing in
-      # Electric's store. 0 is off. Must be above the session lifetime (a handle
-      # unread for longer can no longer be read by the session that bound it), and
-      # needs electric.allowShapeDeletion. Shapes bound by an earlier PEP process,
+      # Electric's store. 0 is off. Must be above the session's inactivity end
+      # (sessionTtlSeconds, or sessionIdleSeconds in sliding mode), and needs electric.allowShapeDeletion. Shapes bound by an earlier PEP process,
       # and shapes created outside the PEP, are not swept.
       idlePeriodSeconds: 0
     # true: every shape the PEPs create asks Electric for a compacted log.
