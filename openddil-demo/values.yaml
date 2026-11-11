@@ -2398,6 +2398,14 @@ releasability:
     # limit only moves that; capping the arenas bounds what is retained.
     env:
       MALLOC_ARENA_MAX: "2"
+    shapeRotation:
+      # Seconds a shape handle lives before the PEP deletes it upstream once;
+      # Electric's 409 then moves every client of that view to a fresh, short
+      # log. 0 is off. Needs electric.allowShapeDeletion and a ceiling above it.
+      periodSeconds: 0
+      # The checked bound: reads presenting a handle older than this count in
+      # openddil_pep_shape_over_ceiling_total. 0 is off (ages are still reported).
+      ceilingSeconds: 0
     # true: every shape the PEPs create asks Electric for a compacted log.
     # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
     # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2

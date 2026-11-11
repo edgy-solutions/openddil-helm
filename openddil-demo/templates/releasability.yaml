@@ -459,6 +459,9 @@ spec:
           env:
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            {{- with (include "openddil.pepShapeEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if include "openddil.electricSecure" $root }}
             {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
             {{- end }}

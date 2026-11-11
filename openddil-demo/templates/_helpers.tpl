@@ -3075,9 +3075,44 @@ delete by handle need it on. Renders nothing.
 {{- fail "releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
 {{- end -}}
 {{- /* A rotating PEP deletes retired shapes; same 405 without the flag. */ -}}
-{{- if and (gt (float64 (toString (dig "pep" "env" "OPENDDIL_PEP_SHAPE_ROTATE_S" "0" $rel))) 0.0) (not $allow) -}}
-{{- fail "OPENDDIL_PEP_SHAPE_ROTATE_S needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "periodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+PEP env for the shape ceiling and rotation period. Args: the root context.
+Renders nothing when both are 0, so the PEP env is unchanged by default.
+*/}}
+{{- define "openddil.pepShapeEnv" -}}
+{{- $sr := dig "pep" "shapeRotation" dict (.Values.releasability | default dict) -}}
+{{- $period := dig "periodSeconds" 0 $sr -}}
+{{- $ceiling := dig "ceilingSeconds" 0 $sr -}}
+{{- /* Both must be numbers of seconds, never negative. */ -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $period)) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $ceiling)) -}}
+{{- fail "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- $p := float64 (toString $period) -}}
+{{- $c := float64 (toString $ceiling) -}}
+{{- /* A period without a ceiling above it has no checked bound. */ -}}
+{{- if and (gt $p 0.0) (le $c 0.0) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- /* The PEP refuses at import when the period is not below the ceiling. */ -}}
+{{- if and (gt $p 0.0) (gt $c 0.0) (ge $p $c) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- if gt $c 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_CEILING_S
+  value: {{ int64 $c | toString | quote }}
+{{- end }}
+{{- if gt $p 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_ROTATE_S
+  value: {{ int64 $p | toString | quote }}
+{{- end }}
 {{- end }}
 
 {{- define "openddil.electricMount" -}}

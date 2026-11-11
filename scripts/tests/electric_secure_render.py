@@ -314,10 +314,16 @@ ALLOW = ["--set", "electric.allowShapeDeletion=true"]
 G1 = "electric.allowShapeDeletion needs electric.secure.enabled: shape DELETE must be reachable only by the PEPs"
 G2 = ("releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion "
       "(Electric answers DELETE with 405 without it)")
-G3 = ("OPENDDIL_PEP_SHAPE_ROTATE_S needs electric.allowShapeDeletion "
+G3 = ("releasability.pep.shapeRotation.periodSeconds needs electric.allowShapeDeletion "
       "(Electric answers DELETE with 405 without it)")
+G4 = ("releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it "
+      "(the ceiling is the checked bound)")
+G5 = "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0"
+CEIL_ENV = "OPENDDIL_PEP_SHAPE_CEILING_S"
+ROT_ENV = "OPENDDIL_PEP_SHAPE_ROTATE_S"
+PERIOD = "releasability.pep.shapeRotation.periodSeconds="
+CEILING = "releasability.pep.shapeRotation.ceilingSeconds="
 DELUP = ["--set", "releasability.elementShapes.deleteUpstream=true"]
-ROTATE = "releasability.pep.env.OPENDDIL_PEP_SHAPE_ROTATE_S="
 
 
 def t7():
@@ -326,6 +332,9 @@ def t7():
     for k, n, c in containers(docs):
         if FLAG in envmap(c):
             p.append("%s/%s/%s: has %s" % (k, n, c["name"], FLAG))
+        for v in (CEIL_ENV, ROT_ENV):
+            if v in envmap(c):
+                p.append("%s/%s/%s: has %s" % (k, n, c["name"], v))
     case("T7 deletion default off", p)
 
 
@@ -384,28 +393,79 @@ def t10():
 
 def t11():
     p = []
-    expect_refusal(SECURE + ["--set-string", ROTATE + "3600"], G3, p, "rotate 3600 without flag")
-    expect_render(SECURE + ["--set-string", ROTATE + "0"], p, "rotate 0")
-    expect_render(SECURE + ALLOW + ["--set-string", ROTATE + "3600"], p, "rotate 3600 with flag")
+    base = SECURE + ["--set", CEILING + "5400"]
+    expect_refusal(base + ["--set", PERIOD + "3600"], G3, p, "period 3600 without flag")
+    expect_render(base + ["--set", PERIOD + "0"], p, "period 0")
+    expect_render(base + ALLOW + ["--set", PERIOD + "3600"], p, "period 3600 with flag")
     case("T11 rotation period needs the flag", p)
+
+
+def shape_env_check(args, want, p):
+    """Every PEP, hub and tiers, has exactly the wanted vars; no other container has any."""
+    docs = must_render(args)
+    pd = peps(docs)
+    if len(pd) < 2:
+        p.append("expected hub + tier PEPs, found %d" % len(pd))
+    for n, (key, c) in pd.items():
+        env = envmap(c)
+        for v in (CEIL_ENV, ROT_ENV):
+            if v in want:
+                if env.get(v, {}).get("value") != want[v]:
+                    p.append("%s: %s not %s" % (n, v, want[v]))
+            elif v in env:
+                p.append("%s: has %s" % (n, v))
+    for k, n, c in containers(docs):
+        if c["name"] != "pep":
+            for v in (CEIL_ENV, ROT_ENV):
+                if v in envmap(c):
+                    p.append("%s/%s/%s: has %s" % (k, n, c["name"], v))
+    return len(pd)
+
+
+def t13():
+    p = []
+    n = shape_env_check(SECURE + ["--set", CEILING + "5400"], {CEIL_ENV: "5400"}, p)
+    case("T13 ceiling alone (%d PEPs)" % n, p)
+
+
+def t14():
+    p = []
+    n = shape_env_check(SECURE + ALLOW + ["--set", CEILING + "5400", "--set", PERIOD + "3600"],
+                        {CEIL_ENV: "5400", ROT_ENV: "3600"}, p)
+    case("T14 ceiling and period (%d PEPs)" % n, p)
+
+
+def t15():
+    p = []
+    expect_refusal(SECURE + ALLOW + ["--set", PERIOD + "3600", "--set", CEILING + "0"], G4, p, "period without ceiling")
+    expect_refusal(SECURE + ALLOW + ["--set", PERIOD + "5400", "--set", CEILING + "5400"], G4, p, "period equal to ceiling")
+    expect_refusal(SECURE + ALLOW + ["--set", CEILING + "-1"], G5, p, "negative ceiling")
+    case("T15 shape rotation refusals", p)
 
 
 def t12():
     """Flag off: Electric Deployments are the same as with the c0021a1 helpers."""
     p = []
     repo = os.path.abspath(os.path.join(CHART, ".."))
-    rel = "openddil-demo/templates/_helpers.tpl"
-    old = subprocess.run(["git", "-C", repo, "show", "c0021a1:" + rel],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if old.returncode != 0:
-        p.append("git show c0021a1 failed")
+    # The PEP templates call a helper that c0021a1 lacks, so they go back too.
+    names = ("_helpers.tpl", "releasability.yaml", "tier-node.yaml")
+    olds = {}
+    for nm in names:
+        o = subprocess.run(["git", "-C", repo, "show", "c0021a1:openddil-demo/templates/" + nm],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if o.returncode != 0:
+            p.append("git show c0021a1 %s failed" % nm)
+        olds[nm] = o.stdout
+    if p:
+        pass
     else:
         tmp = tempfile.mkdtemp()
         try:
             copy = os.path.join(tmp, "chart")
             shutil.copytree(CHART, copy)
-            with open(os.path.join(copy, "templates", "_helpers.tpl"), "wb") as f:
-                f.write(old.stdout)
+            for nm in names:
+                with open(os.path.join(copy, "templates", nm), "wb") as f:
+                    f.write(olds[nm])
             for label, args in (("default", BASE), ("secure", SECURE)):
                 new_docs = must_render(args)
                 rc, old_docs, err = render_chart(copy, args)
@@ -427,6 +487,6 @@ def t12():
 
 
 if __name__ == "__main__":
-    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12):
+    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15):
         t()
     sys.exit(0 if all(RESULTS) else 1)

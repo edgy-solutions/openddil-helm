@@ -1183,6 +1183,9 @@ spec:
             # THIS TIER'S Electric, which is the whole point.
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            {{- with (include "openddil.pepShapeEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if include "openddil.electricSecure" $root }}
             {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" $tier.id) | nindent 12 }}
             {{- end }}
