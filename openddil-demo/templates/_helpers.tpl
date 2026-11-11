@@ -3040,16 +3040,22 @@ delete by handle need it on. Renders nothing.
 {{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "periodSeconds" 0 $rel))) 0.0) (not $allow) -}}
 {{- fail "releasability.pep.shapeRotation.periodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
 {{- end -}}
+{{- /* The idle sweep deletes by handle too; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "idlePeriodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
 {{- end }}
 
 {{/*
-PEP env for the shape ceiling and rotation period. Args: the root context.
-Renders nothing when both are 0, so the PEP env is unchanged by default.
+PEP env for the shape ceiling, rotation period and idle sweep period. Args: the
+root context. Renders nothing when all are 0, so the PEP env is unchanged by
+default.
 */}}
 {{- define "openddil.pepShapeEnv" -}}
 {{- $sr := dig "pep" "shapeRotation" dict (.Values.releasability | default dict) -}}
 {{- $period := dig "periodSeconds" 0 $sr -}}
 {{- $ceiling := dig "ceilingSeconds" 0 $sr -}}
+{{- $idle := dig "idlePeriodSeconds" 0 $sr -}}
 {{- /* Both must be numbers of seconds, never negative. */ -}}
 {{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $period)) -}}
 {{- fail "releasability.pep.shapeRotation.periodSeconds must be a number of seconds >= 0" -}}
@@ -3057,7 +3063,22 @@ Renders nothing when both are 0, so the PEP env is unchanged by default.
 {{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $ceiling)) -}}
 {{- fail "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0" -}}
 {{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $idle)) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
 {{- $p := float64 (toString $period) -}}
+{{- $i := float64 (toString $idle) -}}
+{{- /* The longest session, as the PEP computes it (oidc.py SESSION_CEILING). */ -}}
+{{- $oidc := dig "oidc" dict (.Values.releasability | default dict) -}}
+{{- $ttl := int (default 900 $oidc.sessionTtlSeconds) -}}
+{{- $life := $ttl -}}
+{{- if eq (toString (default "fixed" $oidc.sessionMode)) "sliding" -}}
+{{- $life = int (default $ttl $oidc.sessionMaxSeconds) -}}
+{{- end -}}
+{{- /* The PEP refuses at import when idle is not above the longest session. */ -}}
+{{- if and (gt $i 0.0) (le $i (float64 $life)) -}}
+{{- fail (printf "releasability.pep.shapeRotation.idlePeriodSeconds (%v) must be above the longest session (%d s, from releasability.oidc.sessionTtlSeconds / sessionMaxSeconds)" $idle $life) -}}
+{{- end -}}
 {{- $c := float64 (toString $ceiling) -}}
 {{- /* A period without a ceiling above it has no checked bound. */ -}}
 {{- if and (gt $p 0.0) (le $c 0.0) -}}
@@ -3074,6 +3095,10 @@ Renders nothing when both are 0, so the PEP env is unchanged by default.
 {{- if gt $p 0.0 }}
 - name: OPENDDIL_PEP_SHAPE_ROTATE_S
   value: {{ int64 $p | toString | quote }}
+{{- end }}
+{{- if gt $i 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_IDLE_S
+  value: {{ int64 $i | toString | quote }}
 {{- end }}
 {{- end }}
 
