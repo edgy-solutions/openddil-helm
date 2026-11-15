@@ -2370,6 +2370,16 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # Persist the PEP's tracked shape handles across pod replacement, so a
+    # restarted PEP adopts them and its idle sweep can delete the unread ones
+    # upstream instead of leaving them orphaned in Electric. Off by default.
+    # On: one small RWO PVC per PEP and strategy Recreate (one writer to the
+    # file at a time: the old pod saves on SIGTERM before the new one adopts).
+    handleState:
+      enabled: false
+      size: 64Mi
+      storageClass: ""      # "" = cluster default
+      everySeconds: 30
     # true: every shape the PEPs create asks Electric for a compacted log.
     # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
     # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2
