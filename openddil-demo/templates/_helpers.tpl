@@ -1533,7 +1533,7 @@ ignores unit strings.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-15-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+consumer-group set (SPEC-consumer-declarations.md Part A): 19 groups.
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1552,9 +1552,16 @@ from this chart.
 Per-edge projectors also carry the parts-availability mapping (the root
 config is shared), but their broker has no such topic, so that group sits
 idle there, same as the regional rollups.
+
+projector-failure-episodes and projector-failure-episodes-withheld come
+with the failure-episodes mappings in the projector's baked config. They
+are declared with the image that carries them, not before: a group listed
+here that the running image lacks is a declared group nobody runs.
+scripts/tests/test_projector_groups_render.sh holds this list against
+the rendered annotations and, given PROJECTOR_CONFIG, against that file.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-failure-episodes projector-failure-episodes-withheld projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
