@@ -1137,6 +1137,10 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 4 }}
 ---
+{{- with (include "openddil.pepHandleState.pvc" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{ . }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1150,6 +1154,9 @@ spec:
   # second replica would refuse valid resumptions. Failing closed is the
   # right direction; scaling out needs shared storage.
   replicas: 1
+{{- with (include "openddil.pepHandleState.strategy" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 2 }}
+{{- end }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 6 }}
@@ -1363,6 +1370,9 @@ spec:
               value: {{ include "openddil.tierCookieSecure" (dict "origin" $tier.publicOrigin) | quote }}
             {{- end }}
             {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+{{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 12 }}
+{{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -1392,6 +1402,9 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+{{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 12 }}
+{{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
@@ -1407,6 +1420,9 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+{{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 8 }}
+{{- end }}
 {{- if not $tier.hasChildren }}
 ---
 # ===========================================================================

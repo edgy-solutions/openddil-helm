@@ -406,6 +406,10 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 4 }}
 ---
+{{- with (include "openddil.pepHandleState.pvc" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{ . }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -421,6 +425,9 @@ spec:
   # right direction, but confusingly. Scaling out needs shared handle storage;
   # Slice 1 says so rather than pretending the component is stateless.
   replicas: 1
+{{- with (include "openddil.pepHandleState.strategy" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 2 }}
+{{- end }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 6 }}
@@ -604,6 +611,9 @@ spec:
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
             {{- end }}
             {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+{{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -633,6 +643,9 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+{{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
@@ -648,6 +661,9 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+{{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 8 }}
+{{- end }}
 {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---
 # The per-platform-variant catalog the PEP will check a report's fault

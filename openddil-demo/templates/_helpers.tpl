@@ -3524,3 +3524,68 @@ render when heartbeatS is not a number, is below 0, or is above 15.
   value: {{ include "openddil.telemetryPositionDeadbandJson" . | quote }}
 {{- end -}}
 {{- end }}
+
+{{/*
+Opt-in PEP handle-state volume (releasability.pep.handleState). Each helper
+takes (dict "root" $root "name" <Deployment name>) and renders nothing when
+the feature is off, so the default render is unchanged. The Deployment name is
+<release>-pep (hub) or <release>-tier-pep-<id> (tier); the component label is
+that name without the "<release>-" prefix.
+*/}}
+{{- define "openddil.pepHandleState.pvc" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-handle-state" .name }}
+  labels:
+    {{- include "openddil.labels" .root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (trimPrefix (printf "%s-" .root.Release.Name) .name) "root" .root) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $hs.storageClass }}
+  storageClassName: {{ $hs.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $hs.size | default "64Mi" | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.strategy" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+strategy:
+  type: Recreate
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.env" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: OPENDDIL_PEP_HANDLE_STATE_FILE
+  value: /var/lib/openddil-pep/handles.json
+- name: OPENDDIL_PEP_HANDLE_STATE_EVERY_S
+  value: {{ $hs.everySeconds | default 30 | toString | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.mount" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  mountPath: /var/lib/openddil-pep
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.volume" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  persistentVolumeClaim:
+    claimName: {{ printf "%s-handle-state" .name }}
+{{- end -}}
+{{- end -}}
