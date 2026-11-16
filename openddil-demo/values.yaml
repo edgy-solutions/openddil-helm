@@ -48,6 +48,17 @@ bundle:
   initResources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 250m, memory: 256Mi }
+  # Content digests of the bundle paths the chart copies (bundleInit `src`),
+  # read from the bundle image named by bundleDigest. Used only when
+  # bundleDigest equals bundle.image.digest; otherwise the checksums fall back
+  # to the bundle reference (and Release.Revision when unpinned).
+  # file src: sha256 of the file. directory src: sha256 of the output of
+  #   (cd /bundle/<src> && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2)
+  # a path the bundle may lack (demo/policy/destinations.yaml) has the digest
+  # `absent` when it is not in the bundle.
+  contentDigests:
+    bundleDigest: ""
+    paths: {}
 
 # --- Hook Jobs (topic-init, postgres-schema-init, *-bootstrap) --------------
 # The four Helm-hook Jobs were previously shipped with NO resources block,
