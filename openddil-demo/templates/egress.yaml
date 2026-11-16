@@ -90,7 +90,7 @@ spec:
         # topaz-hq's checksum/policy, so both roll on exactly the same upgrades.
         # Rolling together does not order them: a gate that starts before the
         # new topaz-hq serves still resolves against the old registry.
-        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "paths" (list) "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
         {{- if .Values.egress.routes }}
         checksum/routes: {{ $routesJSON | sha256sum | quote }}
         {{- end }}
@@ -449,7 +449,7 @@ spec:
         # (egress-gate-c2), on purpose. With releasability.liveReload it
         # re-asks on the interval, so a registry change no longer restarts it;
         # with liveReload off it must roll with the registries.
-        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
+        checksum/registries: {{ include "openddil.policyChecksum" (dict "root" . "paths" (list) "extra" (ternary (list) (list (toJson .Values.releasability.destinations)) .Values.releasability.liveReload.enabled)) | sha256sum | quote }}
         {{- if .Values.egress.trust.caConfigMap }}
         checksum/egress-trust: {{ .Values.egress.trust.caConfigMap | sha256sum | quote }}
         {{- end }}

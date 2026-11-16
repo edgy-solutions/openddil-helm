@@ -1150,8 +1150,14 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list
             $tier.id
             ($tier.publicOrigin | default "")
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
@@ -1165,12 +1171,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/gateway" "dst" "app")
-            (dict "src" "contracts/ontology" "dst" "ontology")
-            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
-            (dict "src" "contracts/baselines" "dst" "baselines")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -1800,8 +1801,12 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) }}
       annotations:
-        # HASHES THE BUNDLE IMAGE REFERENCE (or Release.Revision when
+        # HASHES THE CONTENT OF THE BUNDLE FILES THIS POD COPIES (or the bundle reference + Release.Revision when
         # unpinned), not this pod's own rendered spec — same mechanism
         # openddil.policyChecksum gives the identity pods, extended here
         # because cm-intake.yaml ships as a static bundle file this
@@ -1810,17 +1815,14 @@ spec:
         # on stale config exactly the way edge-hq-bridge's connect-config
         # comment describes for a chart-generated file. This is the same
         # staleness hazard for a bundle-shipped one.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "tier-cm-intake" $tier.id)) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list "tier-cm-intake" $tier.id)) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "contracts/proto"          "dst" "proto")
-            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
@@ -2137,8 +2139,12 @@ spec:
       # rolled on upgrade: measured 2026-09-30, all three tier Topaz pods were
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
         {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
         checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
@@ -2162,10 +2168,7 @@ spec:
       # auditable because every decision records the policy and corpus
       # versions that produced it.
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
-            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
         - name: policy-loader
           image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}

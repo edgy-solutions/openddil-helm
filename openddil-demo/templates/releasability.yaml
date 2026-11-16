@@ -140,6 +140,10 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+          ) }}
       annotations:
         # Roll the pod when the policy CONTENT changes, not on every helm
         # revision. The bundle image is a rolling tag, so without this a helm
@@ -149,7 +153,7 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
         {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
         checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
@@ -169,10 +173,7 @@ spec:
         # A silent rename during transport is exactly how a reviewed file and
         # a running file drift apart, so: same content, different name, said
         # out loud here and in users.yaml's header.
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
-            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
         # THE ENTITLEMENTS CORPUS, SELECTED BY ENV RATHER THAN BY TEMPLATE.
         #
         # A separate init container from the one above, for one reason: the
@@ -429,8 +430,14 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
           ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
         {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
@@ -442,12 +449,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/gateway" "dst" "app")
-            (dict "src" "contracts/ontology" "dst" "ontology")
-            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
-            (dict "src" "contracts/baselines" "dst" "baselines")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -940,9 +942,12 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
+          ) }}
       annotations:
         {{- /* the session mode, TTL, idle and max are baked into the realm import (SSO lifetimes); without them here a change to any never rolls Keycloak or re-imports the realm */}}
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
         {{- if include "openddil.anyIdentityReplica" $root }}
         # ADR-0045 next increment, item 6: the digest of the realm inputs this
@@ -957,9 +962,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
         {{- if include "openddil.realmUsersOverlay" $root }}
         # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson).
         # Merged here, before prepare-realm, because merging JSON arrays is not

@@ -320,56 +320,105 @@ checksum/dis-condition-baselines: {{ . | sha256sum | quote }}
 {{- end }}
 
 {{/*
+openddil.bundleContent -- the bundle-derived lines of a checksum input, for
+the bundle paths ONE Deployment copies. Takes
+(dict "root" $root "paths" <the list of dicts passed to openddil.bundleInit>).
+A Deployment's checksum must cover only what it mounts: hashing the bundle
+reference rolled every Deployment on every bundle bump, including ones that
+mount nothing from the bundle.
+
+Two modes:
+  - PINNED: bundle.image.digest is set AND bundle.contentDigests.bundleDigest
+    equals it, so the digests in bundle.contentDigests.paths were read from
+    this very image. One line `bundle:<src>=<digest>` per entry of `paths`, in
+    list order. A src with no digest fails the render, naming the src: a
+    silent gap would be a path that never rolls its pods.
+  - FALLBACK (anything else): `bundleImage=<the resolved bundle reference>`,
+    plus `revision=<Release.Revision>` when bundle.image.digest is empty (a
+    tag can move under an unchanged reference). This is the behaviour before
+    content digests existed.
+An empty `paths` renders nothing in either mode.
+
+Not covered: the bundle-loader init container's image stays the bundle
+reference, so a bundle bump still changes the pod template of every
+Deployment that has a bundleInit. This helper only keeps the checksum
+annotations and the realm version still. The bundle build emitting these
+digests (rather than a values file) is the follow-up.
+*/}}
+{{- define "openddil.bundleContent" -}}
+{{- $root := .root -}}
+{{- $paths := .paths | default list -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- if $paths -}}
+{{- if and $digest (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- range $p := $paths -}}
+{{- $d := index ($cd.paths | default dict) $p.src -}}
+{{- if not $d -}}{{- fail (printf "bundle.contentDigests.paths has no digest for %s: the content digests do not cover it" $p.src) -}}{{- end }}
+bundle:{{ $p.src }}={{ $d }}
+{{ end -}}
+{{- else -}}
+{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
+bundleImage={{ $bundleImage }}
+{{ if not $digest -}}
+revision={{ $root.Release.Revision }}
+{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Content input for the identity pods' `checksum/policy` annotation
-(topaz-hq, pep, keycloak, tier-pep â€” see each pod template's WHY comment).
+(topaz-hq, pep, keycloak, tier-pep — see each pod template's WHY comment)
+and the intake pods' `checksum/bundle` / the egress `checksum/registries`.
 Pipe the result through `sha256sum` at the call site, same as every other
 checksum/* annotation in this chart.
 
 MEASURED 2026-09-30: those four pod specs carried an annotation stamping
 `{{ "{{" }} .Release.Revision {{ "}}" }}` on every render, which rolled all 6 identity pods (3 root + 3 per-tier) on EVERY helm
-upgrade â€” because the entitlements corpus and the OIDC realm both arrive
+upgrade — because the entitlements corpus and the OIDC realm both arrive
 inside the runtime-bundle image under a rolling tag, so the chart cannot
 see whether the CONTENT behind that tag changed, only that an upgrade
 happened. This replaces "did a revision happen" with "did the content an
 identity pod actually loads change".
 
 Usage:
-  checksum/policy: {{ "{{" }} include "openddil.policyChecksum" (dict "root" $root "extra" (list ...)) | sha256sum {{ "}}" }}
+  checksum/policy: {{ "{{" }} include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list ...)) | sha256sum {{ "}}" }}
 
 Input, for every call site:
-  - the fully resolved bundle-image reference, via the SAME openddil.image
-    include openddil.bundleInit resolves it with (name/tag/digest/registry)
-    â€” not re-derived, so the two can never disagree about what "the
-    bundle" means.
+  - `.paths` (REQUIRED, may be (list)): the bundleInit paths THIS Deployment
+    mounts, the very variable passed to openddil.bundleInit. Rendered by
+    openddil.bundleContent: the content digest of each path when the bundle
+    is pinned and the chart has its digests, else the bundle reference (see
+    there). So the checksum covers the Deployment's own bundle files, not
+    the bundle reference. A Deployment that mounts nothing passes (list).
   - `.extra`, a list of strings the CALLER supplies: every value under
     `.Values.releasability` (and, for tier-pep, the tier's own id and
     publicOrigin) that pod actually consumes and that is NOT already
     rendered literally into its own pod spec. A value already in the pod
     spec changes the rendered YAML by itself and Kubernetes rolls it
-    without this helper's help â€” the only thing worth hashing here is
+    without this helper's help — the only thing worth hashing here is
     what the pod spec does NOT show, e.g. `releasability.oidc.clientSecret`,
     which every consumer reaches through a Secret NAME, never its value.
 
-CONSERVATIVE FALLBACK â€” the rolling-tag hazard must not come back by a
+CONSERVATIVE FALLBACK — the rolling-tag hazard must not come back by a
 different door. A tag-only bundle reference can point at new content
 without the reference TEXT changing at all, which is the exact hazard
 above; content-addressing needs content to address, and a tag is not
 content. So when `bundle.image.digest` is empty, `.Release.Revision` is
-folded into the input too, i.e. an unpinned install keeps rolling
-identity pods on every upgrade exactly like the revision-stamped
-annotation this replaces. Pinning `bundle.image.digest` is how an install
-opts in to rolling on content instead of on revision.
+folded into the input too (by openddil.bundleContent's fallback), i.e. an
+unpinned install keeps rolling identity pods on every upgrade exactly like
+the revision-stamped annotation this replaces. Pinning
+`bundle.image.digest` and supplying `bundle.contentDigests` is how an
+install opts in to rolling on content instead of on revision.
 */}}
 {{- define "openddil.policyChecksum" -}}
-{{- $root := .root -}}
-{{- $digest := $root.Values.bundle.image.digest -}}
-{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
-bundleImage={{ $bundleImage }}
+{{- if not (hasKey . "paths") -}}
+{{- fail "policyChecksum needs paths: the bundleInit paths this Deployment mounts, or (list)" -}}
+{{- end -}}
+{{- include "openddil.bundleContent" (dict "root" .root "paths" .paths) -}}
 {{- range $i, $v := (.extra | default list) }}
 extra[{{ $i }}]={{ $v }}
-{{- end }}
-{{- if not $digest }}
-revision={{ $root.Release.Revision }}
 {{- end -}}
 {{- end }}
 
@@ -965,23 +1014,37 @@ release with no replica renders exactly what it did before.
 {{- end }}
 
 {{/*
-openddil.realmVersion -- the digest of the realm's INPUTS the chart can see:
-the content-addressed bundle that carries the realm artefact, plus the
-deployment-layer users overlay. Takes the chart root. It moves whenever the
-realm can have moved, and may move when it did not (a bundle change
-elsewhere): a false roll, never a false match. A per-file realm digest
-stamped by the bundle build is the follow-up.
-
-An unpinned bundle (no bundle.image.digest) is not content-addressed, so the
-Release.Revision is folded in and the version moves every revision, the same
-rule openddil.policyChecksum applies.
+openddil.realmVersion -- the digest of the realm's INPUTS the chart can see.
+Takes the chart root. Output: `sha256:` + the first 16 hex of the input.
+  - PINNED (bundle.image.digest equals bundle.contentDigests.bundleDigest):
+    the realm file's content digest (`demo/policy/realm-openddil.json=<digest>`
+    from bundle.contentDigests.paths, failing the render if absent) plus the
+    deployment-layer users overlay. A bundle bump that leaves the realm file
+    alone leaves the version alone.
+  - OTHERWISE: the bundle reference plus the overlay, plus the Release.Revision
+    when unpinned (the rule openddil.policyChecksum applies). It may move when
+    the realm did not (a bundle change elsewhere): a false roll, never a
+    false match.
+It must not take per-tier inputs: scripts/check-realm-drift.sh compares it
+across tiers. The digests come from values for now; the bundle build
+emitting them is the follow-up.
 */}}
 {{- define "openddil.realmVersion" -}}
 {{- $root := . -}}
 {{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- $overlay := include "openddil.realmUsersOverlay" $root -}}
+{{- $in := "" -}}
+{{- if and $digest (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- $src := "demo/policy/realm-openddil.json" -}}
+{{- $d := index ($cd.paths | default dict) $src -}}
+{{- if not $d -}}{{- fail (printf "bundle.contentDigests.paths has no digest for %s: the content digests do not cover it" $src) -}}{{- end -}}
+{{- $in = printf "%s=%s\n%s" $src $d $overlay -}}
+{{- else -}}
 {{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
-{{- $in := printf "%s\n%s" $bundleImage (include "openddil.realmUsersOverlay" $root) -}}
+{{- $in = printf "%s\n%s" $bundleImage $overlay -}}
 {{- if not $digest -}}{{- $in = printf "%s\nrevision=%v" $in $root.Release.Revision -}}{{- end -}}
+{{- end -}}
 sha256:{{ $in | sha256sum | trunc 16 }}
 {{- end }}
 
@@ -2856,20 +2919,21 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/declaration-intake.yaml" "dst" "connect.yaml")
+          ) }}
       annotations:
         # declaration-intake.yaml ships as a static bundle file the init
         # container copies once at pod start; same staleness hazard and fix as
         # cm-intake.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "declaration-intake" .name)) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list "declaration-intake" .name)) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/declaration-intake.yaml" "dst" "connect.yaml")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"

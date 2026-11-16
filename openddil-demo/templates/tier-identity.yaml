@@ -98,8 +98,11 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" $component "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum) $realmVersion)) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) $tierClient $known $overlay ($root.Files.Get "files/tier-realm-import.py" | sha256sum) $realmVersion)) | sha256sum | quote }}
         # The inputs digest this pod's realm was imported from; read by
         # scripts/check-realm-drift.sh (ADR-0045 item 6).
         openddil.io/realm-version: {{ $realmVersion | quote }}
@@ -110,9 +113,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
         # Stages this tier's realm from the bundle's realm artefact. Refuses
         # (exit 1, reason printed) before Keycloak starts.
         - name: import-realm
