@@ -310,9 +310,25 @@ toxiproxy:
 electric:
   image:
     repository: electricsql/electric
-    tag: "1.6.2"
-    digest: ""
+    tag: "1.8.1"
+    digest: "sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
     pullPolicy: IfNotPresent
+  # Secure mode. Electric then requires a secret on /v1/shape and only the PEP
+  # in front of each Electric holds it; the Electric NetworkPolicies render too.
+  # Needs releasability.enabled (a PEP in front of every Electric). The Secret
+  # holds one key per instance: `hub` for the hub Electric, the tier id for
+  # each tier Electric.
+  secure:
+    enabled: false          # true: Electric requires a secret on /v1/shape; only the PEPs hold it
+    # Secret values must be URL-safe (letters and digits): the scripts pass them unencoded.
+    existingSecret: ""      # optional: a Secret holding one key per Electric instance (see above)
+  # Shape DELETE (/v1/shape by handle). Electric 1.6.2 and 1.8.1 enable it only
+  # through ELECTRIC_ENABLE_INTEGRATION_TESTING; in both, that flag gates shape
+  # deletion and nothing else (config/runtime.exs derives only
+  # allow_shape_deletion? from it). A PEP that retires a shape deletes it by
+  # handle so its log leaves disk. Requires secure.enabled: with the secret and
+  # the PEP-only NetworkPolicy, only the PEPs can reach DELETE.
+  allowShapeDeletion: false
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
@@ -768,6 +784,12 @@ faustEdge:
     BARREL_LIFE_TOTAL_ROUNDS: "1000"
 
 projector:
+  telemetryChangeOnly:
+    # 0 = write telemetry_latest_state on every message (today). >0 = suppress
+    # rows that change only motion within the deadband or freshness, with a
+    # write at least this often (seconds). At most 15: half the reporting
+    # sweep's 30 s stale window. Deadbands: movement.standards.<variant>.positionDeadbandM.
+    heartbeatS: 0
   image:
     name: projector
     tag: ""
@@ -829,8 +851,14 @@ munitionTracks:
 movement:
   # per variant: marchOrderS, emplaceS (seconds), fuelTank {value, unit},
   # fuelBurnPerKm {value, unit}; any key may be omitted (the panel then
-  # names it as missing)
+  # names it as missing). Each variant may also carry positionDeadbandM
+  # (metres, a number >= 0): the distance a position must move from the last
+  # written one before the projector writes a telemetry row, used only when
+  # projector.telemetryChangeOnly.heartbeatS is on. The move panel ignores it.
   standards: {}
+  # the "*" fallback deadband (metres) for variants with no positionDeadbandM;
+  # null means such variants compare exactly
+  positionDeadbandDefaultM: null
   # [{id, label, members: [asset_id, ...], plannedMoveKm}]
   units: []
 
@@ -2175,9 +2203,9 @@ releasability:
   # PEPs only: the edge tier template adds it to that PEP's labelled tables,
   # and it is deliberately NOT in labeledTables below.
   elementShapes:
-    # Electric serves shape DELETE only when its integration-testing flag is
-    # on; this stays false until that is decided. While false, a released view
-    # is forgotten by the PEP and the upstream shape is left alone.
+    # Needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it).
+    # While false, a released view is forgotten by the PEP and the upstream
+    # shape is left alone.
     deleteUpstream: false
     # Distinct element views one principal may hold.
     viewerMax: 8
@@ -2370,6 +2398,42 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # Extra env vars for every PEP container: the hub PEP and each tier PEP.
+    # A map, not a list like egress.forwarder.extraEnv: maps merge across -f
+    # files, so an overlay can add a variable without dropping the default, and
+    # a key set to null is skipped. Values are rendered as strings. LOG_LEVEL
+    # and OPENDDIL_* names are set by the chart and refuse here.
+    # MALLOC_ARENA_MAX=2 is the default because the PEP is a threaded server
+    # under glibc: each request thread can allocate in its own malloc arena
+    # (up to 8 per CPU) and glibc keeps an arena's high-water mark, so memory
+    # grows with screen loads until the container limit kills it. Raising the
+    # limit only moves that; capping the arenas bounds what is retained.
+    env:
+      MALLOC_ARENA_MAX: "2"
+    shapeRotation:
+      # Seconds a shape handle lives before the PEP deletes it upstream once;
+      # Electric's 409 then moves every client of that view to a fresh, short
+      # log. 0 is off. Needs electric.allowShapeDeletion and a ceiling above it.
+      periodSeconds: 0
+      # The checked bound: reads presenting a handle older than this count in
+      # openddil_pep_shape_over_ceiling_total. 0 is off (ages are still reported).
+      ceilingSeconds: 0
+      # The PEP deletes upstream any shape handle it bound that no client has read
+      # for this many seconds, so a shape nobody reads any more stops growing in
+      # Electric's store. 0 is off. Must be above the session's inactivity end
+      # (sessionTtlSeconds, or sessionIdleSeconds in sliding mode), and needs electric.allowShapeDeletion. Shapes bound by an earlier PEP process,
+      # and shapes created outside the PEP, are not swept.
+      idlePeriodSeconds: 0
+    # Persist the PEP's tracked shape handles across pod replacement, so a
+    # restarted PEP adopts them and its idle sweep can delete the unread ones
+    # upstream instead of leaving them orphaned in Electric. Off by default.
+    # On: one small RWO PVC per PEP and strategy Recreate (one writer to the
+    # file at a time: the old pod saves on SIGTERM before the new one adopts).
+    handleState:
+      enabled: false
+      size: 64Mi
+      storageClass: ""      # "" = cluster default
+      everySeconds: 30
     # true: every shape the PEPs create asks Electric for a compacted log.
     # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
     # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2
