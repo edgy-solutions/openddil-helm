@@ -144,6 +144,10 @@ spec:
             (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
             (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
           ) }}
+{{- $checksumPaths := concat $bundlePaths (list
+            (dict "src" (printf "demo/policy/%s.yaml" $root.Values.releasability.policyVariant))
+            (dict "src" "demo/policy/destinations.yaml")
+          ) }}
       annotations:
         # Roll the pod when the policy CONTENT changes, not on every helm
         # revision. The bundle image is a rolling tag, so without this a helm
@@ -153,7 +157,10 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        # The policy-loader init container reads the variant corpus and
+        # destinations.yaml from the bundle outside bundleInit, so those two
+        # files are in the checksum too ($checksumPaths).
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $checksumPaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
         {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
         checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}

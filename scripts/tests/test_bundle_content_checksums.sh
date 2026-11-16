@@ -25,6 +25,7 @@
 #      bundle digest moves every bundle-path caller and the realm version.
 #   F. unpinned: the realm version follows the tag.
 #   G. a missing digest fails the render and names the path.
+#   H. the topaz policy-loader reads (variant corpus, destinations.yaml).
 # ===========================================================================
 set -u
 
@@ -44,7 +45,7 @@ DA="sha256:$(printf 'a%.0s' $(seq 64))"
 DB="sha256:$(printf 'b%.0s' $(seq 64))"
 DC="sha256:$(printf 'c%.0s' $(seq 64))"
 
-SRCS="contracts/proto demo/cm-intake.yaml demo/declaration-intake.yaml demo/policy/.manifest demo/policy/releasability.rego demo/gateway contracts/ontology demo/ontology contracts/baselines demo/policy/realm-openddil.json"
+SRCS="contracts/proto demo/cm-intake.yaml demo/declaration-intake.yaml demo/policy/.manifest demo/policy/releasability.rego demo/gateway contracts/ontology demo/ontology contracts/baselines demo/policy/realm-openddil.json demo/policy/users.yaml demo/policy/destinations.yaml"
 
 # Values (no secrets in them). $1 = bundle digest ("" = unpinned),
 # $2 = contentDigests.bundleDigest ("" = no contentDigests block),
@@ -162,12 +163,15 @@ write_values "$TMP/fB.yaml"  "$DB" ""
 write_values "$TMP/mB.yaml"  "$DB" "$DC"
 write_values "$TMP/uX.yaml"  "" ""
 write_values "$TMP/nB.yaml"  "$DB" "$DB" "" "contracts/proto"
+write_values "$TMP/vB.yaml"  "$DB" "$DB" "demo/policy/users.yaml"
+write_values "$TMP/dB.yaml"  "$DB" "$DB" "demo/policy/destinations.yaml"
 
 render pA "$TMP/pA.yaml"; render pB "$TMP/pB.yaml"; render gB "$TMP/gB.yaml"; render rB "$TMP/rB.yaml"
 render fA "$TMP/fA.yaml"; render fB "$TMP/fB.yaml"; render mB "$TMP/mB.yaml"
 render uX "$TMP/uX.yaml" --set bundle.image.tag=x; render uY "$TMP/uX.yaml" --set bundle.image.tag=y
 render nB "$TMP/nB.yaml"
-must_render pA pB gB rB fA fB mB uX uY
+render vB "$TMP/vB.yaml"; render dB "$TMP/dB.yaml"
+must_render pA pB gB rB fA fB mB uX uY vB dB
 
 # The render must carry what the cases are about.
 want_deps="t-cm-intake t-egress-gate-c2 t-egress-intake t-keycloak t-pep t-tier-cm-intake-edge-01 t-tier-declaration-intake-edge-01 t-tier-keycloak-edge-01 t-tier-pep-edge-01 t-tier-pep-region-east t-tier-topaz-edge-01 t-tier-topaz-region-east t-topaz-hq"
@@ -206,6 +210,12 @@ check "E digests for another bundle render exactly the no-contentDigests render"
 # F
 check "F unpinned: the realm version follows the tag" "$(changed uX uY | grep -c 'realm-version\|REALM_VERSION')" "$(keys uX 'realm-version|REALM_VERSION' | wc -l | tr -d ' ')"
 check "F unpinned: the realm version is rendered" "$([ "$(keys uX 'realm-version|REALM_VERSION' | wc -l | tr -d ' ')" -gt 0 ] && echo ok)" "ok"
+
+# H (topaz policy-loader reads, outside bundleInit)
+check "H the default variant corpus (users.yaml) changes: only topaz-hq and tier topaz move" "$(changed pB vB)" "t-tier-topaz-edge-01 checksum/policy
+t-tier-topaz-region-east checksum/policy
+t-topaz-hq checksum/policy"
+check "H destinations.yaml changes: only topaz-hq and tier topaz move" "$(changed pB dB)" "$(changed pB vB)"
 
 # G
 if [ "$(rc nB)" = 0 ]; then

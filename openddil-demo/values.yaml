@@ -54,6 +54,8 @@ bundle:
   # to the bundle reference (and Release.Revision when unpinned).
   # file src: sha256 of the file. directory src: sha256 of the output of
   #   (cd /bundle/<src> && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2)
+  # a path the bundle may lack (demo/policy/destinations.yaml) has the digest
+  # `absent` when it is not in the bundle.
   contentDigests:
     bundleDigest: ""
     paths: {}
