@@ -103,7 +103,7 @@ write_values() {
 FILTER="$TMP/filter.py"
 cat > "$FILTER" <<'PYEOF'
 import sys, json, hashlib, re, yaml
-ld, tpl, ann = {}, {}, {}
+ld, tpl, ann, pol = {}, {}, {}, {}
 for d in yaml.safe_load_all(sys.stdin):
     if not d or d.get("kind") not in ("Deployment", "StatefulSet", "Job"):
         continue
@@ -111,11 +111,13 @@ for d in yaml.safe_load_all(sys.stdin):
     t = d["spec"]["template"]
     tpl[k] = hashlib.sha256(yaml.safe_dump(t, sort_keys=True).encode()).hexdigest()
     ann[k] = {a: v for a, v in ((t.get("metadata") or {}).get("annotations") or {}).items() if a.startswith("checksum/")}
-    for c in t["spec"].get("initContainers") or []:
+    for c in (t["spec"].get("initContainers") or []) + (t["spec"].get("containers") or []):
+        if c["name"] in ("policy-loader", "policy-sync"):
+            pol["%s:%s" % (k, c["name"])] = c["image"]
         if c["name"] == "bundle-loader":
             srcs = re.findall(r"^\s*# (\S+) -> /shared/", "\n".join(c["command"]), re.M)
             ld[k] = {"img": c["image"], "srcs": srcs}
-print(json.dumps({"ld": ld, "tpl": tpl, "ann": ann}))
+print(json.dumps({"ld": ld, "tpl": tpl, "ann": ann, "pol": pol}))
 PYEOF
 
 render() {  # <name> <values-file>: $TMP/<name>.json, .rc, .err
@@ -171,6 +173,25 @@ loaders() {
   case "$out" in FAIL*) FAIL=1;; esac
 }
 
+
+# policy <case> <json> <digest>: every topaz policy-loader and policy-sync image
+# names <digest> (they follow the pin, with the pod's checksum paths).
+PCHECK="$TMP/pcheck.py"
+cat > "$PCHECK" <<'PYEOF'
+import sys, json
+case, path, want = sys.argv[1:4]
+pol = json.load(open(path))["pol"]
+bad = ["%s is %s" % (k, v.rsplit("@", 1)[-1][:14]) for k, v in sorted(pol.items()) if not v.endswith("@" + want)]
+if len(pol) != 6:
+    bad.append("expected 6 policy-loader/policy-sync images (3 topaz pods), found %d" % len(pol))
+print(("FAIL " if bad else "PASS ") + case)
+[print("  " + b) for b in bad]
+sys.exit(1 if bad else 0)
+PYEOF
+policy() {
+  local out; out="$("$PY" "$PCHECK" "$@" | tr -d '\r')"; echo "$out"
+  case "$out" in FAIL*) FAIL=1;; esac
+}
 failed() {  # <case> <name> <needle>: the render must fail and name <needle>
   if [ "$(rc "$2")" = 0 ]; then echo "FAIL $1: the render succeeded"; FAIL=1
   elif grep -qF -- "$3" "$TMP/$2.err"; then echo "PASS $1 (names $3)"
@@ -181,6 +202,7 @@ failed() {  # <case> <name> <needle>: the render must fail and name <needle>
 write_values "$TMP/a.yaml"  "$DB" "$DB" ""
 write_values "$TMP/b.yaml"  "$DB" "$DB" "" "$DA||"
 write_values "$TMP/c.yaml"  "$DB" "$DB" "demo/gateway" "$DA||"
+write_values "$TMP/c2.yaml" "$DB" "$DB" "demo/policy/destinations.yaml" "$DA||"
 write_values "$TMP/d.yaml"  "$DB" "$DB" "" "$DC|demo/cm-intake.yaml|" "$DA||"
 write_values "$TMP/e.yaml"  "$DB" "$DC" "" "$DA||"
 write_values "$TMP/g.yaml"  "$DB" "$DB" "" "$DA||demo/gateway"
@@ -190,8 +212,8 @@ write_values "$TMP/f3.yaml" "$DB" "$DB" "" "$DB||"
 write_values "$TMP/h1.yaml" "$DA" "$DA" ""
 write_values "$TMP/h2.yaml" "$DB" "$DB" "" "$DA||"
 
-for n in a b c d e g f1 f2 f3 h1; do render "$n" "$TMP/$n.yaml"; done
-must_render a b c d e g h1
+for n in c2 a b c d e g f1 f2 f3 h1; do render "$n" "$TMP/$n.yaml"; done
+must_render a b c c2 d e g h1
 
 # --- A ----------------------------------------------------------------------
 loaders "A no history: every loader is at the current bundle" "$TMP/a.json" "$DB" "$DB"
@@ -202,6 +224,10 @@ if [ "$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["ann"]==jso
 else echo "FAIL B the checksum annotations differ from case A's"; FAIL=1; fi
 # --- C ----------------------------------------------------------------------
 loaders "C history [A], demo/gateway differs: readers of it at B, the rest at A" "$TMP/c.json" "$DA" "$DB" demo/gateway "$DB"
+policy "B topaz policy-loader and policy-sync follow the pin (at A)" "$TMP/b.json" "$DA"
+policy "C topaz images stay at A when only demo/gateway differs" "$TMP/c.json" "$DA"
+loaders "C2 destinations.yaml differs: the loaders that copy it are not pinned past it (none do) and stay at A" "$TMP/c2.json" "$DA" "$DB"
+policy "C2 destinations.yaml differs: topaz policy-loader and policy-sync at B" "$TMP/c2.json" "$DB"
 # --- D ----------------------------------------------------------------------
 loaders "D history [C, A], C differs in demo/cm-intake.yaml: its readers at A, the rest at C" "$TMP/d.json" "$DC" "$DB" demo/cm-intake.yaml "$DA"
 # --- E ----------------------------------------------------------------------

@@ -201,7 +201,7 @@ spec:
         # silent rename in transport is how a reviewed file and a running file
         # drift apart.
         - name: policy-loader
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -329,7 +329,7 @@ spec:
         # TO SEE A RELOAD: this container logs "policy-sync: <name> updated ...",
         # then topaz logs WARN "Processed file watch event." with err.
         - name: policy-sync
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
