@@ -22,6 +22,7 @@ on:
       - "scripts/tests/test_entity_assignment.sh"
       - "scripts/tests/sensor_ingest_docs.py"
       - "scripts/tests/test_projector_groups_render.sh"
+      - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -36,6 +37,7 @@ on:
       - "scripts/tests/test_entity_assignment.sh"
       - "scripts/tests/sensor_ingest_docs.py"
       - "scripts/tests/test_projector_groups_render.sh"
+      - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -204,6 +206,11 @@ jobs:
       # piped, never saved. Exit 2 (no python with PyYAML) fails the step too.
       - name: Projector consumer groups render test
         run: bash scripts/tests/test_projector_groups_render.sh
+
+      # The failure-episodes topics in every topic-init script, and their tier projector mappings. The render
+      # is piped, never saved. Exit 2 (no python with PyYAML) fails the step too.
+      - name: Failure-episodes wiring render test
+        run: bash scripts/tests/test_failure_episodes_wiring_render.sh
 
       # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
       # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments
