@@ -1,0 +1,115 @@
+{{- /*
+hook-failure-episodes-backfill.yaml -- one-shot backfill of failure-episodes.
+
+Why one Job per AssetCM: the script produces to its own broker with no tier
+filter.
+
+Why post-upgrade: the restate-wipe hook (pre-upgrade) clears am_state before
+the Deployments roll. --file carries episodes closed before the wipe. --admin
+carries those closed after it by the old image.
+
+The projector's first-write-wins makes overlap with the per-close emit and
+re-runs harmless.
+
+The Job's status does not prove delivery. Count projector rows.
+*/ -}}
+{{- define "openddil.failureEpisodesBackfillJob" -}}
+{{- $root := .root -}}
+{{- $key := .key -}}
+{{- $file := .file -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ $key }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "30"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "openddil.podLabels" $root | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "failure-episodes-backfill-%s" $key) "root" $root) | nindent 8 }}
+      {{- if $file }}
+      annotations:
+        checksum/episodes: {{ $file | sha256sum | quote }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backfill
+          image: {{ include "openddil.image" (dict "name" $root.Values.cmService.image.name "tag" $root.Values.cmService.image.tag "digest" $root.Values.cmService.image.digest "root" $root) }}
+          imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.cmService.image.pullPolicy "root" $root) }}
+          workingDir: /app/src
+          command: ["python", "/app/src/backfill_failure_episodes.py"]
+          args:
+            - --admin
+            - {{ .admin | quote }}
+            {{- if $file }}
+            - --file
+            - /backfill/episodes.jsonl
+            {{- end }}
+          env:
+            - name: CM_KAFKA_BROKERS
+              value: {{ .broker | quote }}
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          {{- if $file }}
+          volumeMounts:
+            - name: episodes
+              mountPath: /backfill
+              readOnly: true
+          {{- end }}
+      {{- if $file }}
+      volumes:
+        - name: episodes
+          configMap:
+            name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ $key }}
+      {{- end }}
+{{- if $file }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ $key }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "25"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  episodes.jsonl: {{ $file | toJson }}
+{{- end }}
+{{- end }}
+{{- if .Values.cmService.failureEpisodesBackfill.enabled }}
+{{- $fe := .Values.cmService.failureEpisodesBackfill }}
+{{- $feFiles := $fe.files | default dict }}
+---
+{{ include "openddil.failureEpisodesBackfillJob" (dict "root" . "key" "hub"
+    "file" (get $feFiles "hub" | default "")
+    "admin" (printf "http://%s-restate-server%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.restate.adminPort))
+    "broker" (printf "%s-redpanda-hq%s:%d" .Release.Name (include "openddil.svcDomain" .) (int .Values.redpandaHq.kafkaPort))) }}
+{{- if .Values.tierNode.enabled }}
+{{- $root := . }}
+{{- $tn := .Values.tierNode }}
+{{- range $tier := (include "openddil.tierList" . | fromYamlArray) }}
+{{- if or (not $tn.tiers) (has $tier.id $tn.tiers) }}
+---
+{{ include "openddil.failureEpisodesBackfillJob" (dict "root" $root "key" $tier.id
+    "file" (get $feFiles $tier.id | default "")
+    "admin" (printf "http://%s-tier-restate-%s%s:9070" $root.Release.Name $tier.id (include "openddil.svcDomain" $root))
+    "broker" (printf "%s-redpanda-%s%s:%d" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) (int $root.Values.redpandaEdge.internalPort))) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
