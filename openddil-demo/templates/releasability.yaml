@@ -180,7 +180,7 @@ spec:
         # A silent rename during transport is exactly how a reviewed file and
         # a running file drift apart, so: same content, different name, said
         # out loud here and in users.yaml's header.
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         # THE ENTITLEMENTS CORPUS, SELECTED BY ENV RATHER THAN BY TEMPLATE.
         #
         # A separate init container from the one above, for one reason: the
@@ -201,7 +201,7 @@ spec:
         # silent rename in transport is how a reviewed file and a running file
         # drift apart.
         - name: policy-loader
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -329,7 +329,7 @@ spec:
         # TO SEE A RELOAD: this container logs "policy-sync: <name> updated ...",
         # then topaz logs WARN "Processed file watch event." with err.
         - name: policy-sync
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -463,7 +463,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -992,7 +992,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         {{- if include "openddil.realmUsersOverlay" $root }}
         # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson).
         # Merged here, before prepare-realm, because merging JSON arrays is not

@@ -113,7 +113,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         # Stages this tier's realm from the bundle's realm artefact. Refuses
         # (exit 1, reason printed) before Keycloak starts.
         - name: import-realm

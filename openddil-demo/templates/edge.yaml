@@ -278,7 +278,7 @@ spec:
         # and exactly why the gap was invisible on 2026-08-28: the pipeline
         # stayed green, no pod complained, and the health axis simply never
         # populated. A dependency that fails safely still has to be declared.
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
             (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
@@ -498,7 +498,7 @@ spec:
         # gen/python bindings (those are for the Python services). /ontology
         # is the sim-dis-mapping.yaml ontology file. Init container also
         # delivers the base connect.yaml and the dynamic mappings.
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/proto"      "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
             (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
@@ -669,7 +669,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python/openddil" "dst" "app-openddil")
           ) "root" $root) | nindent 8 }}
       containers:
@@ -989,7 +989,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" $root) | nindent 8 }}
       containers:
