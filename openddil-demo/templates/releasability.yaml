@@ -180,7 +180,7 @@ spec:
         # A silent rename during transport is exactly how a reviewed file and
         # a running file drift apart, so: same content, different name, said
         # out loud here and in users.yaml's header.
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         # THE ENTITLEMENTS CORPUS, SELECTED BY ENV RATHER THAN BY TEMPLATE.
         #
         # A separate init container from the one above, for one reason: the
@@ -456,7 +456,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -969,7 +969,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         {{- if include "openddil.realmUsersOverlay" $root }}
         # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson).
         # Merged here, before prepare-realm, because merging JSON arrays is not

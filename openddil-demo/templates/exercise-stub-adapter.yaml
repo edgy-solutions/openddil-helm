@@ -65,7 +65,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "demo/exercise" "dst" "app")
           ) "root" $root) | nindent 8 }}
       containers:

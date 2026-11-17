@@ -168,13 +168,18 @@ Usage:
       mountPath: /ontology
       subPath: ontology
 
+Optional `pin` (true on Deployments and StatefulSets, never on Jobs): the loader
+image digest comes from openddil.bundleLoaderDigest.
+
 Each entry: src is the path under /bundle/ in the bundle image; dst is
 the top-level name under /shared/ in the emptyDir. Main container then
 subPath-mounts /shared/<dst> at the target absolute path.
 */}}
 {{- define "openddil.bundleInit" -}}
+{{- $loaderDigest := .root.Values.bundle.image.digest -}}
+{{- if .pin -}}{{- $loaderDigest = include "openddil.bundleLoaderDigest" (dict "root" .root "paths" .paths) -}}{{- end -}}
 - name: bundle-loader
-  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "digest" .root.Values.bundle.image.digest "root" .root) }}
+  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "digest" $loaderDigest "root" .root) }}
   imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .root.Values.bundle.image.pullPolicy "root" .root) }}
   command:
     - sh
@@ -320,6 +325,64 @@ checksum/dis-condition-baselines: {{ . | sha256sum | quote }}
 {{- end }}
 
 {{/*
+openddil.bundleLoaderDigest -- the digest a Deployment's or StatefulSet's
+bundle-loader image names. Takes
+(dict "root" $root "paths" <the list of dicts passed to openddil.bundleInit>).
+Returns the empty string when bundle.image.digest is empty, as today.
+
+The loader image names the OLDEST earlier bundle from which this workload's
+files are unchanged, so a bundle bump leaves its pod template byte-identical
+unless a file it copies changed. bundle.contentDigestHistory lists earlier
+bundles' content digests, oldest first, in the shape of bundle.contentDigests.
+Only a contiguous run back from the newest history entry counts: the walk
+stops at the first entry whose digest for any src in `paths` differs from the
+current one. A src absent from an entry never matches, so missing data moves
+the loader to a newer bundle (a restart, the safe direction).
+
+Rules: outside PINNED mode (digest empty, or contentDigests.bundleDigest not
+equal to it) or with empty `paths`, the current digest is returned and the
+history is ignored. Otherwise every history entry is validated (a sha256
+digest, no duplicates, none equal to the current digest) and a bad one fails
+the render naming its index. Jobs never use this: they take the current
+bundle, so a schema migration is always the newest.
+
+Every digest listed in the history must stay pullable from the registry for
+as long as it is listed: a pod rescheduled onto a new node pulls it again.
+*/}}
+{{- define "openddil.bundleLoaderDigest" -}}
+{{- $root := .root -}}
+{{- $paths := .paths | default list -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- $cand := $digest -}}
+{{- if and $digest $paths (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- $hist := $root.Values.bundle.contentDigestHistory | default list -}}
+{{- $seen := dict -}}
+{{- range $i, $e := $hist -}}
+{{- $bd := toString $e.bundleDigest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $bd) -}}{{- fail (printf "bundle.contentDigestHistory[%d].bundleDigest %q is not sha256:<64 hex>" $i $bd) -}}{{- end -}}
+{{- if eq $bd (toString $digest) -}}{{- fail (printf "bundle.contentDigestHistory[%d] equals the current bundle.image.digest" $i) -}}{{- end -}}
+{{- if hasKey $seen $bd -}}{{- fail (printf "bundle.contentDigestHistory[%d] repeats the digest of entry %v" $i (get $seen $bd)) -}}{{- end -}}
+{{- $_ := set $seen $bd $i -}}
+{{- end -}}
+{{- $run := true -}}
+{{- range $k := until (len $hist) -}}
+{{- if $run -}}
+{{- $e := index $hist (sub (sub (len $hist) 1) $k) -}}
+{{- $ep := $e.paths | default dict -}}
+{{- $ok := true -}}
+{{- range $p := $paths -}}
+{{- $ev := index $ep $p.src -}}
+{{- if or (not $ev) (ne (toString $ev) (toString (index ($cd.paths | default dict) $p.src))) -}}{{- $ok = false -}}{{- end -}}
+{{- end -}}
+{{- if $ok -}}{{- $cand = $e.bundleDigest -}}{{- else -}}{{- $run = false -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $cand -}}
+{{- end }}
+
+{{/*
 openddil.bundleContent -- the bundle-derived lines of a checksum input, for
 the bundle paths ONE Deployment copies. Takes
 (dict "root" $root "paths" <the list of dicts passed to openddil.bundleInit>).
@@ -339,11 +402,14 @@ Two modes:
     content digests existed.
 An empty `paths` renders nothing in either mode.
 
-Not covered: the bundle-loader init container's image stays the bundle
-reference, so a bundle bump still changes the pod template of every
-Deployment that has a bundleInit. This helper only keeps the checksum
-annotations and the realm version still. The bundle build emitting these
-digests (rather than a values file) is the follow-up.
+Not covered: a bundle-loader that is not pinned (a Job's, or any caller that
+omits `pin`) still names the current bundle reference. A Deployment or
+StatefulSet's loader names the digest from openddil.bundleLoaderDigest, which
+follows bundle.contentDigestHistory: with no history, or outside PINNED mode,
+that is the current bundle and a bump still changes its pod template. Digests
+in the history must stay pullable from the registry for as long as they are
+listed. The bundle build emitting these digests (rather than a values file) is
+the follow-up.
 */}}
 {{- define "openddil.bundleContent" -}}
 {{- $root := .root -}}
@@ -2933,7 +2999,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"

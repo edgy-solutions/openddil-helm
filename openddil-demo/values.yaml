@@ -59,6 +59,14 @@ bundle:
   contentDigests:
     bundleDigest: ""
     paths: {}
+  # Earlier bundles' content digests, oldest first. Same shape as contentDigests:
+  #   - bundleDigest: sha256:<64 hex>
+  #     paths: { <src>: <digest>, ... }
+  # Lets a Deployment's bundle-loader keep the oldest earlier bundle whose files
+  # for that Deployment equal the current ones (see openddil.bundleLoaderDigest).
+  # Every digest listed here must stay pullable from the registry for as long as
+  # it is listed: a pod rescheduled onto a new node pulls it again.
+  contentDigestHistory: []
 
 # --- Hook Jobs (topic-init, postgres-schema-init, *-bootstrap) --------------
 # The four Helm-hook Jobs were previously shipped with NO resources block,

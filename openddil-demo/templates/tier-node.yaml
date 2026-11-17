@@ -658,7 +658,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" $root) | nindent 8 }}
       containers:
@@ -1171,7 +1171,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -1581,7 +1581,7 @@ spec:
           root reads to decide something, a tier reading the same store must
           read too.
         */ -}}
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology" "dst" "ontology")
             (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
@@ -1699,7 +1699,7 @@ spec:
         # decoration — without them the service produces meaningless CM
         # output. Its deployment surface diverged from fusion's even though
         # the two are structural twins at the code layer.
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/baselines" "dst" "baselines")
           ) "root" $root) | nindent 8 }}
@@ -1822,7 +1822,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
@@ -2175,7 +2175,7 @@ spec:
       # auditable because every decision records the policy and corpus
       # versions that produced it.
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" $bundlePaths "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         - name: policy-loader
           image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
