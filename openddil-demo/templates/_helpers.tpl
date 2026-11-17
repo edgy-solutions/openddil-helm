@@ -1780,6 +1780,20 @@ mappings:
     consumer_group: tier-projector-element-inventory-{{ $tier.id }}
     decode_as: json
     mode: upsert
+  # Closed failure episodes, projected at the tier that produced them.
+  # First write wins (custom handler, ON CONFLICT DO NOTHING); never pruned.
+  - topic: failure-episodes
+    handler: failure_episodes
+    table: failure_episodes
+    consumer_group: tier-projector-failure-episodes-{{ $tier.id }}
+    decode_as: json
+    mode: custom
+  - topic: failure-episodes-withheld
+    handler: failure_episodes_withheld
+    table: failure_episodes_withheld
+    consumer_group: tier-projector-failure-episodes-withheld-{{ $tier.id }}
+    decode_as: json
+    mode: custom
 {{- if $tier.hasChildren }}
   #
   # AN INTERMEDIATE PROJECTS ITS OWN ROLLUPS. The eight mappings above
@@ -2244,6 +2258,9 @@ drift=0
 # partitions, and a mismatch must not fail the hook (a failed hook leaves
 # the release pending-upgrade). The hook's log is deleted on success, so
 # scripts/check-topic-partitions.sh is the durable report.
+# failure-episodes and failure-episodes-withheld are delete with infinite retention, not compact.
+# The key is the asset id, and compaction would keep only each asset's latest episode. The topic
+# carries a durable record until the projector has written it.
 for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
@@ -2268,6 +2285,8 @@ for spec in \
   "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
   "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "failure-episodes|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
+  "failure-episodes-withheld|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
   "link-heartbeat|-p 1 -r 1 -c retention.ms=3600000 -c cleanup.policy=delete" \
 {{- range .extra }}
   {{ . | quote }} \
