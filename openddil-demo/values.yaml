@@ -902,6 +902,14 @@ cmService:
   # Additional baselines come from the top-level `baselinesLayer` value.
   # A patch that adds the same volume/mount/env names
   # (cm-baselines-overlay, /baselines-overlay) is redundant but harmless.
+  # One-shot backfill of failure-episodes from AssetCM state and export files.
+  # Enabled for one upgrade at a time; the next upgrade's values turn it off.
+  failureEpisodesBackfill:
+    enabled: false
+    # Per-AssetCM export lines (JSONL), keyed "hub" or the tier id. Usually set
+    # with --set-file cmService.failureEpisodesBackfill.files.<key>=<path>.
+    # A key with no entry or an empty string means live state only (--admin).
+    files: {}
 
 # The first write path into the CM event log: an authenticated report
 # becomes one CmEvent on the tier's cm-events topic. Disabled by default so

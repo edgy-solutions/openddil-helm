@@ -1533,7 +1533,7 @@ ignores unit strings.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-15-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+consumer-group set (SPEC-consumer-declarations.md Part A): 19 groups.
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1552,9 +1552,16 @@ from this chart.
 Per-edge projectors also carry the parts-availability mapping (the root
 config is shared), but their broker has no such topic, so that group sits
 idle there, same as the regional rollups.
+
+projector-failure-episodes and projector-failure-episodes-withheld come
+with the failure-episodes mappings in the projector's baked config. They
+are declared with the image that carries them, not before: a group listed
+here that the running image lacks is a declared group nobody runs.
+scripts/tests/test_projector_groups_render.sh holds this list against
+the rendered annotations and, given PROJECTOR_CONFIG, against that file.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-failure-episodes projector-failure-episodes-withheld projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1776,6 +1783,20 @@ mappings:
     consumer_group: tier-projector-element-inventory-{{ $tier.id }}
     decode_as: json
     mode: upsert
+  # Closed failure episodes, projected at the tier that produced them.
+  # First write wins (custom handler, ON CONFLICT DO NOTHING); never pruned.
+  - topic: failure-episodes
+    handler: failure_episodes
+    table: failure_episodes
+    consumer_group: tier-projector-failure-episodes-{{ $tier.id }}
+    decode_as: json
+    mode: custom
+  - topic: failure-episodes-withheld
+    handler: failure_episodes_withheld
+    table: failure_episodes_withheld
+    consumer_group: tier-projector-failure-episodes-withheld-{{ $tier.id }}
+    decode_as: json
+    mode: custom
 {{- if $tier.hasChildren }}
   #
   # AN INTERMEDIATE PROJECTS ITS OWN ROLLUPS. The eight mappings above
@@ -2240,6 +2261,9 @@ drift=0
 # partitions, and a mismatch must not fail the hook (a failed hook leaves
 # the release pending-upgrade). The hook's log is deleted on success, so
 # scripts/check-topic-partitions.sh is the durable report.
+# failure-episodes and failure-episodes-withheld are delete with infinite retention, not compact.
+# The key is the asset id, and compaction would keep only each asset's latest episode. The topic
+# carries a durable record until the projector has written it.
 for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
@@ -2264,6 +2288,8 @@ for spec in \
   "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
   "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "failure-episodes|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
+  "failure-episodes-withheld|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
   "link-heartbeat|-p 1 -r 1 -c retention.ms=3600000 -c cleanup.policy=delete" \
 {{- range .extra }}
   {{ . | quote }} \
