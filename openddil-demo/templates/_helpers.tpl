@@ -1578,14 +1578,17 @@ Usage: include "openddil.faustChangelogTopic" (dict "appId" ... "table" ...)
 {{/*
 openddil.faustEdgeTables -- the Faust table names faust-edge's app keeps:
 one holding each asset's latest decoded state, one holding the running
-prognostics accumulators. CODE DEFAULTS baked into the faust-edge app's own
-table definitions (not visible in this chart, which has no Faust source to
-read them from) -- confirmed from a live topic census of the resulting
-changelog topics, not invented here.
+prognostics accumulators, and one holding the thermal unit's runaway state
+(the declared thermal unit's state_table). CODE DEFAULTS baked into the
+faust-edge app's own table definitions (not visible in this chart, which has
+no Faust source to read them from). The first two were confirmed from a
+live topic census of their changelog topics; the third is read from the
+app's produces.yaml and its tests. None is invented here.
 */}}
 {{- define "openddil.faustEdgeTables" -}}
 - asset_state
 - prognostics_accumulators
+- thermal_runaway_state
 {{- end }}
 
 {{/*
