@@ -144,10 +144,7 @@ spec:
             (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
             (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
           ) }}
-{{- $checksumPaths := concat $bundlePaths (list
-            (dict "src" (printf "demo/policy/%s.yaml" $root.Values.releasability.policyVariant))
-            (dict "src" "demo/policy/destinations.yaml")
-          ) }}
+{{- $checksumPaths := include "openddil.topazHqChecksumPaths" $root | fromJsonArray }}
       annotations:
         # Roll the pod when the policy CONTENT changes, not on every helm
         # revision. The bundle image is a rolling tag, so without this a helm

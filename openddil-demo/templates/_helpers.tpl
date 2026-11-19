@@ -434,6 +434,21 @@ revision={{ $root.Release.Revision }}
 {{- end }}
 
 {{/*
+Paths hashed by topaz-hq's checksum/policy: its two bundleInit files plus the
+variant corpus files the policy loader reads. topaz-hq's checksum/policy and the
+egress gate/intake checksum/registries (liveReload off) share this list so they
+roll on the same upgrades. Takes the chart root; returns JSON.
+*/}}
+{{- define "openddil.topazHqChecksumPaths" -}}
+{{- toJson (list
+  (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+  (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+  (dict "src" (printf "demo/policy/%s.yaml" .Values.releasability.policyVariant))
+  (dict "src" "demo/policy/destinations.yaml")
+) -}}
+{{- end }}
+
+{{/*
 Content input for the identity pods' `checksum/policy` annotation
 (topaz-hq, pep, keycloak, tier-pep — see each pod template's WHY comment)
 and the intake pods' `checksum/bundle` / the egress `checksum/registries`.
