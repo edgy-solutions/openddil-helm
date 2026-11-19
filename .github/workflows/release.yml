@@ -11,6 +11,7 @@ on:
     inputs:
       expected: {description: 'image=sha256:… lines', required: false, default: ''}
       dry_run: {type: boolean, default: true}
+      commit: {description: 'dry run only: resolve the builds of this commit', required: false, default: ''}
 permissions:
   contents: write
   packages: write
@@ -22,3 +23,4 @@ jobs:
       suite_manifest: "yes"
       expected: ${{ inputs.expected || '' }}
       dry_run: ${{ inputs.dry_run || false }}
+      commit: ${{ inputs.commit || '' }}

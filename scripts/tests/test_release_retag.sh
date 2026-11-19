@@ -179,4 +179,16 @@ n="$(grep -n 'crane ' "$WF" | grep -c latest)"
 if [ "$n" = "0" ]; then pass "workflow: no crane command line names latest"
 else fail "workflow: $n crane lines name latest"; fi
 
+if grep -q 'GITHUB_EVENT_NAME" = workflow_dispatch ] && \[ "\$DRY_RUN" = true ]' "$WF" \
+   && grep -q 'the commit input is for dry runs only' "$WF"; then
+  pass "workflow: off a tag, and with a commit input, only a dry run proceeds"
+else fail "workflow: a real run could start off a tag or on a named commit"; fi
+
+n=0
+for f in "$ROOT/release/caller-template.yml" "$ROOT/.github/workflows/release.yml"; do
+  grep -q "commit: \${{ inputs.commit || '' }}" "$f" || n=$((n + 1))
+done
+if [ "$n" = "0" ]; then pass "workflow: the callers pass the commit input through"
+else fail "workflow: $n caller(s) do not pass the commit input"; fi
+
 if [ "$FAIL" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; exit 1; fi

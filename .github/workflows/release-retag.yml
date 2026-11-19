@@ -8,6 +8,12 @@ name: Release by retag
 # (scripts/release/find_build.py checks SLSA provenance), add the version tag to
 # that digest, and create the GitHub release with the digests in the notes.
 #
+# Dry run off a tag: a workflow_dispatch from a branch with dry_run true
+# resolves each image's build of `commit` (default: the branch head), reports
+# per image whether this repo's token can list package versions and which
+# digest a release would name, and continues past an image with no build. It
+# tags nothing and creates no release. A real run needs a tag.
+#
 # Suite mode (plain v* tag with suite_manifest set): tags nothing. Reads
 # release/suite-<version>.yaml from the tagged commit, checks it, checks that
 # every listed image and the bundle already carry their tag at the listed
@@ -33,6 +39,10 @@ on:
         description: "Non-empty: a plain v* tag runs suite mode"
         type: string
         default: ""
+      commit:
+        description: "Dry run only: resolve the builds of this commit instead of the ref's"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -49,6 +59,7 @@ jobs:
       EXPECTED: ${{ inputs.expected }}
       DRY_RUN: ${{ inputs.dry_run }}
       SUITE_MANIFEST: ${{ inputs.suite_manifest }}
+      COMMIT_IN: ${{ inputs.commit }}
     steps:
       - name: Parse the tag
         id: tag
@@ -70,10 +81,19 @@ jobs:
               *) echo "::error::image-scoped tag names $img, which is not in images ($images)"; exit 1 ;;
             esac
             if [ "$img" = latest ]; then echo "::error::image name latest is refused"; exit 1; fi
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
+            version="v0.0.0-dryrun"
+            scope="$images"
           else
-            echo "::error::tag '$ref' is not vX.Y.Z[-rcN] or <image>/vX.Y.Z[-rcN]. A dispatch run must be started from a tag ref."
+            echo "::error::ref '$ref' is not vX.Y.Z[-rcN] or <image>/vX.Y.Z[-rcN]. Off a tag, only a dispatch with dry_run true runs."
             exit 1
           fi
+          if [ -n "$COMMIT_IN" ] && [ "$DRY_RUN" != true ]; then
+            echo "::error::the commit input is for dry runs only; a real run releases the tagged commit"
+            exit 1
+          fi
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/${COMMIT_IN:-$GITHUB_SHA}" --jq .sha)"
+          [ -n "$commit" ] || { echo "::error::commit ${COMMIT_IN:-$GITHUB_SHA} not found"; exit 1; }
           case "$version" in *latest*) echo "::error::version names latest"; exit 1 ;; esac
           prerelease=false
           case "$version" in *-rc*) prerelease=true ;; esac
@@ -82,8 +102,9 @@ jobs:
             echo "scope=$scope"
             echo "mode=$mode"
             echo "prerelease=$prerelease"
+            echo "commit=$commit"
           } >> "$GITHUB_OUTPUT"
-          echo "mode=$mode version=$version scope=[$scope] commit=$GITHUB_SHA"
+          echo "mode=$mode version=$version scope=[$scope] commit=$commit dry_run=$DRY_RUN"
 
       - name: Check out the tagged commit
         uses: actions/checkout@v4
@@ -116,20 +137,51 @@ jobs:
         run: |
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
 
+      - name: Package API (dry run)
+        if: env.DRY_RUN == 'true'
+        env:
+          SCOPE: ${{ steps.tag.outputs.scope }}
+        run: |
+          set -uo pipefail
+          echo "### Package API, token of $GITHUB_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
+          for img in $SCOPE; do
+            if out="$(gh api "/orgs/edgy-solutions/packages/container/openddil%2F$img/versions?per_page=1" --jq length 2>&1)"; then
+              line="package-api $img: ok"
+            else
+              line="package-api $img: refused: $(printf '%s' "$out" | tail -n1 | cut -c1-160)"
+            fi
+            echo "$line"
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Find the builds
         id: find
         if: steps.tag.outputs.mode == 'retag'
         env:
           SCOPE: ${{ steps.tag.outputs.scope }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
         run: |
           set -euo pipefail
           : > results.jsonl
+          fails=0
+          echo "### Builds of $COMMIT" >> "$GITHUB_STEP_SUMMARY"
           for img in $SCOPE; do
             exp="$(printf '%s\n' "$EXPECTED" | sed -n "s/^[[:space:]]*$img=//p" | head -n1 | tr -d '[:space:]')"
-            python3 tools/scripts/release/find_build.py --image "$img" --repo "$GITHUB_REPOSITORY" \
-              --commit "$GITHUB_SHA" --expected "$exp" >> results.jsonl
+            if python3 tools/scripts/release/find_build.py --image "$img" --repo "$GITHUB_REPOSITORY" \
+                 --commit "$COMMIT" --expected "$exp" >> results.jsonl 2> find.err; then
+              line="find $img: $(tail -n1 results.jsonl | jq -r .digest)"
+            else
+              line="find $img: $(tail -n1 find.err)"
+              fails=$((fails + 1))
+            fi
+            cat find.err >&2
+            echo "$line"
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
           done
-          cat results.jsonl
+          if [ "$fails" -gt 0 ] && [ "$DRY_RUN" != true ]; then
+            echo "::error::$fails image(s) have no single build of $COMMIT"
+            exit 1
+          fi
 
       - name: Plan the retag
         id: plan
