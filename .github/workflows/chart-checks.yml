@@ -218,6 +218,9 @@ jobs:
       # the matching cm Deployment and bootstrap Job, optional --file ConfigMap. The renders are piped, never saved.
       - name: Failure-episodes backfill render test
         run: bash scripts/tests/test_failure_episodes_backfill_render.sh
+      # releasability.pep.env: the default, an overlay, a null, and the refusals, piped (the render is never saved).
+      - name: PEP env render test
+        run: bash scripts/tests/test_pep_env_render.sh
 
       # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
       # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments
@@ -249,6 +252,11 @@ jobs:
       # the theater topology draws). Exit 2 (no python with PyYAML) fails the step: a skip would read green.
       - name: Link traffic and tier tree render test
         run: bash scripts/tests/test_link_traffic_render.sh
+
+      # The per-element band events stay on an edge-local topic: routed by a tier-managed edge only, read by the
+      # owning leaf tier projector, on no bridge or uplink list. Exit 2 (no python with PyYAML) fails the step.
+      - name: Element band events render test
+        run: bash scripts/tests/test_element_band_events_render.sh
 
       # One plant: the tier tree helper with every parent forced to root (the declared tree, not the uplink
       # tree, would fail the same check). The test must exit non-zero AND print the tiers check it breaks.

@@ -103,14 +103,17 @@ E = os.environ['OPENDDIL_ELECTRIC_URL'].rstrip('/')
 TABLES = '''asset_capability_state asset_cm_state asset_logistics_status
 edge_buffer_status link_status region_fleet_summary region_top_factors region_wear_trends
 tactical_events telemetry_latest_state'''.split()
+S = os.environ.get('OPENDDIL_ELECTRIC_SECRET')
 total = 0
 for tb in TABLES:
-    u = E + '/v1/shape?' + urllib.parse.urlencode([('table', tb), ('offset', '-1')])
+    q = [('table', tb), ('offset', '-1')]
+    if S: q.append(('secret', S))  # secure mode: the PEP's own secret, never printed
+    u = E + '/v1/shape?' + urllib.parse.urlencode(q)
     try:
         with urllib.request.urlopen(u, timeout=30) as r:
             n = len(r.read())
     except Exception as e:
-        print('%s ERR %s' % (tb, str(e)[:40])); continue
+        print('%s ERR %s %s' % (tb, type(e).__name__, getattr(e, 'code', ''))); continue
     total += n
     print('%s %d' % (tb, n))
 print('TOTAL %d' % total)
