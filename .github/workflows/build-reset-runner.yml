@@ -17,7 +17,6 @@ on:
       - "scripts/**"
       - "reset-runner/**"
       - ".github/workflows/build-reset-runner.yml"
-    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:

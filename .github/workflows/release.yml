@@ -1,0 +1,26 @@
+# This repo's own release caller. A plain v* tag runs suite mode (checks
+# release/suite-<version>.yaml against the registry and writes the release
+# notes; tags no images). reset-runner/v... and runtime-bundle/v... retag those
+# images. A dispatch run is a dry run by default. The build workflows keep
+# pushing sha-* / latest on their own.
+name: release
+on:
+  push:
+    tags: ['v*', '*/v*']
+  workflow_dispatch:
+    inputs:
+      expected: {description: 'image=sha256:… lines', required: false, default: ''}
+      dry_run: {type: boolean, default: true}
+      commit: {description: 'dry run only: resolve the builds of this commit', required: false, default: ''}
+permissions:
+  contents: write
+  packages: write
+jobs:
+  retag:
+    uses: edgy-solutions/openddil-helm/.github/workflows/release-retag.yml@master
+    with:
+      images: "reset-runner runtime-bundle"
+      suite_manifest: "yes"
+      expected: ${{ inputs.expected || '' }}
+      dry_run: ${{ inputs.dry_run || false }}
+      commit: ${{ inputs.commit || '' }}

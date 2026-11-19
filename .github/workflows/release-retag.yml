@@ -1,0 +1,282 @@
+name: Release by retag
+
+# Reusable. A release names, by digest, images that were already built. It never
+# rebuilds and never moves the floating tag. Called from a short workflow in
+# each image repo (see release/caller-template.yml), triggered on a version tag.
+#
+# Retag mode: for each image, find the digest built from the tagged commit
+# (scripts/release/find_build.py checks SLSA provenance), add the version tag to
+# that digest, and create the GitHub release with the digests in the notes.
+#
+# Dry run off a tag: a workflow_dispatch from a branch with dry_run true
+# resolves each image's build of `commit` (default: the branch head), reports
+# per image whether this repo's token can list package versions and which
+# digest a release would name, and continues past an image with no build. It
+# tags nothing and creates no release. A real run needs a tag.
+#
+# Suite mode (plain v* tag with suite_manifest set): tags nothing. Reads
+# release/suite-<version>.yaml from the tagged commit, checks it, checks that
+# every listed image and the bundle already carry their tag at the listed
+# digest, and creates the release with the whole manifest in the notes.
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: "GHCR package names under ghcr.io/edgy-solutions/openddil/, newline or space separated"
+        type: string
+        required: true
+      expected:
+        description: "Lines of <image>=sha256:<64 hex>; the found digest must equal it"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Resolve, check and print the plan; tag nothing, create no release"
+        type: boolean
+        default: false
+      suite_manifest:
+        description: "Non-empty: a plain v* tag runs suite mode"
+        type: string
+        default: ""
+      commit:
+        description: "Dry run only: resolve the builds of this commit instead of the ref's"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REGISTRY: ghcr.io/edgy-solutions/openddil
+      IMAGES: ${{ inputs.images }}
+      EXPECTED: ${{ inputs.expected }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      SUITE_MANIFEST: ${{ inputs.suite_manifest }}
+      COMMIT_IN: ${{ inputs.commit }}
+    steps:
+      - name: Parse the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          images="$(printf '%s' "$IMAGES" | tr -s ' \n\r\t' '    ' | sed 's/^ //; s/ $//')"
+          ref="$GITHUB_REF_NAME"
+          vre='v[0-9]+\.[0-9]+\.[0-9]+(-rc\.?[0-9]+)?'
+          mode=retag
+          if [[ "$ref" =~ ^($vre)$ ]]; then
+            version="$ref"
+            scope="$images"
+            if [ -n "$SUITE_MANIFEST" ]; then mode=suite; scope=""; fi
+          elif [[ "$ref" =~ ^([a-z0-9-]+)/($vre)$ ]]; then
+            img="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
+            case " $images " in
+              *" $img "*) scope="$img" ;;
+              *) echo "::error::image-scoped tag names $img, which is not in images ($images)"; exit 1 ;;
+            esac
+            if [ "$img" = latest ]; then echo "::error::image name latest is refused"; exit 1; fi
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
+            version="v0.0.0-dryrun"
+            scope="$images"
+          else
+            echo "::error::ref '$ref' is not vX.Y.Z[-rcN] or <image>/vX.Y.Z[-rcN]. Off a tag, only a dispatch with dry_run true runs."
+            exit 1
+          fi
+          if [ -n "$COMMIT_IN" ] && [ "$DRY_RUN" != true ]; then
+            echo "::error::the commit input is for dry runs only; a real run releases the tagged commit"
+            exit 1
+          fi
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/${COMMIT_IN:-$GITHUB_SHA}" --jq .sha)"
+          [ -n "$commit" ] || { echo "::error::commit ${COMMIT_IN:-$GITHUB_SHA} not found"; exit 1; }
+          case "$version" in *latest*) echo "::error::version names latest"; exit 1 ;; esac
+          prerelease=false
+          case "$version" in *-rc*) prerelease=true ;; esac
+          {
+            echo "version=$version"
+            echo "scope=$scope"
+            echo "mode=$mode"
+            echo "prerelease=$prerelease"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode version=$version scope=[$scope] commit=$commit dry_run=$DRY_RUN"
+
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          path: src
+          persist-credentials: false
+
+      # The tools come from the default branch of the openddil-helm repo, which
+      # is also what the caller's `uses:` line names.
+      - name: Check out the release tools
+        uses: actions/checkout@v4
+        with:
+          repository: edgy-solutions/openddil-helm
+          ref: master
+          path: tools
+          persist-credentials: false
+
+      - name: Install crane
+        if: steps.tag.outputs.mode == 'retag' || steps.tag.outputs.mode == 'suite'
+        run: |
+          set -euo pipefail
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          echo "$GITHUB_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Python and PyYAML
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+
+      - name: Package API (dry run)
+        if: env.DRY_RUN == 'true'
+        env:
+          SCOPE: ${{ steps.tag.outputs.scope }}
+        run: |
+          set -uo pipefail
+          echo "### Package API, token of $GITHUB_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
+          for img in $SCOPE; do
+            if out="$(gh api "/orgs/edgy-solutions/packages/container/openddil%2F$img/versions?per_page=1" --jq length 2>&1)"; then
+              line="package-api $img: ok"
+            else
+              line="package-api $img: refused: $(printf '%s' "$out" | tail -n1 | cut -c1-160)"
+            fi
+            echo "$line"
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Find the builds
+        id: find
+        if: steps.tag.outputs.mode == 'retag'
+        env:
+          SCOPE: ${{ steps.tag.outputs.scope }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          : > results.jsonl
+          fails=0
+          echo "### Builds of $COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          for img in $SCOPE; do
+            exp="$(printf '%s\n' "$EXPECTED" | sed -n "s/^[[:space:]]*$img=//p" | head -n1 | tr -d '[:space:]')"
+            if python3 tools/scripts/release/find_build.py --image "$img" --repo "$GITHUB_REPOSITORY" \
+                 --commit "$COMMIT" --expected "$exp" >> results.jsonl 2> find.err; then
+              line="find $img: $(tail -n1 results.jsonl | jq -r .digest)"
+            else
+              line="find $img: $(tail -n1 find.err)"
+              fails=$((fails + 1))
+            fi
+            cat find.err >&2
+            echo "$line"
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$fails" -gt 0 ] && [ "$DRY_RUN" != true ]; then
+            echo "::error::$fails image(s) have no single build of $COMMIT"
+            exit 1
+          fi
+
+      - name: Plan the retag
+        id: plan
+        if: steps.tag.outputs.mode == 'retag'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          : > plan.txt
+          while read -r line; do
+            [ -n "$line" ] || continue
+            img="$(printf '%s' "$line" | jq -r .image)"
+            dig="$(printf '%s' "$line" | jq -r .digest)"
+            echo "crane tag $REGISTRY/$img@$dig $VERSION" >> plan.txt
+          done < results.jsonl
+          cat plan.txt
+
+      - name: Guard, no floating tag in the plan
+        if: steps.tag.outputs.mode == 'retag'
+        run: |
+          if grep -q ':latest\b' plan.txt || grep -qw latest plan.txt; then
+            echo "::error::the plan names the floating tag"
+            exit 1
+          fi
+
+      - name: Retag
+        if: steps.tag.outputs.mode == 'retag' && env.DRY_RUN != 'true'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          while read -r line; do
+            [ -n "$line" ] || continue
+            img="$(printf '%s' "$line" | jq -r .image)"
+            dig="$(printf '%s' "$line" | jq -r .digest)"
+            ref="$REGISTRY/$img"
+            have="$(crane digest "$ref:$VERSION" 2>/dev/null || true)"
+            if [ "$have" = "$dig" ]; then
+              echo "$img: $VERSION already at $dig, skipping"
+            elif [ -n "$have" ]; then
+              echo "::error::$img: $VERSION is at $have, not $dig; version tags are immutable"
+              exit 1
+            else
+              crane tag "$ref@$dig" "$VERSION"
+              now="$(crane digest "$ref:$VERSION")"
+              [ "$now" = "$dig" ] || { echo "::error::$img: after tagging, $VERSION is $now, not $dig"; exit 1; }
+              echo "$img: tagged $VERSION at $dig"
+            fi
+          done < results.jsonl
+
+      - name: Check the suite is published
+        if: steps.tag.outputs.mode == 'suite'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          m="src/release/suite-$VERSION.yaml"
+          [ -f "$m" ] || { echo "::error::$m is not in the tagged commit"; exit 1; }
+          python3 tools/scripts/release/check_suite_manifest.py "$m"
+          python3 - "$m" "$VERSION" <<'PY'
+          import sys, yaml
+          m = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+          if str(m["suite"]) != sys.argv[2]:
+              sys.exit("suite %s does not equal the tag %s" % (m["suite"], sys.argv[2]))
+          PY
+          python3 tools/scripts/release/check_suite_published.py "$m"
+
+      - name: Release notes
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          MODE: ${{ steps.tag.outputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = suite ]; then
+            python3 tools/scripts/release/make_notes.py suite --repo "$GITHUB_REPOSITORY" \
+              --tag "$GITHUB_REF_NAME" --manifest "src/release/suite-$VERSION.yaml" > notes.md
+          else
+            python3 tools/scripts/release/make_notes.py retag --repo "$GITHUB_REPOSITORY" \
+              --tag "$GITHUB_REF_NAME" --results results.jsonl > notes.md
+          fi
+          cat notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or edit the release
+        if: env.DRY_RUN != 'true'
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          cd src
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file ../notes.md
+          else
+            flag=""
+            [ "$PRERELEASE" = true ] && flag="--prerelease"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file ../notes.md $flag
+          fi

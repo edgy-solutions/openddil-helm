@@ -24,6 +24,12 @@ on:
       - "scripts/tests/test_projector_groups_render.sh"
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
+      - "scripts/tests/test_release_retag.sh"
+      - "scripts/tests/release_retag_fixtures.py"
+      - "scripts/release/**"
+      - "release/**"
+      - ".github/workflows/release-retag.yml"
+      - ".github/workflows/release.yml"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -40,6 +46,12 @@ on:
       - "scripts/tests/test_projector_groups_render.sh"
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
+      - "scripts/tests/test_release_retag.sh"
+      - "scripts/tests/release_retag_fixtures.py"
+      - "scripts/release/**"
+      - "release/**"
+      - ".github/workflows/release-retag.yml"
+      - ".github/workflows/release.yml"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -410,3 +422,6 @@ jobs:
           grep -q "FAIL \[pass 5 pullable\]" /tmp/pass5-red.log \
             || { echo "RED CHECK FAILED: the check failed, but not in pass 5"; exit 1; }
           echo "red-check green: pass 5 rejected the pod spec with its pull secret removed"
+
+      - name: Release retag test
+        run: bash scripts/tests/test_release_retag.sh
