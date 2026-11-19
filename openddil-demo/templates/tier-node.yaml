@@ -1676,8 +1676,10 @@ metadata:
     # "asset-cm-state" is this tier's own writer of the same topic name
     # the root cm-service produces (hub.yaml), onto THIS TIER'S OWN broker
     # rather than hq. CODE DEFAULT, not a value this chart sets. Plus
-    # tactical-events, emitted by the same service.
-    openddil.io/produces-topics: {{ printf "%s/asset-cm-state %s/tactical-events" $tier.id $tier.id | quote }}
+    # tactical-events, emitted by the same service, and one record per
+    # closed failure episode (failure-episodes) with its refusals
+    # (failure-episodes-withheld), on the same broker.
+    openddil.io/produces-topics: {{ printf "%s/asset-cm-state %s/failure-episodes %s/failure-episodes-withheld %s/tactical-events" $tier.id $tier.id $tier.id $tier.id | quote }}
 spec:
   replicas: 1
   selector:

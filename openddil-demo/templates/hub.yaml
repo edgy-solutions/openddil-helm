@@ -397,8 +397,10 @@ metadata:
     # DEFAULT, not a value this chart sets -- CM_KAFKA_BROKERS below names
     # only the broker, never the topic. Same topic name, different
     # producer, exists per-tier as tier-cm-<id> (tier-node.yaml). It also
-    # emits tactical-events on CM transitions, same broker.
-    openddil.io/produces-topics: "hq/asset-cm-state hq/tactical-events"
+    # emits tactical-events on CM transitions, same broker, and one record
+    # per closed failure episode (failure-episodes) with its refusals
+    # (failure-episodes-withheld), same broker.
+    openddil.io/produces-topics: "hq/asset-cm-state hq/failure-episodes hq/failure-episodes-withheld hq/tactical-events"
 spec:
   replicas: 1
   selector:
