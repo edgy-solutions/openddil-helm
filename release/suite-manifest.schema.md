@@ -1,0 +1,36 @@
+# Suite manifest
+
+A suite manifest names, by digest, every image and the runtime bundle that make
+up one release. File name: `release/suite-<suite>.yaml`. Checked offline by
+`scripts/release/check_suite_manifest.py`; checked against the registry by
+`scripts/release/check_suite_published.py` (suite mode of the release workflow).
+
+```yaml
+suite: v2.0.0-rc1            # ^v\d+\.\d+\.\d+(-rc\.?\d+)?$
+status: proposed             # proposed | tagged | promoted
+promotedFrom: ""             # for a final version: the rc it promotes; its digests must be identical
+chart: {name: openddil-demo, version: "0.1.165", commit: ""}   # commit "" while unknown
+bundle:
+  image: ghcr.io/edgy-solutions/openddil/runtime-bundle
+  digest: sha256:…           # the chart's bundle.image.digest
+  loaderPins: []             # other bundle digests that per-workload loader pins name; empty when all use digest
+  sources: {contracts: <sha>, demo: <sha>, stack: <sha>, tactical-agents: <sha>, helm: <sha>}
+images:
+  - {name: projector, image: ghcr.io/edgy-solutions/openddil/projector, digest: sha256:…, repo: edgy-solutions/openddil-projector, commit: <40 hex>, tag: v2.0.0-rc1}
+blockers:                    # free text, public-safe; must be empty when status != proposed
+  - "…"
+```
+
+Rules:
+
+- Exactly these top-level keys; no others.
+- Every digest matches `^sha256:[0-9a-f]{64}$`; every commit matches `^[0-9a-f]{40}$`
+  (`chart.commit` may be `""` while proposed).
+- Image names are unique.
+- Each image `tag` is the git tag of its release: `<suite>` for a repo with one image,
+  `<name>/<suite>` for an image-scoped tag. The registry tag is the version part
+  (`<suite>`). The bundle carries the registry tag `<suite>`.
+- No digest or tag field contains `latest`.
+- `status` other than `proposed` requires empty `blockers` and a set `chart.commit`.
+- A final version (no `-rc`) with `promotedFrom` set must have the same image digests and
+  bundle digest as `suite-<promotedFrom>.yaml` beside it, when that file exists.

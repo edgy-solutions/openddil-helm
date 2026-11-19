@@ -1,0 +1,37 @@
+suite: v2.0.0-rc1
+status: proposed
+promotedFrom: ""
+chart: {name: openddil-demo, version: "0.1.165", commit: ""}
+bundle:
+  image: ghcr.io/edgy-solutions/openddil/runtime-bundle
+  digest: sha256:379b463ca54c582ffd7c54adce23dc9545e36b88c8354263e7cbe6ec00932d28
+  loaderPins:
+    - sha256:97355d027583f1e3d15efc3603a713e4c40726ba6ae9b09e6341235195c54b57
+  sources:
+    contracts: aca24eb0a4625d02769e4597c64eac41d86a9e22
+    demo: 40987102fbe5044d06366e5cc3593e728e1f1832
+    stack: 2d9083935a565e9ffbb3d465ca7a9784b6da1fbc
+    tactical-agents: dec47731199a76aad345e9df937805cd6b59557b
+    helm: ac3858247b8b92744eacbce17f224fa5b11ce020
+images:
+  - {name: projector, image: ghcr.io/edgy-solutions/openddil/projector, digest: "sha256:330d0efbea9e90af5b5fd3a189c7ac6f818b1666291fd22f96768fd8ba710eb7", repo: edgy-solutions/openddil-projector, commit: e340f43cf80e1b637a3896633bfee271f27a8b8c, tag: v2.0.0-rc1}
+  - {name: cm-service, image: ghcr.io/edgy-solutions/openddil/cm-service, digest: "sha256:20cd9544a36010a2423b872cd46a60f37bb07f3c9e4b241f76f910566ce342d8", repo: edgy-solutions/openddil-cm-service, commit: ec4075a136de82e8a048120cd8a800542280bd97, tag: v2.0.0-rc1}
+  - {name: asset-registry-service, image: ghcr.io/edgy-solutions/openddil/asset-registry-service, digest: "sha256:db47dec083a0bf1d126f86a7571b190f26ff2b31f3a773736ab63129d1e9af74", repo: edgy-solutions/openddil-stack, commit: 33e5242c79ac226e484c34e855f3792709bd3125, tag: v2.0.0-rc1}
+  - {name: logistics-fusion-service, image: ghcr.io/edgy-solutions/openddil/logistics-fusion-service, digest: "sha256:0888c2c84feb41bc9c200e7c112d05520f58bb84ee0477bc8975d24376e2b4d4", repo: edgy-solutions/openddil-logistics-fusion-service, commit: fa5e329b03957c6ffc14f1071c4c37d5b3ec30e4, tag: v2.0.0-rc1}
+  - {name: logistics-sim, image: ghcr.io/edgy-solutions/openddil/logistics-sim, digest: "sha256:f5eb9edd8c0df9b5e201e9ec5e8917b564e00e3c48773f9b9c910f17f0ea6f04", repo: edgy-solutions/openddil-logistics-sim, commit: 76d13edf44cf718b332013075ce5af9ca83a5dd3, tag: v2.0.0-rc1}
+  - {name: sensor-ingest, image: ghcr.io/edgy-solutions/openddil/sensor-ingest, digest: "sha256:5212c1b8b19c50dea3b645fb6ae931e97b8b597069345f5125b24a7d7fa04989", repo: edgy-solutions/openddil-sensor-ingest, commit: ab23fb3fcee3d3e505cb0614e3117709e16a51e7, tag: v2.0.0-rc1}
+  - {name: faust-edge, image: ghcr.io/edgy-solutions/openddil/faust-edge, digest: "sha256:0886faed7de5954307a6179912d2221dfa40027142d83f981e73bc57d0f67609", repo: edgy-solutions/openddil-tactical-agents, commit: dec47731199a76aad345e9df937805cd6b59557b, tag: faust-edge/v2.0.0-rc1}
+  - {name: faust-regional, image: ghcr.io/edgy-solutions/openddil/faust-regional, digest: "sha256:cbcb9bcee4dda04c557fd6554ea8d1e6a3ba32e00413b66016a11529448918b6", repo: edgy-solutions/openddil-tactical-agents, commit: 7eb7daf2c494da7d1646f02e30dc44c7a0f437fb, tag: faust-regional/v2.0.0-rc1}
+  - {name: hub-restate-projector, image: ghcr.io/edgy-solutions/openddil/hub-restate-projector, digest: "sha256:9ff13efb630590daf82f8d9280899199d80a56018c70ba0835767129b28608c1", repo: edgy-solutions/openddil-tactical-agents, commit: 7eb7daf2c494da7d1646f02e30dc44c7a0f437fb, tag: hub-restate-projector/v2.0.0-rc1}
+  - {name: frontend, image: ghcr.io/edgy-solutions/openddil/frontend, digest: "sha256:706e97c09a02389ae53639563677d6c54612763b4b2dddb138027a125fa9f79b", repo: edgy-solutions/openddil-demo, commit: fe715fafe49931a7263af112826fc19baa93c40f, tag: frontend/v2.0.0-rc1}
+  - {name: egress, image: ghcr.io/edgy-solutions/openddil/egress, digest: "sha256:6b72c933fc4384697bce7a67074447e1aa27337ba0a635f9736ea4c9c4cf227f", repo: edgy-solutions/openddil-demo, commit: d155dd9e5c280996eab4e238899f4e22835b5407, tag: egress/v2.0.0-rc1}
+  - {name: reset-runner, image: ghcr.io/edgy-solutions/openddil/reset-runner, digest: "sha256:132dfcf11e3ca2d942070af9358ec75690b92fc8cb8c8e25bf2093b85bb94301", repo: edgy-solutions/openddil-helm, commit: e32a377dff62d5d057e4cc315f658574101024ba, tag: reset-runner/v2.0.0-rc1}
+blockers:
+  - "egress: the image was built by a pull_request run from a commit that is not on the default branch; a retag release cannot name it. Needs a build from a default-branch commit (a new digest), or a ruling."
+  - "faust-edge: the running deployment mounts three source files over the image; the image alone is not what runs. Needs the change merged and built (a new digest)."
+  - "dis-sim (exercise stub adapter): the image is a script runner; its script comes from a ConfigMap created outside the chart, its tag 1.0 is floating, and its build has no provenance. Not listed above."
+  - "pep and exercise-control have no image of their own: they run on the stock python image with code from a chart ConfigMap and from the runtime bundle."
+  - "bundle: the release runs two bundle digests (the chart default and the per-workload loader pins)."
+  - "base images: every Dockerfile FROM names a tag, none a digest."
+  - "chart: the chart version that would ship is not on the default branch yet; chart.commit is empty."
+  - "reset-runner: the chart references it by :latest; the digest above is what :latest named when this was written, and the chart does not pin it."

@@ -58,7 +58,6 @@ on:
     # release. A tag does not move :latest. No `paths` filter on the tag
     # trigger -- a release tag should always rebuild the bundle,
     # regardless of which file the tagged commit touched.
-    tags: [ "v*" ]
   pull_request:
     branches: [ "master" ]
     paths:
