@@ -24,6 +24,7 @@ on:
       - "scripts/tests/test_projector_groups_render.sh"
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
+      - "scripts/tests/test_restate_wipe_backfill_block.sh"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -40,6 +41,7 @@ on:
       - "scripts/tests/test_projector_groups_render.sh"
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
+      - "scripts/tests/test_restate_wipe_backfill_block.sh"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -218,6 +220,11 @@ jobs:
       # the matching cm Deployment and bootstrap Job, optional --file ConfigMap. The renders are piped, never saved.
       - name: Failure-episodes backfill render test
         run: bash scripts/tests/test_failure_episodes_backfill_render.sh
+
+      # The Restate wipe hook refuses while a failure-episodes backfill pod does not read ok. The wipe script is
+      # piped from the render into sh against a stub kubectl; nothing rendered is saved.
+      - name: Restate wipe backfill block test
+        run: bash scripts/tests/test_restate_wipe_backfill_block.sh
 
       # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
       # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments

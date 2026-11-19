@@ -11,29 +11,82 @@ carries those closed after it by the old image.
 The projector's first-write-wins makes overlap with the per-close emit and
 re-runs harmless.
 
+The pod gets the cm Deployment's bundle wiring (bundleInit, PYTHONPATH,
+baselines). The cm image has no openddil contracts package, so without it the
+non-dry-run path dies with ModuleNotFoundError: openddil. A post-upgrade
+backfill hook once failed the release that way, because its pod lacked the
+bundle mount and PYTHONPATH. --dry-run skips the import, so it passed.
+
+The run Job never fails the release (ruling 2026-11-14). It retries up to 3
+times, always exits 0, and writes its result to the pod's termination message:
+"ok" or "failed". A "failed" blocks the next Restate wipe: hook-restate-wipe
+refuses while any run pod does not read ok.
+
+A pre-upgrade check Job (weight 40) runs the same code first: it imports main
+and runs the script with --dry-run, in a pod wired like the run pod. A failure
+aborts the upgrade before the Restate wipe at weight 50. The episodes
+ConfigMap is a pre-upgrade hook at weight 35 so it exists for the check and
+stays in place for the post-upgrade run Job.
+
 The Job's status does not prove delivery. Count projector rows.
 */ -}}
 {{- define "openddil.failureEpisodesBackfillJob" -}}
 {{- $root := .root -}}
 {{- $key := .key -}}
 {{- $file := .file -}}
+{{- $broker := .broker -}}
+{{- $args := printf "--admin %s" (.admin | squote) -}}
+{{- if $file }}{{- $args = printf "%s --file /backfill/episodes.jsonl" $args -}}{{- end }}
+{{- $runScript := printf `rc=1
+n=1
+while [ "$n" -le 3 ]; do
+  rc=0
+  python /app/src/backfill_failure_episodes.py %s || rc=$?
+  echo "backfill attempt $n rc=$rc" >&2
+  [ "$rc" -eq 0 ] && break
+  n=$((n + 1))
+  [ "$n" -le 3 ] && sleep 15
+done
+if [ "$rc" -eq 0 ]; then
+  printf ok > /dev/termination-log
+else
+  printf failed > /dev/termination-log
+fi
+exit 0
+` $args }}
+{{- $checkScript := printf `set -e
+python -c "import main"
+python /app/src/backfill_failure_episodes.py %s --dry-run
+` $args }}
+{{- range $mode := list "run" "check" }}
+{{- $run := eq $mode "run" }}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ $key }}
+  name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ if not $run }}check-{{ end }}{{ $key }}
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
   annotations:
+    {{- if $run }}
     "helm.sh/hook": post-upgrade
     "helm.sh/hook-weight": "30"
     "helm.sh/hook-delete-policy": before-hook-creation
+    {{- else }}
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "40"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- end }}
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   template:
     metadata:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
-        {{- include "openddil.selectorLabels" (dict "component" (printf "failure-episodes-backfill-%s" $key) "root" $root) | nindent 8 }}
+        {{- include "openddil.selectorLabels" (dict "component" (printf "failure-episodes-backfill-%s%s" (ternary "" "check-" $run) $key) "root" $root) | nindent 8 }}
+        {{- if $run }}
+        openddil.io/failure-episodes-backfill: run
+        {{- end }}
       {{- if $file }}
       annotations:
         checksum/episodes: {{ $file | sha256sum | quote }}
@@ -44,37 +97,60 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        {{- include "openddil.bundleInit" (dict "paths" (list
+            (dict "src" "contracts/gen/python" "dst" "proto")
+            (dict "src" "contracts/baselines"  "dst" "baselines")
+          ) "root" $root) | nindent 8 }}
       containers:
         - name: backfill
           image: {{ include "openddil.image" (dict "name" $root.Values.cmService.image.name "tag" $root.Values.cmService.image.tag "digest" $root.Values.cmService.image.digest "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.cmService.image.pullPolicy "root" $root) }}
           workingDir: /app/src
-          command: ["python", "/app/src/backfill_failure_episodes.py"]
-          args:
-            - --admin
-            - {{ .admin | quote }}
-            {{- if $file }}
-            - --file
-            - /backfill/episodes.jsonl
-            {{- end }}
+          command:
+            - sh
+            - -c
+            - {{ ternary $runScript $checkScript $run | toJson }}
           env:
+            - name: CM_BASELINES_DIR
+              value: "/baselines"
+            {{- with (include "openddil.baselinesLayerCmEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             - name: CM_KAFKA_BROKERS
-              value: {{ .broker | quote }}
+              value: {{ $broker | quote }}
+            - name: PYTHONPATH
+              value: "/proto:/app/src"
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
-          {{- if $file }}
           volumeMounts:
+            - name: bundle-shared
+              mountPath: /proto
+              subPath: proto
+            - name: bundle-shared
+              mountPath: /baselines
+              subPath: baselines
+            {{- with (include "openddil.baselinesLayerMount" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- if $file }}
             - name: episodes
               mountPath: /backfill
               readOnly: true
-          {{- end }}
-      {{- if $file }}
+            {{- end }}
       volumes:
+        - name: bundle-shared
+          emptyDir: {}
+        {{- with (include "openddil.baselinesLayerVolume" $root) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+        {{- if $file }}
         - name: episodes
           configMap:
             name: {{ $root.Release.Name }}-failure-episodes-backfill-{{ $key }}
-      {{- end }}
+        {{- end }}
+{{- end }}
 {{- if $file }}
 ---
 apiVersion: v1
@@ -84,8 +160,8 @@ metadata:
   labels:
     {{- include "openddil.labels" $root | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-upgrade
-    "helm.sh/hook-weight": "25"
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "35"
     "helm.sh/hook-delete-policy": before-hook-creation
 data:
   episodes.jsonl: {{ $file | toJson }}
