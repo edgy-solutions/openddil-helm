@@ -360,7 +360,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "agents/hub/restate_hub.py" "dst" "restate_hub.py")
           ) "root" .) | nindent 8 }}
       containers:
@@ -417,7 +417,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/baselines"  "dst" "baselines")
           ) "root" .) | nindent 8 }}
@@ -530,21 +530,22 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) }}
       annotations:
         # Same staleness hazard, same fix, as tier-cm-intake-{{ "{{ $tier.id }}" }}'s
         # checksum/bundle comment: cm-intake.yaml ships as a static bundle file
         # this initContainer only copies once at pod start.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list "cm-intake")) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" . "paths" $bundlePaths "extra" (list "cm-intake")) | sha256sum | quote }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "contracts/proto"          "dst" "proto")
-            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
-          ) "root" .) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" .) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" .Values.redpandaConnect.image }}"
@@ -679,7 +680,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" .) | nindent 8 }}
       containers:
@@ -856,7 +857,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
             (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
@@ -1063,7 +1064,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" .) | nindent 8 }}
       containers:
