@@ -233,6 +233,32 @@ spec:
                 fi
               }
 
+              # Backfill gate (ruling 2026-11-14). The failure-episodes
+              # backfill Job never fails the release; it records ok or failed
+              # in its pod's termination message. A wipe discards the closed
+              # episodes the backfill failed to deliver, so refuse while any
+              # backfill pod does not read ok. Runs on pre-install,
+              # pre-upgrade and pre-rollback alike. The assignment makes a
+              # kubectl failure exit the hook under set -eu (fail closed).
+              # Zero matching pods passes; an empty message (a pod still
+              # running) counts as not ok.
+              out=$(kubectl -n "$NS" get pods -l openddil.io/failure-episodes-backfill=run -o jsonpath='{range .items[*]}{.metadata.name}:{.status.containerStatuses[0].state.terminated.message}{" "}{end}')
+              bad=""
+              for w in $out; do
+                if [ "${w#*:}" != "ok" ]; then
+                  bad="${bad}${bad:+ }${w%%:*}"
+                fi
+              done
+              if [ -n "$bad" ]; then
+                echo "REFUSED: Restate wipe blocked: failure-episodes backfill not ok on: $bad"
+                echo "To unblock, either:"
+                echo "  - upgrade once with restate.ephemeralOnUpgrade=false so the backfill"
+                echo "    re-runs without a wipe, until its pod reads ok; or"
+                echo "  - after exporting the closed episodes, delete the failed backfill Job"
+                echo "    to accept the loss."
+                exit 1
+              fi
+
               echo "root:"
               wipe_one "{{ .Release.Name }}-restate-server" "restate-server"
               {{- range $tier := include "openddil.tierList" . | fromYamlArray }}
