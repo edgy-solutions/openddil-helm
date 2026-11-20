@@ -1,0 +1,8 @@
+# The commits the runtime bundle is built from. This file is the only place
+# they are chosen: to change a source, make a helm commit that changes its
+# line here. The build reads this file and nothing else.
+# Format: <repo> <40 lowercase hex commit>, one line per repo, in this order.
+contracts 3194a6181c301250fa3d5c9dc61f87259b43e682
+stack 2c911865027e609975ebe36de777d39ed929648f
+tactical-agents e675f758a970be0708796d9c6149dd70a2aec8cc
+demo 84b8b04eaf7c2c0ffb6628e46ab9b94b4ee7322b

@@ -226,6 +226,10 @@
    KAFKA_TOPIC env below and the produces-topics annotation, so the two can
    never drift apart. */ -}}
 {{- $sensorIngestTopic := "ingress-dis-raw" }}
+{{- /* Optional per-edge DIS appearance table (edges[].sensorIngest.disAppearance). Empty = off. The ConfigMap
+   name carries a short hash of the content. */ -}}
+{{- $disAppearance := dig "sensorIngest" "disAppearance" "" $edge }}
+{{- $disAppearanceName := printf "%s-sensor-ingest-%s-dis-appearance-%s" $root.Release.Name $edge.id ($disAppearance | sha256sum | trunc 10) }}
 
 # ===========================================================================
 # sensor-ingest-{{ $edge.id }} — DIS UDP ingestion
@@ -392,6 +396,12 @@ spec:
             - name: bundle-shared
               mountPath: /ontology
               subPath: ontology
+            {{- if $disAppearance }}
+            - name: dis-appearance
+              mountPath: /ontology/dis_appearance.yaml
+              subPath: dis_appearance.yaml
+              readOnly: true
+            {{- end }}
             {{- if $root.Values.sensorIngest.spool.enabled }}
             - name: ingest-spool
               mountPath: /var/spool/ingest
@@ -409,6 +419,23 @@ spec:
         {{- with (include "openddil.ontologyDeploymentVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+        {{- if $disAppearance }}
+        - name: dis-appearance
+          configMap:
+            name: {{ $disAppearanceName }}
+        {{- end }}
+{{- if $disAppearance }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $disAppearanceName }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+immutable: true
+data:
+  dis_appearance.yaml: {{ $disAppearance | quote }}
+{{- end }}
 ---
 # Service exposing the UDP port. ClusterIP by default (in-namespace
 # producers + kubectl port-forward). Set sensorIngest.externalAccess.

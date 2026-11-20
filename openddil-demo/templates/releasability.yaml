@@ -617,6 +617,11 @@ spec:
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
             {{- end }}
             {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+            {{- if $root.Values.releasability.pep.sourceBands }}
+            # Set here, not through releasability.pep.env, which refuses OPENDDIL_* names.
+            - name: OPENDDIL_SOURCE_BANDS_PATH
+              value: /etc/openddil/bands/source-bands.json
+            {{- end }}
 {{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
 {{- . | nindent 12 }}
 {{- end }}
@@ -649,6 +654,11 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+            {{- if $root.Values.releasability.pep.sourceBands }}
+            - name: pep-source-bands
+              mountPath: /etc/openddil/bands
+              readOnly: true
+            {{- end }}
 {{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
 {{- . | nindent 12 }}
 {{- end }}
@@ -667,8 +677,27 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+        {{- if $root.Values.releasability.pep.sourceBands }}
+        - name: pep-source-bands
+          configMap:
+            name: {{ $root.Release.Name }}-pep-source-bands-{{ $root.Values.releasability.pep.sourceBands | sha256sum | trunc 10 }}
+        {{- end }}
 {{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
 {{- . | nindent 8 }}
+{{- end }}
+{{- if $root.Values.releasability.pep.sourceBands }}
+---
+# Optional per-source band table for the PEP (releasability.pep.sourceBands). Rendered only when the value is
+# non-empty. The name carries a short hash of the content, so a changed value is a new name and rolls the PEP.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-pep-source-bands-{{ $root.Values.releasability.pep.sourceBands | sha256sum | trunc 10 }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+immutable: true
+data:
+  source-bands.json: {{ $root.Values.releasability.pep.sourceBands | quote }}
 {{- end }}
 {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---

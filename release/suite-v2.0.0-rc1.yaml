@@ -26,10 +26,10 @@ images:
   - {name: frontend, image: ghcr.io/edgy-solutions/openddil/frontend, digest: "sha256:706e97c09a02389ae53639563677d6c54612763b4b2dddb138027a125fa9f79b", repo: edgy-solutions/openddil-demo, commit: fe715fafe49931a7263af112826fc19baa93c40f, tag: frontend/v2.0.0-rc1}
   - {name: egress, image: ghcr.io/edgy-solutions/openddil/egress, digest: "sha256:6b72c933fc4384697bce7a67074447e1aa27337ba0a635f9736ea4c9c4cf227f", repo: edgy-solutions/openddil-demo, commit: d155dd9e5c280996eab4e238899f4e22835b5407, tag: egress/v2.0.0-rc1}
   - {name: reset-runner, image: ghcr.io/edgy-solutions/openddil/reset-runner, digest: "sha256:132dfcf11e3ca2d942070af9358ec75690b92fc8cb8c8e25bf2093b85bb94301", repo: edgy-solutions/openddil-helm, commit: e32a377dff62d5d057e4cc315f658574101024ba, tag: reset-runner/v2.0.0-rc1}
+# dis-sim is an optional adapter and is not released; it has no entry here.
 blockers:
   - "egress: the image was built by a pull_request run from a commit that is not on the default branch; a retag release cannot name it. Needs a build from a default-branch commit (a new digest), or a ruling."
   - "faust-edge: the running deployment mounts three source files over the image; the image alone is not what runs. Needs the change merged and built (a new digest)."
-  - "dis-sim (exercise stub adapter): the image is a script runner; its script comes from a ConfigMap created outside the chart, its tag 1.0 is floating, and its build has no provenance. Not listed above."
   - "pep and exercise-control have no image of their own: they run on the stock python image with code from a chart ConfigMap and from the runtime bundle."
   - "bundle: the release runs two bundle digests (the chart default and the per-workload loader pins)."
   - "base images: every Dockerfile FROM names a tag, none a digest."
