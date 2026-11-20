@@ -411,6 +411,10 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 4 }}
 ---
+{{- with (include "openddil.pepHandleState.pvc" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{ . }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -426,6 +430,9 @@ spec:
   # right direction, but confusingly. Scaling out needs shared handle storage;
   # Slice 1 says so rather than pretending the component is stateless.
   replicas: 1
+{{- with (include "openddil.pepHandleState.strategy" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 2 }}
+{{- end }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 6 }}
@@ -465,6 +472,12 @@ spec:
           env:
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            {{- with (include "openddil.pepShapeEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
+            {{- end }}
             # THE EGRESS PANE -- PA. egress.yaml's egress-pane-api Service
             # renders under the same `releasability.enabled` condition this
             # whole PEP does, so the two arrive together; see hub.yaml's
@@ -603,6 +616,10 @@ spec:
             - name: OPENDDIL_EXERCISE_CONTROL_URL
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
             {{- end }}
+            {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+{{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -632,6 +649,9 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+{{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
@@ -647,6 +667,9 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+{{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 8 }}
+{{- end }}
 {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---
 # The per-platform-variant catalog the PEP will check a report's fault
@@ -1125,7 +1148,7 @@ spec:
           emptyDir:
             sizeLimit: 16Mi
 {{- end }}
-{{- if $root.Values.releasability.lockDownElectric }}
+{{- if include "openddil.electricLockdown" $root }}
 ---
 # BYPASS PREVENTION. Without this the PEP is a suggestion: any pod in the
 # namespace — including a browser reaching a port-forward — can talk to
@@ -1153,6 +1176,8 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.electric.port }}
+{{- end }}
+{{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION, SAME REASON, SECOND SURFACE -- PA. Without this, the
 # egress pane (egress.yaml's egress-pane-api) is reachable by any pod in the

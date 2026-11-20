@@ -1869,6 +1869,18 @@ mappings:
     # SHORTER window than a leaf, not a longer one: the region is where the
     # volume lands and where the shape is read from.
     retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
+  {{- if not $tier.hasChildren }}
+  # The owning tier's copy of the per-element band transitions. The topic is
+  # on no bridge or uplink list, so only the asset-level bandcount on
+  # tactical-events crosses.
+  - topic: element-band-events
+    handler: tactical_events
+    table: tactical_events
+    consumer_group: tier-projector-element-band-events-{{ $tier.id }}
+    decode_as: cloudevents.json
+    mode: append
+    retention_hours: {{ $root.Values.eventRetention.edgeHours }}
+  {{- end }}
   # DIS Fire/Detonation launch records. mode: custom,
   # same as the root default's entry (openddil-projector
   # src/config/projector_config.yaml) -- the handler owns its own Postgres
@@ -2412,7 +2424,7 @@ for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
-  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000"   "element-band-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "munition-tracks|-p 4 -r 1 -c retention.ms=86400000"   "asset-declarations|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"   "asset-fielding|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
@@ -2954,6 +2966,32 @@ at the price of shape logs that grow without bound. Every PEP gets the same valu
 {{- end }}
 
 {{/*
+openddil.pepExtraEnv -- releasability.pep.env as env entries, sorted by key.
+Takes the root. A null value is skipped (a later -f null renders as a literal
+null). Fails on a key that is not an env var name, a key the chart sets itself
+on the PEP (LOG_LEVEL, OPENDDIL_*), and a map or list value.
+*/}}
+{{- define "openddil.pepExtraEnv" -}}
+{{- $m := .Values.releasability.pep.env | default dict -}}
+{{- range $k := keys $m | sortAlpha -}}
+{{- $v := get $m $k -}}
+{{- if not (kindIs "invalid" $v) -}}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: not a valid environment variable name" $k) -}}
+{{- end -}}
+{{- if or (eq $k "LOG_LEVEL") (hasPrefix "OPENDDIL_" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: set by the chart; use its own value" $k) -}}
+{{- end -}}
+{{- if or (kindIs "map" $v) (kindIs "slice" $v) -}}
+{{- fail (printf "releasability.pep.env.%s: must be a scalar, not a map or list" $k) -}}
+{{- end }}
+- name: {{ $k }}
+  value: {{ $v | toString | quote }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.pepElementEnv -- the element-state env every PEP gets: its tier id
 (a metrics label), the metrics port, and the element-shape bounds. Takes
 (dict "root" $root "tier" <tier id>).
@@ -3186,8 +3224,95 @@ index is SQLite and needs POSIX locks.
 {{- end }}
 
 {{- define "openddil.electricEnv" -}}
+{{- include "openddil.electricDeletionGuard" . -}}
 - name: ELECTRIC_STORAGE_DIR
   value: /app/persistent
+{{- if .Values.electric.allowShapeDeletion }}
+- name: ELECTRIC_ENABLE_INTEGRATION_TESTING
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
+Refusals for shape deletion: it needs secure mode, and the PEP settings that
+delete by handle need it on. Renders nothing.
+*/}}
+{{- define "openddil.electricDeletionGuard" -}}
+{{- $allow := .Values.electric.allowShapeDeletion -}}
+{{- $rel := .Values.releasability | default dict -}}
+{{- /* Deletion without secure mode would leave DELETE open to every pod. */ -}}
+{{- if and $allow (not (include "openddil.electricSecure" .)) -}}
+{{- fail "electric.allowShapeDeletion needs electric.secure.enabled: shape DELETE must be reachable only by the PEPs" -}}
+{{- end -}}
+{{- /* Upstream deletion with Electric's DELETE off would be answered 405. */ -}}
+{{- if and (eq (toString (dig "elementShapes" "deleteUpstream" "false" $rel)) "true") (not $allow) -}}
+{{- fail "releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- /* A rotating PEP deletes retired shapes; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "periodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- /* The idle sweep deletes by handle too; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "idlePeriodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+PEP env for the shape ceiling, rotation period and idle sweep period. Args: the
+root context. Renders nothing when all are 0, so the PEP env is unchanged by
+default.
+*/}}
+{{- define "openddil.pepShapeEnv" -}}
+{{- $sr := dig "pep" "shapeRotation" dict (.Values.releasability | default dict) -}}
+{{- $period := dig "periodSeconds" 0 $sr -}}
+{{- $ceiling := dig "ceilingSeconds" 0 $sr -}}
+{{- $idle := dig "idlePeriodSeconds" 0 $sr -}}
+{{- /* Both must be numbers of seconds, never negative. */ -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $period)) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $ceiling)) -}}
+{{- fail "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $idle)) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- $p := float64 (toString $period) -}}
+{{- $i := float64 (toString $idle) -}}
+{{- /* The time after which a session with no requests has ended: the TTL in
+fixed mode, the inactivity period in sliding mode. The PEP refuses at import
+when idle is not above it. */ -}}
+{{- $oidc := dig "oidc" dict (.Values.releasability | default dict) -}}
+{{- $floorKey := "sessionTtlSeconds" -}}
+{{- if eq (toString (default "fixed" $oidc.sessionMode)) "sliding" -}}
+{{- $floorKey = "sessionIdleSeconds" -}}
+{{- end -}}
+{{- $floor := int (default 900 (get $oidc $floorKey)) -}}
+{{- if and (gt $i 0.0) (le $i (float64 $floor)) -}}
+{{- fail (printf "releasability.pep.shapeRotation.idlePeriodSeconds (%v) must be above the session's inactivity end (%d s, from releasability.oidc.%s)" $idle $floor $floorKey) -}}
+{{- end -}}
+{{- $c := float64 (toString $ceiling) -}}
+{{- /* A period without a ceiling above it has no checked bound. */ -}}
+{{- if and (gt $p 0.0) (le $c 0.0) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- /* The PEP refuses at import when the period is not below the ceiling. */ -}}
+{{- if and (gt $p 0.0) (gt $c 0.0) (ge $p $c) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- if gt $c 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_CEILING_S
+  value: {{ int64 $c | toString | quote }}
+{{- end }}
+{{- if gt $p 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_ROTATE_S
+  value: {{ int64 $p | toString | quote }}
+{{- end }}
+{{- if gt $i 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_IDLE_S
+  value: {{ int64 $i | toString | quote }}
+{{- end }}
 {{- end }}
 
 {{- define "openddil.electricMount" -}}
@@ -3449,4 +3574,192 @@ so the name tracks the data. Takes the root context.
 {{/* The values that shape a session, as one string for checksum annotations. */}}
 {{- define "openddil.sessionChecksumItems" -}}
 {{- list (toString .Values.releasability.oidc.sessionTtlSeconds) (include "openddil.sessionMode" .) (toString .Values.releasability.oidc.sessionIdleSeconds) (toString .Values.releasability.oidc.sessionMaxSeconds) | toJson -}}
+{{- end -}}
+
+{{/*
+ELECTRIC SECURE MODE. Electric requires a secret on /v1/shape when
+ELECTRIC_SECRET is set, and refuses to boot if ELECTRIC_SECRET and
+ELECTRIC_INSECURE are both set, so secure mode swaps one for the other.
+Only the PEP in front of each Electric holds the secret.
+*/}}
+{{- define "openddil.electricSecure" -}}
+{{- if .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/* Name of the Secret holding one key per Electric instance. */}}
+{{- define "openddil.electricSecretName" -}}
+{{- if .Values.electric.secure.existingSecret -}}
+{{ .Values.electric.secure.existingSecret }}
+{{- else -}}
+{{ printf "%s-electric-secret" .Release.Name }}
+{{- end -}}
+{{- end }}
+
+{{/*
+True when the Electric NetworkPolicies render: the older release flag or
+secure mode. Used only for the two Electric policies.
+*/}}
+{{- define "openddil.electricLockdown" -}}
+{{- if or .Values.releasability.lockDownElectric .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/*
+The Electric instances this release renders, as a JSON list of keys: "hub"
+plus each rendered tier id (same filter as tier-node.yaml).
+*/}}
+{{- define "openddil.electricInstances" -}}
+{{- $out := list "hub" -}}
+{{- if .Values.tierNode.enabled -}}
+{{- $tn := .Values.tierNode -}}
+{{- range $tier := (include "openddil.tierList" . | fromYamlArray) -}}
+{{- if or (not $tn.tiers) (has $tier.id $tn.tiers) -}}
+{{- $out = append $out $tier.id -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}
+
+{{/* Fails when secure mode has an Electric with no PEP in front of it. */}}
+{{- define "openddil.electricSecureGuard" -}}
+{{- if and .Values.electric.secure.enabled (not .Values.releasability.enabled) -}}
+{{- range $i := (include "openddil.electricInstances" . | fromJsonArray) -}}
+{{- fail (printf "electric.secure.enabled needs a PEP in front of every Electric (releasability.enabled); %s has none" $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entry for an Electric container. Args: dict "root" "key" "name".
+Secure: the secret from the Secret. Otherwise ELECTRIC_INSECURE (name is
+"ELECTRIC_SECRET" or "OPENDDIL_ELECTRIC_SECRET" for the PEP).
+*/}}
+{{- define "openddil.electricSecretRef" -}}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "openddil.electricSecretName" .root | quote }}
+      key: {{ .key | quote }}
+{{- end }}
+
+{{/*
+Metres per platform_variant for the projector's telemetry position deadband,
+as compact JSON: {"<variant>": <m>, ..., "*": <m>}. Only variants that set
+movement.standards.<variant>.positionDeadbandM appear, plus "*" when
+movement.positionDeadbandDefaultM is not null. {} when there are none. Fails
+the render on a value that is not a number >= 0; the message names the variant
+only, never the value.
+*/}}
+{{- define "openddil.telemetryPositionDeadbandJson" -}}
+{{- $out := dict -}}
+{{- range $variant, $std := (.Values.movement.standards | default dict) -}}
+{{- if and (kindIs "map" $std) (hasKey $std "positionDeadbandM") (not (kindIs "invalid" $std.positionDeadbandM)) -}}
+{{- $m := $std.positionDeadbandM -}}
+{{- if not (or (kindIs "float64" $m) (kindIs "int64" $m) (kindIs "int" $m)) -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- if lt (float64 $m) 0.0 -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- $_ := set $out $variant $m -}}
+{{- end -}}
+{{- end -}}
+{{- $d := .Values.movement.positionDeadbandDefaultM -}}
+{{- if not (kindIs "invalid" $d) -}}
+{{- if not (or (kindIs "float64" $d) (kindIs "int64" $d) (kindIs "int" $d)) -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- if lt (float64 $d) 0.0 -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- $_ := set $out "*" $d -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end }}
+
+{{/*
+The projector's two change-only env entries, for the caller to nindent into a
+container env list. Renders nothing when projector.telemetryChangeOnly.heartbeatS
+is 0, so the default leaves every projector pod spec as it was. Fails the
+render when heartbeatS is not a number, is below 0, or is above 15.
+*/}}
+{{- define "openddil.telemetryChangeOnlyEnv" -}}
+{{- $h := (.Values.projector.telemetryChangeOnly | default dict).heartbeatS | default 0 -}}
+{{- if not (or (kindIs "float64" $h) (kindIs "int64" $h) (kindIs "int" $h)) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if or (lt (float64 $h) 0.0) (gt (float64 $h) 15.0) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if gt (float64 $h) 0.0 -}}
+- name: TELEMETRY_CHANGE_ONLY_HEARTBEAT_S
+  value: {{ $h | quote }}
+- name: TELEMETRY_POSITION_DEADBAND_M
+  value: {{ include "openddil.telemetryPositionDeadbandJson" . | quote }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Opt-in PEP handle-state volume (releasability.pep.handleState). Each helper
+takes (dict "root" $root "name" <Deployment name>) and renders nothing when
+the feature is off, so the default render is unchanged. The Deployment name is
+<release>-pep (hub) or <release>-tier-pep-<id> (tier); the component label is
+that name without the "<release>-" prefix.
+*/}}
+{{- define "openddil.pepHandleState.pvc" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-handle-state" .name }}
+  labels:
+    {{- include "openddil.labels" .root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (trimPrefix (printf "%s-" .root.Release.Name) .name) "root" .root) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $hs.storageClass }}
+  storageClassName: {{ $hs.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $hs.size | default "64Mi" | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.strategy" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+strategy:
+  type: Recreate
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.env" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: OPENDDIL_PEP_HANDLE_STATE_FILE
+  value: /var/lib/openddil-pep/handles.json
+- name: OPENDDIL_PEP_HANDLE_STATE_EVERY_S
+  value: {{ $hs.everySeconds | default 30 | toString | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.mount" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  mountPath: /var/lib/openddil-pep
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.volume" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  persistentVolumeClaim:
+    claimName: {{ printf "%s-handle-state" .name }}
+{{- end -}}
 {{- end -}}

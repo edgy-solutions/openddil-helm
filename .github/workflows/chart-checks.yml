@@ -25,6 +25,12 @@ on:
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
       - "scripts/tests/test_restate_wipe_backfill_block.sh"
+      - "scripts/tests/test_release_retag.sh"
+      - "scripts/tests/release_retag_fixtures.py"
+      - "scripts/release/**"
+      - "release/**"
+      - ".github/workflows/release-retag.yml"
+      - ".github/workflows/release.yml"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -42,6 +48,12 @@ on:
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
       - "scripts/tests/test_restate_wipe_backfill_block.sh"
+      - "scripts/tests/test_release_retag.sh"
+      - "scripts/tests/release_retag_fixtures.py"
+      - "scripts/release/**"
+      - "release/**"
+      - ".github/workflows/release-retag.yml"
+      - ".github/workflows/release.yml"
       - "scripts/tests/golden-entity-assignment/**"
       - "scripts/check-tier-config.sh"
       - "scripts/check-mirror-coverage.sh"
@@ -220,6 +232,9 @@ jobs:
       # the matching cm Deployment and bootstrap Job, optional --file ConfigMap. The renders are piped, never saved.
       - name: Failure-episodes backfill render test
         run: bash scripts/tests/test_failure_episodes_backfill_render.sh
+      # releasability.pep.env: the default, an overlay, a null, and the refusals, piped (the render is never saved).
+      - name: PEP env render test
+        run: bash scripts/tests/test_pep_env_render.sh
 
       # The Restate wipe hook refuses while a failure-episodes backfill pod does not read ok. The wipe script is
       # piped from the render into sh against a stub kubectl; nothing rendered is saved.
@@ -256,6 +271,11 @@ jobs:
       # the theater topology draws). Exit 2 (no python with PyYAML) fails the step: a skip would read green.
       - name: Link traffic and tier tree render test
         run: bash scripts/tests/test_link_traffic_render.sh
+
+      # The per-element band events stay on an edge-local topic: routed by a tier-managed edge only, read by the
+      # owning leaf tier projector, on no bridge or uplink list. Exit 2 (no python with PyYAML) fails the step.
+      - name: Element band events render test
+        run: bash scripts/tests/test_element_band_events_render.sh
 
       # One plant: the tier tree helper with every parent forced to root (the declared tree, not the uplink
       # tree, would fail the same check). The test must exit non-zero AND print the tiers check it breaks.
@@ -417,3 +437,6 @@ jobs:
           grep -q "FAIL \[pass 5 pullable\]" /tmp/pass5-red.log \
             || { echo "RED CHECK FAILED: the check failed, but not in pass 5"; exit 1; }
           echo "red-check green: pass 5 rejected the pod spec with its pull secret removed"
+
+      - name: Release retag test
+        run: bash scripts/tests/test_release_retag.sh

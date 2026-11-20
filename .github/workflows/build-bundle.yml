@@ -53,12 +53,9 @@ on:
     paths:
       - "bundle/**"
       - ".github/workflows/build-bundle.yml"
-    # Tag pushes (v1.0.0, ...) publish a versioned bundle image (:v1.0.0)
-    # so the helm chart + customer values-pinned.yaml can pin to a
-    # release. A tag does not move :latest. No `paths` filter on the tag
-    # trigger -- a release tag should always rebuild the bundle,
-    # regardless of which file the tagged commit touched.
-    tags: [ "v*" ]
+    # Version tags do not build here. A release adds the version tag to a
+    # bundle already built (release.yml -> release-retag.yml); it never
+    # rebuilds and never moves :latest.
   pull_request:
     branches: [ "master" ]
     paths:
