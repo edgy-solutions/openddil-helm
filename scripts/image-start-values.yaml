@@ -1,0 +1,52 @@
+# Values on top of the openddil-demo chart defaults for scripts/check-image-start.py.
+# The aim: every image of ours (ghcr.io/edgy-solutions/openddil/*) that a full
+# deployment runs is in the render. Defaults already run sensor-ingest,
+# faust-edge, faust-regional, projector, hub-restate-projector, cm-service,
+# asset-registry-service, logistics-fusion-service, frontend, logistics-sim and
+# the runtime-bundle loaders. The blocks below add what is off by default.
+#
+# Nothing here is a deployment setting. Values only need to satisfy the chart's
+# render-time checks; the check starts containers with no network.
+
+# --- read-path releasability ---------------------------------------------
+# On because it adds the egress gate and pane (image: egress) and the
+# bundle-loader init containers of the policy pods. oidc is on because the
+# `picture` block below requires it.
+releasability:
+  enabled: true
+  oidc:
+    enabled: true
+
+# --- exercise control -----------------------------------------------------
+# Needs releasability. Its own workload runs the stock python image with code
+# from a ConfigMap, so no image of ours is added; on so that its render path
+# (and the adapter checks in the template) stay exercised.
+exerciseControl:
+  enabled: true
+  adapter:
+    name: start-check
+    endpoint: "http://127.0.0.1:9"
+    operations:
+      pause: {method: POST, path: /pause}
+
+# --- picture ---------------------------------------------------------------
+# Needs releasability and oidc. Adds a PEP route and realm client, no image of
+# ours; on for render coverage only.
+picture:
+  enabled: true
+
+# --- egress components (all run image: egress) ----------------------------
+egress:
+  assembler:
+    enabled: true
+  intake:
+    enabled: true
+  forwarder:
+    enabled: true
+  stubSink:
+    enabled: true
+
+# --- Left off on purpose ---------------------------------------------------
+# exerciseControl.stubAdapter (dis-sim): the image is built outside this
+# repository, so this check cannot say which build it should run.
+# egress.tak: runs tak-server, which is third-party.

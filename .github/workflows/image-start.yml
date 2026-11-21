@@ -1,0 +1,95 @@
+name: Image start check
+
+# Starts every image of ours that the chart runs, under the environment chart
+# master renders for it, and fails if one cannot start.
+#
+# What it catches: an image that builds and passes its own tests but refuses to
+# start under the chart's env (a variable the chart sets that the image now
+# rejects, or one the image now requires that the chart never sets). Image
+# repos never see the chart and this repo never ran the images, so such a
+# mismatch only showed up on a deployment.
+#
+# What it runs: `helm template` of openddil-demo with scripts/image-start-values.yaml
+# (turns on the optional components that run our images), exactly as rendered.
+# The chart pins none of our images (global.imageTag is "latest"), so the
+# default run starts `:latest` of each image: whatever build that image repo
+# last published under the tag. A red default run therefore means: what a
+# default install of chart master runs today cannot start.
+#
+# To check one image from another ref (a candidate build, or a digest a
+# deployment pins), run it with `override` set to space-separated NAME=REF
+# entries, for example
+#   faust-edge=ghcr.io/edgy-solutions/openddil/faust-edge@sha256:<digest>
+# Only the named images change; the rest stay as the chart renders them.
+# `workflow_call` offers the same input, plus `chart-ref` to pick the chart
+# revision, so an image repo can call this later with its candidate.
+
+on:
+  pull_request:
+  push:
+    branches: [ "master" ]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      override:
+        description: "Space-separated NAME=REF image overrides (empty: run as rendered)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      chart-ref:
+        description: "Chart ref to check out"
+        required: false
+        type: string
+        default: master
+      override:
+        description: "Space-separated NAME=REF image overrides (empty: run as rendered)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  start:
+    name: start
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: edgy-solutions/openddil-helm
+          ref: ${{ inputs.chart-ref || github.ref }}
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pyyaml==6.0.2
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+
+      - name: Start every image
+        env:
+          OVERRIDE: ${{ inputs.override }}
+        run: |
+          args=()
+          for o in $OVERRIDE; do
+            args+=(--override "$o")
+          done
+          python scripts/check-image-start.py \
+            --chart ./openddil-demo \
+            -f scripts/image-start-values.yaml \
+            --expect scripts/image-start-expect.yaml \
+            "${args[@]}" \
+            --summary "$GITHUB_STEP_SUMMARY"

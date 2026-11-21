@@ -1,0 +1,13 @@
+# Non-zero exits that image-start accepts.
+#
+# Each entry:
+#   - image: <short image name, e.g. egress>
+#     container: <container name in the pod>
+#     exit: <integer exit code>
+#     log: <regex that must match somewhere in the container's full log>
+#     reason: <why this exit is acceptable>
+#
+# An entry matches only when image, container and exit code are all equal AND
+# the regex matches the log. A different failure in the same container stays
+# red. Empty on purpose: nothing is allowed to fail today.
+allowed: []
