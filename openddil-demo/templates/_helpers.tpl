@@ -1720,22 +1720,6 @@ Usage: include "openddil.faustChangelogTopic" (dict "appId" ... "table" ...)
 {{- end }}
 
 {{/*
-openddil.faustEdgeTables -- the Faust table names faust-edge's app keeps:
-one holding each asset's latest decoded state, one holding the running
-prognostics accumulators, and one holding the thermal unit's runaway state
-(the declared thermal unit's state_table). CODE DEFAULTS baked into the
-faust-edge app's own table definitions (not visible in this chart, which has
-no Faust source to read them from). The first two were confirmed from a
-live topic census of their changelog topics; the third is read from the
-app's produces.yaml and its tests. None is invented here.
-*/}}
-{{- define "openddil.faustEdgeTables" -}}
-- asset_state
-- prognostics_accumulators
-- thermal_runaway_state
-{{- end }}
-
-{{/*
 openddil.faustRegionalAggregatorTable -- the one Faust table the regional
 aggregator sub-app ("region-<id>-aggregator", see regional.yaml) keeps: the
 region's latest per-asset rollup. CODE DEFAULT baked into the faust-regional

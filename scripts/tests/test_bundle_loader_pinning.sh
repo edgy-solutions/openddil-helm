@@ -51,7 +51,7 @@ DB="sha256:$(printf 'b%.0s' $(seq 64))"
 DC="sha256:$(printf 'c%.0s' $(seq 64))"
 
 # Every src any bundle-loader copies: a src missing from the digests never pins.
-SRCS="contracts/proto demo/cm-intake.yaml demo/declaration-intake.yaml demo/policy/.manifest demo/policy/releasability.rego demo/gateway contracts/ontology demo/ontology contracts/baselines demo/policy/realm-openddil.json demo/policy/users.yaml demo/policy/destinations.yaml agents/hub/restate_hub.py contracts/bootstrap contracts/gen/python contracts/gen/python/openddil demo/dynamic-mappings demo/exercise demo/openddil-base-connect.yaml stack/electric stack/schema"
+SRCS="contracts/proto demo/cm-intake.yaml demo/declaration-intake.yaml demo/policy/.manifest demo/policy/releasability.rego demo/gateway contracts/ontology demo/ontology contracts/baselines demo/policy/realm-openddil.json demo/policy/users.yaml demo/policy/destinations.yaml agents/hub/restate_hub.py contracts/bootstrap contracts/gen/python contracts/gen/python/openddil demo/dynamic-mappings demo/exercise demo/openddil-base-connect.yaml stack/electric stack/schema agents/algorithms"
 
 # paths_block <indent> <change-src> <omit-src> <fill-char>: the `<src>: <hex>`
 # lines. A src's digest is its list index in hex; the changed one is 64 x
