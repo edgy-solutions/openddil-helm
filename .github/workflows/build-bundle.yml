@@ -9,24 +9,22 @@ name: Build and publish runtime-bundle image
 # second independent job -- see the comment above `build-dis-sim` for why a
 # fixture image is published here rather than anywhere else.
 #
+# Sources: bundle-sources.lock at the root of this repo names the commit of
+# each of the four source repos (contracts, stack, tactical-agents, demo). It
+# is the only place those commits are chosen. Changing a source means a helm
+# commit that changes the lock; the first step refuses a malformed lock
+# (scripts/bundle-sources.sh). One helm commit therefore builds one bundle.
+#
 # Triggers:
-#   1. push to master of THIS repo (bundle/** or this workflow file)
-#   2. repository_dispatch from a sibling source repo's own workflow
-#      (currently wired: openddil-contracts via its
-#      notify-bundle-rebuild.yml. Same pattern can be copy-pasted into
-#      openddil-stack / openddil-tactical-agents / openddil-demo when
-#      churn there warrants it.) The dispatching workflow needs a PAT
-#      with contents:write on this repo, stored as a secret in the
-#      source repo (BUNDLE_REBUILD_PAT).
-#   3. schedule -- daily, regardless of activity, as a safety net for
-#      any source repo NOT yet wired to dispatch.
-#   4. pull_request to master touching bundle/** or this file: a branch
-#      build of this repo's Dockerfile against the source repos' default
-#      branches.
-#   5. workflow_dispatch -- manual, on any branch of this repo. Each source
-#      repo can be pinned with an input (a full commit sha is the pin; a
-#      branch name is resolved once and recorded). That is how a bundle is
-#      built from a branch of a source repo without merging it.
+#   1. push to master of THIS repo touching bundle/**, bundle-sources.lock or
+#      this workflow file.
+#   2. pull_request to master touching the same paths: a branch build of this
+#      repo's Dockerfile against the locked commits.
+#   3. workflow_dispatch -- manual, on any branch of this repo. Inputs:
+#      compare_to and tag only. There is no source input: a source is changed
+#      in the lock.
+# There is no schedule and no repository_dispatch: with the sources pinned
+# they could only rebuild the same commits.
 #
 # Tags (see "Compute tags"):
 #   :sha-<7>  every build. <7> is the first 7 hex of the sha256 of the five
@@ -36,9 +34,8 @@ name: Build and publish runtime-bundle image
 #             job summary.
 #   :pr-<N>   a pull request build.
 #   :<tag>    a v* tag push, or the `tag` input (never `latest`).
-#   :latest   a push, schedule, repository_dispatch or dispatch on master
-#             with every source at its default branch. Nothing else moves it:
-#             a branch, a pull request, a tag or a pinned source never does.
+#   :latest   a push or a dispatch on master. Nothing else moves it: a branch,
+#             a pull request or a tag never does.
 # A pull request from a fork builds but pushes nothing.
 #
 # Pinning a deployment: the job summary prints `bundle.image.digest`, the
@@ -52,6 +49,7 @@ on:
     branches: [ "master" ]
     paths:
       - "bundle/**"
+      - "bundle-sources.lock"
       - ".github/workflows/build-bundle.yml"
     # Version tags do not build here. A release adds the version tag to a
     # bundle already built (release.yml -> release-retag.yml); it never
@@ -60,32 +58,10 @@ on:
     branches: [ "master" ]
     paths:
       - "bundle/**"
+      - "bundle-sources.lock"
       - ".github/workflows/build-bundle.yml"
-  repository_dispatch:
-    types: [source-repo-changed]
-  schedule:
-    # 06:00 UTC daily. Picks up any source-repo change that wasn't
-    # dispatch-triggered (e.g. unwired source repos, or a dispatch that
-    # failed silently). Cron uses GitHub Actions UTC.
-    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
-      contracts_ref:
-        description: "openddil-contracts commit (full sha), branch or tag. Empty = default branch."
-        required: false
-        default: ""
-      stack_ref:
-        description: "openddil-stack commit (full sha), branch or tag. Empty = default branch."
-        required: false
-        default: ""
-      tactical_agents_ref:
-        description: "openddil-tactical-agents commit (full sha), branch or tag. Empty = default branch."
-        required: false
-        default: ""
-      demo_ref:
-        description: "openddil-demo commit (full sha), branch or tag. Empty = default branch."
-        required: false
-        default: ""
       compare_to:
         description: "Earlier bundle digest (sha256:...) to list every changed /bundle file against. Optional."
         required: false
@@ -110,49 +86,52 @@ jobs:
       # (e.g. ${{ secrets.OPENDDIL_READ_PAT }}) with `token:` on each
       # checkout step.
       #
-      # An empty `ref` checks out the default branch. On a pull request this
-      # repo is checked out at the branch head, not GitHub's merge commit.
+      # Each source is checked out at the commit bundle-sources.lock names.
+      # On a pull request this repo is checked out at the branch head, not
+      # GitHub's merge commit.
       - name: Checkout openddil-helm (self)
         uses: actions/checkout@v4
         with:
           path: openddil-helm
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Read bundle-sources.lock
+        id: lock
+        run: bash openddil-helm/scripts/bundle-sources.sh openddil-helm/bundle-sources.lock >> "$GITHUB_OUTPUT"
+
       - name: Checkout openddil-contracts
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-contracts
           path: openddil-contracts
-          ref: ${{ inputs.contracts_ref }}
+          ref: ${{ steps.lock.outputs.contracts }}
 
       - name: Checkout openddil-stack
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-stack
           path: openddil-stack
-          ref: ${{ inputs.stack_ref }}
+          ref: ${{ steps.lock.outputs.stack }}
 
       - name: Checkout openddil-tactical-agents
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-tactical-agents
           path: openddil-tactical-agents
-          ref: ${{ inputs.tactical_agents_ref }}
+          ref: ${{ steps.lock.outputs.tactical-agents }}
 
       - name: Checkout openddil-demo
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-demo
           path: openddil-demo
-          ref: ${{ inputs.demo_ref }}
+          ref: ${{ steps.lock.outputs.demo }}
 
-      # The five commits this bundle is built from, whatever refs named them.
-      # A pinned build is any build with a source input, a pull request, or a
-      # ref other than master: it never moves :latest.
+      # The five commits this bundle is built from. A pinned build is a pull
+      # request or a ref other than master: it never moves :latest.
       - name: Record source commits
         id: src
         env:
-          IN_REFS: "${{ inputs.contracts_ref }}${{ inputs.stack_ref }}${{ inputs.tactical_agents_ref }}${{ inputs.demo_ref }}"
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           S="$RUNNER_TEMP/bundle-sources.txt"
@@ -163,7 +142,7 @@ jobs:
           cat "$S"
           id=$(sha256sum "$S" | cut -c1-7)
           pinned=false
-          if [ -n "$IN_REFS" ] || [ -n "$PR_NUMBER" ] || [ "$GITHUB_REF" != "refs/heads/master" ]; then
+          if [ -n "$PR_NUMBER" ] || [ "$GITHUB_REF" != "refs/heads/master" ]; then
             pinned=true
           fi
           echo "bundle id $id, pinned=$pinned"
@@ -327,12 +306,9 @@ jobs:
   # fixture to publish.
   #
   # TRIGGERS: the Dockerfile lives in openddil-customer-bundle-example, so
-  # this repo's `paths` filter cannot see a change to it. The daily schedule
-  # is what covers that -- exactly the unwired-source-repo case it was added
-  # for. Wiring a repository_dispatch from that repo would need a
-  # BUNDLE_REBUILD_PAT secret there (contents:write on THIS repo); until that
-  # secret exists, a notify workflow would fail on every push, so the
-  # schedule is the wiring.
+  # this repo's `paths` filter cannot see a change to it. With the schedule
+  # removed, a change there is published by the next master push of this repo
+  # or a manual dispatch.
   #
   # SINGLE PLATFORM, ON PURPOSE. linux/amd64 only, because `load: true` is
   # what makes the verification step below possible and load is

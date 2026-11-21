@@ -108,6 +108,14 @@ edges:
   # udpPort: container listen port. Same value (62040-62042) used as NodePort
   # if sensorIngest.externalAccess.enabled=true. Hold for in-cluster-only
   # clusters that ban NodePort (default: false, ClusterIP only).
+  # sensorIngest.disAppearance (optional, string): the YAML text of a DIS appearance table for this edge's
+  # sensor-ingest. Empty or absent (the default) means off and the edge renders as before. When non-empty, a
+  # ConfigMap named with a short hash of the content is rendered for the edge, key dis_appearance.yaml, and
+  # mounted read-only in the sensor-ingest container at /ontology/dis_appearance.yaml (subPath). Example:
+  #   - id: edge-01
+  #     sensorIngest:
+  #       disAppearance: |
+  #         ...
   - id: edge-01
     region: region-east
     udpPort: 62040
@@ -2425,6 +2433,11 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # Optional per-source band table for the hub PEP, as JSON text. Empty (the default) means off: nothing
+    # renders and the env is not set. When non-empty, a ConfigMap whose name carries a short hash of the content
+    # is rendered with key source-bands.json, mounted read-only at /etc/openddil/bands in the pep container, and
+    # OPENDDIL_SOURCE_BANDS_PATH=/etc/openddil/bands/source-bands.json is set. A changed value is a new name.
+    sourceBands: ""
     # Extra env vars for every PEP container: the hub PEP and each tier PEP.
     # A map, not a list like egress.forwarder.extraEnv: maps merge across -f
     # files, so an overlay can add a variable without dropping the default, and

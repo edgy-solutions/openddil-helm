@@ -25,6 +25,11 @@ on:
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
       - "scripts/tests/test_restate_wipe_backfill_block.sh"
+      - "scripts/tests/test_bundle_sources_lock.sh"
+      - "scripts/tests/test_pep_source_bands_render.sh"
+      - "scripts/tests/test_dis_appearance_render.sh"
+      - "scripts/bundle-sources.sh"
+      - "bundle-sources.lock"
       - "scripts/tests/test_release_retag.sh"
       - "scripts/tests/release_retag_fixtures.py"
       - "scripts/release/**"
@@ -48,6 +53,11 @@ on:
       - "scripts/tests/test_failure_episodes_wiring_render.sh"
       - "scripts/tests/test_failure_episodes_backfill_render.sh"
       - "scripts/tests/test_restate_wipe_backfill_block.sh"
+      - "scripts/tests/test_bundle_sources_lock.sh"
+      - "scripts/tests/test_pep_source_bands_render.sh"
+      - "scripts/tests/test_dis_appearance_render.sh"
+      - "scripts/bundle-sources.sh"
+      - "bundle-sources.lock"
       - "scripts/tests/test_release_retag.sh"
       - "scripts/tests/release_retag_fixtures.py"
       - "scripts/release/**"
@@ -240,6 +250,19 @@ jobs:
       # piped from the render into sh against a stub kubectl; nothing rendered is saved.
       - name: Restate wipe backfill block test
         run: bash scripts/tests/test_restate_wipe_backfill_block.sh
+
+      # The bundle's source pin: scripts/bundle-sources.sh against the real lock and five bad locks.
+      - name: Bundle sources lock test
+        run: bash scripts/tests/test_bundle_sources_lock.sh
+
+      # releasability.pep.sourceBands: unset renders nothing; set renders a content-named ConfigMap, mount and
+      # env. Piped, never saved.
+      - name: PEP source bands render test
+        run: bash scripts/tests/test_pep_source_bands_render.sh
+
+      # Per-edge sensorIngest.disAppearance, same shape as above. Piped, never saved.
+      - name: DIS appearance render test
+        run: bash scripts/tests/test_dis_appearance_render.sh
 
       # Two plants, each of which must make the test exit non-zero AND print the check it breaks: (1) the merge
       # script with its username-clash refusal removed, (2) the chart's merge container with its two arguments
