@@ -48,6 +48,25 @@ bundle:
   initResources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 250m, memory: 256Mi }
+  # Content digests of the bundle paths the chart copies (bundleInit `src`),
+  # read from the bundle image named by bundleDigest. Used only when
+  # bundleDigest equals bundle.image.digest; otherwise the checksums fall back
+  # to the bundle reference (and Release.Revision when unpinned).
+  # file src: sha256 of the file. directory src: sha256 of the output of
+  #   (cd /bundle/<src> && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2)
+  # a path the bundle may lack (demo/policy/destinations.yaml) has the digest
+  # `absent` when it is not in the bundle.
+  contentDigests:
+    bundleDigest: ""
+    paths: {}
+  # Earlier bundles' content digests, oldest first. Same shape as contentDigests:
+  #   - bundleDigest: sha256:<64 hex>
+  #     paths: { <src>: <digest>, ... }
+  # Lets a Deployment's bundle-loader keep the oldest earlier bundle whose files
+  # for that Deployment equal the current ones (see openddil.bundleLoaderDigest).
+  # Every digest listed here must stay pullable from the registry for as long as
+  # it is listed: a pod rescheduled onto a new node pulls it again.
+  contentDigestHistory: []
 
 # --- Hook Jobs (topic-init, postgres-schema-init, *-bootstrap) --------------
 # The four Helm-hook Jobs were previously shipped with NO resources block,
@@ -89,6 +108,14 @@ edges:
   # udpPort: container listen port. Same value (62040-62042) used as NodePort
   # if sensorIngest.externalAccess.enabled=true. Hold for in-cluster-only
   # clusters that ban NodePort (default: false, ClusterIP only).
+  # sensorIngest.disAppearance (optional, string): the YAML text of a DIS appearance table for this edge's
+  # sensor-ingest. Empty or absent (the default) means off and the edge renders as before. When non-empty, a
+  # ConfigMap named with a short hash of the content is rendered for the edge, key dis_appearance.yaml, and
+  # mounted read-only in the sensor-ingest container at /ontology/dis_appearance.yaml (subPath). Example:
+  #   - id: edge-01
+  #     sensorIngest:
+  #       disAppearance: |
+  #         ...
   - id: edge-01
     region: region-east
     udpPort: 62040
@@ -310,9 +337,25 @@ toxiproxy:
 electric:
   image:
     repository: electricsql/electric
-    tag: "1.6.2"
-    digest: ""
+    tag: "1.8.1"
+    digest: "sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
     pullPolicy: IfNotPresent
+  # Secure mode. Electric then requires a secret on /v1/shape and only the PEP
+  # in front of each Electric holds it; the Electric NetworkPolicies render too.
+  # Needs releasability.enabled (a PEP in front of every Electric). The Secret
+  # holds one key per instance: `hub` for the hub Electric, the tier id for
+  # each tier Electric.
+  secure:
+    enabled: false          # true: Electric requires a secret on /v1/shape; only the PEPs hold it
+    # Secret values must be URL-safe (letters and digits): the scripts pass them unencoded.
+    existingSecret: ""      # optional: a Secret holding one key per Electric instance (see above)
+  # Shape DELETE (/v1/shape by handle). Electric 1.6.2 and 1.8.1 enable it only
+  # through ELECTRIC_ENABLE_INTEGRATION_TESTING; in both, that flag gates shape
+  # deletion and nothing else (config/runtime.exs derives only
+  # allow_shape_deletion? from it). A PEP that retires a shape deletes it by
+  # handle so its log leaves disk. Requires secure.enabled: with the secret and
+  # the PEP-only NetworkPolicy, only the PEPs can reach DELETE.
+  allowShapeDeletion: false
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
@@ -736,7 +779,12 @@ algorithms:
   # Declared analytic units the faust-edge runner loads from the bundle
   # (/bundle/agents/algorithms/<unit>/). Each name needs a chart copy of its
   # declaration at files/algorithms/<unit>/unit.yaml (render check).
-  enabled: [wear, thermal]
+  # All six run, as the in-line code did before the units: posture owns
+  # asset_state and telemetry-latest-state, trends and element_rollup the
+  # windows, element_bands the band crossings, thermal the runaway events and
+  # wear derived-sustainment. Leaving one out stops its output.
+  # element_bands' bands are elementState.healthBands, not set here.
+  enabled: [element_bands, element_rollup, posture, thermal, trends, wear]
   units:
     thermal:
       # Declared defaults (algorithms/thermal/unit.yaml); override a param here by name.
@@ -782,6 +830,12 @@ algorithms:
       #     engineering until the params are per-platform.
 
 projector:
+  telemetryChangeOnly:
+    # 0 = write telemetry_latest_state on every message (today). >0 = suppress
+    # rows that change only motion within the deadband or freshness, with a
+    # write at least this often (seconds). At most 15: half the reporting
+    # sweep's 30 s stale window. Deadbands: movement.standards.<variant>.positionDeadbandM.
+    heartbeatS: 0
   image:
     name: projector
     tag: ""
@@ -843,8 +897,14 @@ munitionTracks:
 movement:
   # per variant: marchOrderS, emplaceS (seconds), fuelTank {value, unit},
   # fuelBurnPerKm {value, unit}; any key may be omitted (the panel then
-  # names it as missing)
+  # names it as missing). Each variant may also carry positionDeadbandM
+  # (metres, a number >= 0): the distance a position must move from the last
+  # written one before the projector writes a telemetry row, used only when
+  # projector.telemetryChangeOnly.heartbeatS is on. The move panel ignores it.
   standards: {}
+  # the "*" fallback deadband (metres) for variants with no positionDeadbandM;
+  # null means such variants compare exactly
+  positionDeadbandDefaultM: null
   # [{id, label, members: [asset_id, ...], plannedMoveKm}]
   units: []
 
@@ -916,6 +976,14 @@ cmService:
   # Additional baselines come from the top-level `baselinesLayer` value.
   # A patch that adds the same volume/mount/env names
   # (cm-baselines-overlay, /baselines-overlay) is redundant but harmless.
+  # One-shot backfill of failure-episodes from AssetCM state and export files.
+  # Enabled for one upgrade at a time; the next upgrade's values turn it off.
+  failureEpisodesBackfill:
+    enabled: false
+    # Per-AssetCM export lines (JSONL), keyed "hub" or the tier id. Usually set
+    # with --set-file cmService.failureEpisodesBackfill.files.<key>=<path>.
+    # A key with no entry or an empty string means live state only (--admin).
+    files: {}
 
 # The first write path into the CM event log: an authenticated report
 # becomes one CmEvent on the tier's cm-events topic. Disabled by default so
@@ -2189,9 +2257,9 @@ releasability:
   # PEPs only: the edge tier template adds it to that PEP's labelled tables,
   # and it is deliberately NOT in labeledTables below.
   elementShapes:
-    # Electric serves shape DELETE only when its integration-testing flag is
-    # on; this stays false until that is decided. While false, a released view
-    # is forgotten by the PEP and the upstream shape is left alone.
+    # Needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it).
+    # While false, a released view is forgotten by the PEP and the upstream
+    # shape is left alone.
     deleteUpstream: false
     # Distinct element views one principal may hold.
     viewerMax: 8
@@ -2384,6 +2452,47 @@ releasability:
       digest: ""
     appVolumeSize: 8Mi
     logLevel: INFO
+    # Optional per-source band table for the hub PEP, as JSON text. Empty (the default) means off: nothing
+    # renders and the env is not set. When non-empty, a ConfigMap whose name carries a short hash of the content
+    # is rendered with key source-bands.json, mounted read-only at /etc/openddil/bands in the pep container, and
+    # OPENDDIL_SOURCE_BANDS_PATH=/etc/openddil/bands/source-bands.json is set. A changed value is a new name.
+    sourceBands: ""
+    # Extra env vars for every PEP container: the hub PEP and each tier PEP.
+    # A map, not a list like egress.forwarder.extraEnv: maps merge across -f
+    # files, so an overlay can add a variable without dropping the default, and
+    # a key set to null is skipped. Values are rendered as strings. LOG_LEVEL
+    # and OPENDDIL_* names are set by the chart and refuse here.
+    # MALLOC_ARENA_MAX=2 is the default because the PEP is a threaded server
+    # under glibc: each request thread can allocate in its own malloc arena
+    # (up to 8 per CPU) and glibc keeps an arena's high-water mark, so memory
+    # grows with screen loads until the container limit kills it. Raising the
+    # limit only moves that; capping the arenas bounds what is retained.
+    env:
+      MALLOC_ARENA_MAX: "2"
+    shapeRotation:
+      # Seconds a shape handle lives before the PEP deletes it upstream once;
+      # Electric's 409 then moves every client of that view to a fresh, short
+      # log. 0 is off. Needs electric.allowShapeDeletion and a ceiling above it.
+      periodSeconds: 0
+      # The checked bound: reads presenting a handle older than this count in
+      # openddil_pep_shape_over_ceiling_total. 0 is off (ages are still reported).
+      ceilingSeconds: 0
+      # The PEP deletes upstream any shape handle it bound that no client has read
+      # for this many seconds, so a shape nobody reads any more stops growing in
+      # Electric's store. 0 is off. Must be above the session's inactivity end
+      # (sessionTtlSeconds, or sessionIdleSeconds in sliding mode), and needs electric.allowShapeDeletion. Shapes bound by an earlier PEP process,
+      # and shapes created outside the PEP, are not swept.
+      idlePeriodSeconds: 0
+    # Persist the PEP's tracked shape handles across pod replacement, so a
+    # restarted PEP adopts them and its idle sweep can delete the unread ones
+    # upstream instead of leaving them orphaned in Electric. Off by default.
+    # On: one small RWO PVC per PEP and strategy Recreate (one writer to the
+    # file at a time: the old pod saves on SIGTERM before the new one adopts).
+    handleState:
+      enabled: false
+      size: 64Mi
+      storageClass: ""      # "" = cluster default
+      everySeconds: 30
     # true: every shape the PEPs create asks Electric for a compacted log.
     # false: plain logs. Compacted shapes serve frozen rows to fresh reads from
     # their second compaction pass (electric-sql/electric#4848, reproduced on 1.6.2

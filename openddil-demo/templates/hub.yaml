@@ -110,8 +110,12 @@ spec:
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
             - name: LOGICAL_PUBLISHER_HOST
               value: {{ printf "%s-electric-sync%s" .Release.Name (include "openddil.svcDomain" .) | quote }}
+            {{- if include "openddil.electricSecure" . }}
+            {{- include "openddil.electricSecretRef" (dict "root" . "name" "ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
+            {{- else }}
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- end }}
             # ElectricSQL bind port — explicit so it matches the Service.
             - name: ELECTRIC_PORT
               value: {{ .Values.electric.port | quote }}
@@ -360,7 +364,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "agents/hub/restate_hub.py" "dst" "restate_hub.py")
           ) "root" .) | nindent 8 }}
       containers:
@@ -397,8 +401,10 @@ metadata:
     # DEFAULT, not a value this chart sets -- CM_KAFKA_BROKERS below names
     # only the broker, never the topic. Same topic name, different
     # producer, exists per-tier as tier-cm-<id> (tier-node.yaml). It also
-    # emits tactical-events on CM transitions, same broker.
-    openddil.io/produces-topics: "hq/asset-cm-state hq/tactical-events"
+    # emits tactical-events on CM transitions, same broker, and one record
+    # per closed failure episode (failure-episodes) with its refusals
+    # (failure-episodes-withheld), same broker.
+    openddil.io/produces-topics: "hq/asset-cm-state hq/failure-episodes hq/failure-episodes-withheld hq/tactical-events"
 spec:
   replicas: 1
   selector:
@@ -415,7 +421,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/baselines"  "dst" "baselines")
           ) "root" .) | nindent 8 }}
@@ -528,21 +534,22 @@ spec:
       labels:
         {{- include "openddil.podLabels" . | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "cm-intake" "root" .) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) }}
       annotations:
         # Same staleness hazard, same fix, as tier-cm-intake-{{ "{{ $tier.id }}" }}'s
         # checksum/bundle comment: cm-intake.yaml ships as a static bundle file
         # this initContainer only copies once at pod start.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" . "extra" (list "cm-intake")) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" . "paths" $bundlePaths "extra" (list "cm-intake")) | sha256sum | quote }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "contracts/proto"          "dst" "proto")
-            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
-          ) "root" .) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" .) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" .Values.redpandaConnect.image }}"
@@ -677,7 +684,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" .) | nindent 8 }}
       containers:
@@ -854,7 +861,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology"   "dst" "ontology")
             (dict "src" "demo/ontology"       "dst" "ontology" "overlay" true)
@@ -1061,7 +1068,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" .) | nindent 8 }}
       containers:
@@ -1110,6 +1117,10 @@ spec:
               value: {{ .Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ .Values.munitionTracks.silenceSeconds | quote }}
+            {{- $changeOnly := include "openddil.telemetryChangeOnlyEnv" . }}
+            {{- if $changeOnly }}
+            {{- $changeOnly | nindent 12 }}
+            {{- end }}
             {{- if .Values.edgeAssignment.configMap }}
             {{- include "openddil.edgeAssignmentEnv" . | nindent 12 }}
             {{- end }}

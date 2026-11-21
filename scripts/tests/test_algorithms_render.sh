@@ -9,14 +9,17 @@
 #
 # Cases:
 #   A. defaults  -> every faust-edge Deployment carries ALGORITHMS_DIR,
-#                   ALGORITHMS_ENABLED=wear,thermal and ALGORITHM_PARAMS_JSON={} once,
-#                   no PROGNOSTICS_* env, a bundle-loader copying
-#                   agents/algorithms, the read-only mount, and a
-#                   produces-topics annotation with derived-sustainment and
-#                   the prognostics_accumulators changelog.
-#                   (wear and thermal are both enabled by default.)
-#   B. overrides -> --set (int64) and -f (float64) reach ALGORITHM_PARAMS_JSON.
-#   C. refusals  -> one case per rule (C1..C10b); each render must fail and its
+#                   ALGORITHMS_ENABLED (the six units) and ALGORITHM_PARAMS_JSON
+#                   once, the two limit variables from the downward API, no
+#                   PROGNOSTICS_* or ELEMENT_BANDS_JSON env (the runner refuses
+#                   both), a bundle-loader copying agents/algorithms, the
+#                   read-only mount, and a produces-topics annotation naming
+#                   each unit output topic and each durable unit's changelog
+#                   once. ALGORITHM_PARAMS_JSON holds only element_bands.bands,
+#                   equal to elementState.healthBands.
+#   B. overrides -> --set (int64) and -f (float64) reach ALGORITHM_PARAMS_JSON;
+#                   an elementState.healthBands change reaches element_bands.
+#   C. refusals  -> one case per rule (C1..C11); each render must fail and its
 #                   stderr must name the offender.
 #   D. byte check -> check-algorithm-declarations.sh exits 0 / 1 / 2.
 # ===========================================================================
@@ -62,6 +65,11 @@ docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
 n = ok = 0
 bad = []
 pj = set()
+bands = set()
+SIX = "element_bands,element_rollup,posture,thermal,trends,wear"
+TOPICS = ("telemetry-latest-state", "asset-telemetry-windows", "tactical-events", "derived-sustainment")
+TABLES = ("asset_state", "thermal_runaway_state", "prognostics_accumulators")
+LIMITS = {"ALGORITHMS_MEMORY_LIMIT_MI": ("limits.memory", "1Mi"), "ALGORITHMS_CPU_LIMIT_M": ("limits.cpu", "1m")}
 for d in docs:
     if d.get("kind") != "Deployment" or "-faust-edge-" not in d["metadata"]["name"]:
         continue
@@ -75,14 +83,26 @@ for d in docs:
         return [e.get("value") for e in envs if e["name"] == k]
     if one("ALGORITHMS_DIR") != ["/opt/openddil/algorithms"]:
         bad.append(f"{name}: ALGORITHMS_DIR {one('ALGORITHMS_DIR')}")
-    if one("ALGORITHMS_ENABLED") != ["wear,thermal"]:
+    if one("ALGORITHMS_ENABLED") != [SIX]:
         bad.append(f"{name}: ALGORITHMS_ENABLED {one('ALGORITHMS_ENABLED')}")
     if len(one("ALGORITHM_PARAMS_JSON")) != 1:
         bad.append(f"{name}: ALGORITHM_PARAMS_JSON x{len(one('ALGORITHM_PARAMS_JSON'))}")
     else:
-        pj.add(one("ALGORITHM_PARAMS_JSON")[0])
+        params = json.loads(one("ALGORITHM_PARAMS_JSON")[0])
+        eb = params.get("element_bands", {})
+        if "bands" in eb:
+            bands.add(json.dumps(eb.pop("bands"), sort_keys=True))
+            if not eb:
+                params.pop("element_bands")
+        pj.add(json.dumps(params, sort_keys=True, separators=(",", ":")))
     if any(e["name"].startswith("PROGNOSTICS_") for e in envs):
         bad.append(f"{name}: a PROGNOSTICS_ env is present")
+    if any(e["name"] == "ELEMENT_BANDS_JSON" for e in envs):
+        bad.append(f"{name}: ELEMENT_BANDS_JSON is present")
+    for k, (res, div) in LIMITS.items():
+        refs = [e.get("valueFrom", {}).get("resourceFieldRef", {}) for e in envs if e["name"] == k]
+        if refs != [{"containerName": "faust-edge", "resource": res, "divisor": div}]:
+            bad.append(f"{name}: {k} {refs}")
     loader = next((i for i in pod.get("initContainers", []) if i["name"] == "bundle-loader"), None)
     if not loader or "/bundle/agents/algorithms" not in " ".join(loader["command"]):
         bad.append(f"{name}: bundle-loader does not copy agents/algorithms")
@@ -90,7 +110,8 @@ for d in docs:
     if not (len(mounts) == 1 and mounts[0].get("readOnly") is True and mounts[0].get("subPath") == "algorithms"):
         bad.append(f"{name}: read-only algorithms mount")
     prod = d["metadata"]["annotations"]["openddil.io/produces-topics"].split()
-    for want in (f"{edge}/derived-sustainment", f"{edge}/openddil-{edge}-prognostics_accumulators-changelog"):
+    wants = [f"{edge}/{t}" for t in TOPICS] + [f"{edge}/openddil-{edge}-{t}-changelog" for t in TABLES]
+    for want in wants:
         if prod.count(want) != 1:
             bad.append(f"{name}: produces-topics has {want} x{prod.count(want)}")
     if not bad or not any(b.startswith(name) for b in bad):
@@ -98,6 +119,7 @@ for d in docs:
 print(f"faust_edges={n}")
 print(f"ok={ok}")
 print(f"params_json={'|'.join(sorted(pj))}")
+print(f"bands={'|'.join(sorted(bands))}")
 print(f"problems={'; '.join(bad) or 'none'}")
 PYEOF
 }
@@ -107,8 +129,13 @@ render "$TMP/default.yaml" || { echo "render failed:"; tail -3 "$TMP/default.yam
 got="$(inspect "$TMP/default.yaml")"
 echo "$got" | sed 's/^/  /'
 fe="$(val "$got" faust_edges)"
-if [ "${fe:-0}" -ge 1 ] && [ "$fe" = "$(val "$got" ok)" ] && [ "$(val "$got" problems)" = none ] && [ "$(val "$got" params_json)" = "{}" ]; then
-  echo "PASS A defaults: $fe faust-edge Deployments carry the three ALGORITHM env vars once, no PROGNOSTICS_, the bundle copy, the read-only mount and both produces-topics names"
+want_bands="$(helm show values "$CHART" 2>/dev/null | "$PY" -c '
+import json, sys, yaml
+h = yaml.safe_load(sys.stdin)["elementState"]["healthBands"]
+print(json.dumps({"health": {k: h[k] for k in ("limits", "names", "hysteresis", "severity")}}, sort_keys=True))
+' | tr -d '\r')"
+if [ "${fe:-0}" -ge 1 ] && [ "$fe" = "$(val "$got" ok)" ] && [ "$(val "$got" problems)" = none ] && [ "$(val "$got" params_json)" = "{}" ] && [ -n "$want_bands" ] && [ "$(val "$got" bands)" = "$want_bands" ]; then
+  echo "PASS A defaults: $fe faust-edge Deployments carry the six units, the ALGORITHM env vars once, both limit variables, no PROGNOSTICS_ or ELEMENT_BANDS_JSON, the bundle copy, the read-only mount, every output topic and changelog, and element_bands.bands = elementState.healthBands"
 else
   echo "FAIL A defaults"; FAIL=1
 fi
@@ -140,6 +167,23 @@ Y
 expect_json "B2 -f float" '{"wear":{"barrel_life_total_rounds":100,"track_life_total_km":10.5}}' -f "$TMP/B2.values.yaml"
 
 expect_json "B3 thermal --set" '{"thermal":{"delta_threshold_k":90}}' --set algorithms.units.thermal.params.delta_threshold_k=90
+
+# B4: a healthBands change reaches element_bands.bands. A values file, since
+# --set leaves a decimal as a string.
+cat > "$TMP/B4.values.yaml" <<'Y'
+elementState:
+  healthBands:
+    hysteresis: 0.02
+Y
+if render "$TMP/B4.yaml" -f "$TMP/B4.values.yaml"; then
+  b4="$(val "$(inspect "$TMP/B4.yaml")" bands)"
+  case "$b4" in
+    *'"hysteresis": 0.02'*) echo "PASS B4 healthBands.hysteresis=0.02 reaches element_bands.bands";;
+    *) echo "FAIL B4: bands $b4"; FAIL=1;;
+  esac
+else
+  echo "FAIL B4: render failed:"; tail -2 "$TMP/B4.yaml.err"; FAIL=1
+fi
 
 # ---- C: refusals
 expect_fail() {  # $1 = label, $2 = text stderr must contain, rest = helm flags
@@ -202,11 +246,13 @@ expect_fail "C9b above maximum" "algorithms.units.thermal.params.ewma_alpha is 1
 expect_fail "C7b undeclared thermal param" "algorithms.units.thermal.params.delta_k is not declared" --set algorithms.units.thermal.params.delta_k=1
 expect_fail "C10 memory below the sum" "above faustEdge.resources.limits.memory" --set faustEdge.resources.limits.memory=8Mi
 expect_fail "C10b bad memory suffix" 'unsupported suffix "G"' --set faustEdge.resources.limits.memory=1G
+expect_fail "C11 bands set under algorithms" "algorithms.units.element_bands.params.bands is not set here" --set algorithms.units.element_bands.params.bands=x
 
 # ---- D: byte check
-mkdir -p "$TMP/ta/algorithms/wear" "$TMP/ta/algorithms/thermal"
-cp "$CHART/files/algorithms/wear/unit.yaml" "$TMP/ta/algorithms/wear/unit.yaml"
-cp "$CHART/files/algorithms/thermal/unit.yaml" "$TMP/ta/algorithms/thermal/unit.yaml"
+for u in element_bands element_rollup posture thermal trends wear; do
+  mkdir -p "$TMP/ta/algorithms/$u"
+  cp "$CHART/files/algorithms/$u/unit.yaml" "$TMP/ta/algorithms/$u/unit.yaml"
+done
 bash "$CHECK" "$TMP/ta" > "$TMP/d1.out" 2>&1; rc=$?
 [ "$rc" = 0 ] && echo "PASS D1 identical copy exits 0" || { echo "FAIL D1: exit $rc"; FAIL=1; }
 printf '#' >> "$TMP/ta/algorithms/wear/unit.yaml"

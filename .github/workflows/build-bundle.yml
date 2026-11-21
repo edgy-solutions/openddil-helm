@@ -1,7 +1,7 @@
 name: Build and publish runtime-bundle image
 
-# Builds ghcr.io/edgy-solutions/openddil/runtime-bundle:latest from a
-# composed checkout of FOUR sibling openddil-* repos. This workflow
+# Builds ghcr.io/edgy-solutions/openddil/runtime-bundle from a composed
+# checkout of FOUR sibling openddil-* repos plus this one. This workflow
 # replaces the local `scripts/build-bundle.sh` for users who want
 # registry-driven builds.
 #
@@ -9,52 +9,65 @@ name: Build and publish runtime-bundle image
 # second independent job -- see the comment above `build-dis-sim` for why a
 # fixture image is published here rather than anywhere else.
 #
+# Sources: bundle-sources.lock at the root of this repo names the commit of
+# each of the four source repos (contracts, stack, tactical-agents, demo). It
+# is the only place those commits are chosen. Changing a source means a helm
+# commit that changes the lock; the first step refuses a malformed lock
+# (scripts/bundle-sources.sh). One helm commit therefore builds one bundle.
+#
 # Triggers:
-#   * push to master of THIS repo (e.g. someone edits the Dockerfile)
-#   * manual workflow_dispatch (e.g. rebuild after openddil-contracts
-#     adds a new proto without anything in openddil-helm changing)
+#   1. push to master of THIS repo touching bundle/**, bundle-sources.lock or
+#      this workflow file.
+#   2. pull_request to master touching the same paths: a branch build of this
+#      repo's Dockerfile against the locked commits.
+#   3. workflow_dispatch -- manual, on any branch of this repo. Inputs:
+#      compare_to and tag only. There is no source input: a source is changed
+#      in the lock.
+# There is no schedule and no repository_dispatch: with the sources pinned
+# they could only rebuild the same commits.
 #
-# Cross-repo triggers — three paths to a rebuild:
+# Tags (see "Compute tags"):
+#   :sha-<7>  every build. <7> is the first 7 hex of the sha256 of the five
+#             source commits (helm, contracts, stack, tactical-agents, demo),
+#             so the same five commits give the same tag. The commits are on
+#             the image as io.openddil.bundle.source.<repo> labels and in the
+#             job summary.
+#   :pr-<N>   a pull request build.
+#   :<tag>    a v* tag push, or the `tag` input (never `latest`).
+#   :latest   a push or a dispatch on master. Nothing else moves it: a branch,
+#             a pull request or a tag never does.
+# A pull request from a fork builds but pushes nothing.
 #
-#   1. push to master of THIS repo (bundle/** or this workflow file)
-#   2. repository_dispatch from a sibling source repo's own workflow
-#      (currently wired: openddil-contracts via its
-#      notify-bundle-rebuild.yml. Same pattern can be copy-pasted into
-#      openddil-stack / openddil-tactical-agents / openddil-demo when
-#      churn there warrants it.) The dispatching workflow needs a PAT
-#      with contents:write on this repo, stored as a secret in the
-#      source repo (BUNDLE_REBUILD_PAT).
-#   3. schedule — daily, regardless of activity, as a safety net for
-#      any source repo NOT yet wired to dispatch. Catches drift even
-#      when nobody manually triggers and no dispatch fires. Bundle
-#      build takes ~3-5 minutes; daily cost is negligible.
-#   4. workflow_dispatch — manual button in the Actions UI for ad-hoc
-#      rebuilds (e.g. retrying a flaky build, or specifying an extra
-#      tag).
+# Pinning a deployment: the job summary prints `bundle.image.digest`, the
+# value the chart takes to pull the bundle by digest. With the `compare_to`
+# input, the job also lists every file under /bundle that differs from that
+# earlier bundle (by git blob hash), so a pinned build can be checked to
+# carry only the change it was built for.
 
 on:
   push:
     branches: [ "master" ]
     paths:
       - "bundle/**"
+      - "bundle-sources.lock"
       - ".github/workflows/build-bundle.yml"
-    # Tag pushes (v1.0.0, ...) publish a versioned bundle image
-    # (:v1.0.0) alongside :latest so the helm chart + customer
-    # values-pinned.yaml can pin to a release. No `paths` filter on
-    # the tag trigger -- a release tag should always rebuild the
-    # bundle, regardless of which file the tagged commit touched.
-    tags: [ "v*" ]
-  repository_dispatch:
-    types: [source-repo-changed]
-  schedule:
-    # 06:00 UTC daily. Picks up any source-repo change that wasn't
-    # dispatch-triggered (e.g. unwired source repos, or a dispatch that
-    # failed silently). Cron uses GitHub Actions UTC.
-    - cron: "0 6 * * *"
+    # Version tags do not build here. A release adds the version tag to a
+    # bundle already built (release.yml -> release-retag.yml); it never
+    # rebuilds and never moves :latest.
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - "bundle/**"
+      - "bundle-sources.lock"
+      - ".github/workflows/build-bundle.yml"
   workflow_dispatch:
     inputs:
+      compare_to:
+        description: "Earlier bundle digest (sha256:...) to list every changed /bundle file against. Optional."
+        required: false
+        default: ""
       tag:
-        description: "Additional tag besides :latest (optional, e.g. v0.2.0)"
+        description: "Additional tag (optional, e.g. v0.2.0). Never latest."
         required: false
         default: ""
 
@@ -72,34 +85,74 @@ jobs:
       # in the same org; if any of these go private, swap to a PAT secret
       # (e.g. ${{ secrets.OPENDDIL_READ_PAT }}) with `token:` on each
       # checkout step.
+      #
+      # Each source is checked out at the commit bundle-sources.lock names.
+      # On a pull request this repo is checked out at the branch head, not
+      # GitHub's merge commit.
       - name: Checkout openddil-helm (self)
         uses: actions/checkout@v4
         with:
           path: openddil-helm
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Read bundle-sources.lock
+        id: lock
+        run: bash openddil-helm/scripts/bundle-sources.sh openddil-helm/bundle-sources.lock >> "$GITHUB_OUTPUT"
 
       - name: Checkout openddil-contracts
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-contracts
           path: openddil-contracts
+          ref: ${{ steps.lock.outputs.contracts }}
 
       - name: Checkout openddil-stack
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-stack
           path: openddil-stack
+          ref: ${{ steps.lock.outputs.stack }}
 
       - name: Checkout openddil-tactical-agents
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-tactical-agents
           path: openddil-tactical-agents
+          ref: ${{ steps.lock.outputs.tactical-agents }}
 
       - name: Checkout openddil-demo
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/openddil-demo
           path: openddil-demo
+          ref: ${{ steps.lock.outputs.demo }}
+
+      # The five commits this bundle is built from. A pinned build is a pull
+      # request or a ref other than master: it never moves :latest.
+      - name: Record source commits
+        id: src
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          S="$RUNNER_TEMP/bundle-sources.txt"
+          : > "$S"
+          for r in helm contracts stack tactical-agents demo; do
+            echo "$r $(git -C "openddil-$r" rev-parse HEAD)" >> "$S"
+          done
+          cat "$S"
+          id=$(sha256sum "$S" | cut -c1-7)
+          pinned=false
+          if [ -n "$PR_NUMBER" ] || [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            pinned=true
+          fi
+          echo "bundle id $id, pinned=$pinned"
+          {
+            echo "id=$id"
+            echo "pinned=$pinned"
+            echo "labels<<LABELS_END"
+            while read -r r c; do echo "io.openddil.bundle.source.$r=$c"; done < "$S"
+            echo "LABELS_END"
+          } >> "$GITHUB_OUTPUT"
 
       # The chart validates algorithm overrides against its own copy of each
       # unit.yaml; the bundle ships the tactical-agents copy. They must be the
@@ -120,6 +173,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+          protoc --version
 
       - name: Generate Python proto bindings in openddil-contracts
         run: |
@@ -135,26 +189,38 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags: always :latest. Additionally:
-      #   * On a v* git tag push: :<tag-name> (e.g. :v1.0.0). Consumers
-      #     pin to this in values-pinned.yaml for reproducible deploys.
-      #   * On workflow_dispatch with the `tag` input: :<input-value>.
-      #     Lets the operator publish an ad-hoc tag (e.g. retry rebuild
-      #     under a specific name).
+      # :sha-<id> always, :pr-<N> on a pull request, :<tag> on a v* tag or
+      # from the `tag` input; :latest only from an unpinned build on master.
       - name: Compute tags
         id: tags
+        env:
+          ID: ${{ steps.src.outputs.id }}
+          PINNED: ${{ steps.src.outputs.pinned }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXTRA: ${{ inputs.tag }}
         run: |
           REG=ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle
-          T="$REG:latest"
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            T="$T,$REG:${{ github.ref_name }}"
+          T="$REG:sha-$ID"
+          if [ -n "$PR_NUMBER" ]; then
+            T="$T,$REG:pr-$PR_NUMBER"
           fi
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            T="$T,$REG:${{ github.event.inputs.tag }}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            T="$T,$REG:$GITHUB_REF_NAME"
+          fi
+          if [ -n "$EXTRA" ]; then
+            if [ "$EXTRA" = "latest" ]; then
+              echo "::error::the tag input cannot be latest"
+              exit 1
+            fi
+            T="$T,$REG:$EXTRA"
+          fi
+          if [ "$PINNED" = "false" ]; then
+            T="$T,$REG:latest"
           fi
           echo "tags=$T" >> "$GITHUB_OUTPUT"
 
       - name: Build and push runtime-bundle
+        id: build
         uses: docker/build-push-action@v5
         with:
           # Build context = workspace root (parent of all 5 checked-out
@@ -162,9 +228,65 @@ jobs:
           # openddil-stack/schema, etc.) resolve relative to this context.
           context: .
           file: openddil-helm/bundle/Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.src.outputs.labels }}
           # No build-args — the bundle image has none.
+
+      # The pin, and with `compare_to` the file diff, read back from the
+      # pushed image itself rather than from the build context. Files are
+      # named by git blob hash, so any one can be held against a repo tree.
+      - name: Pin and compare
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMPARE_TO: ${{ inputs.compare_to }}
+        run: |
+          REG=ghcr.io/${{ github.repository_owner }}/openddil/runtime-bundle
+          export LC_ALL=C
+          TAB=$(printf '\t')
+          manifest() {
+            d="$RUNNER_TEMP/m-$2"
+            mkdir -p "$d"
+            cid=$(docker create "$REG@$1" /bin/true)
+            docker cp "$cid:/bundle" "$d/"
+            docker rm "$cid" > /dev/null
+            (cd "$d" && find bundle -type f | sort > list.txt \
+              && git hash-object --no-filters --stdin-paths < list.txt | paste - list.txt)
+          }
+          manifest "$DIGEST" new > "$RUNNER_TEMP/new.txt"
+          echo "PIN bundle.image.digest=$DIGEST"
+          echo "files in bundle: $(wc -l < "$RUNNER_TEMP/new.txt")"
+          {
+            echo "### runtime-bundle"
+            echo ""
+            echo "Pin: \`bundle.image.digest: $DIGEST\`"
+            echo ""
+            echo "Sources:"
+            echo '```'
+            cat "$RUNNER_TEMP/bundle-sources.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$COMPARE_TO" ]; then
+            case "$COMPARE_TO" in
+              sha256:*) ;;
+              *) echo "::error::compare_to must be sha256:<hex>"; exit 1 ;;
+            esac
+            manifest "$COMPARE_TO" old > "$RUNNER_TEMP/old.txt"
+            join -t "$TAB" -1 2 -2 2 -a 1 -a 2 -e MISSING -o 0,1.1,2.1 \
+              "$RUNNER_TEMP/old.txt" "$RUNNER_TEMP/new.txt" \
+              | awk -F "$TAB" -v OFS=' ' '$2 != $3 { s = ($2 == "MISSING") ? "added" : ($3 == "MISSING") ? "removed" : "changed"; print s, $1, $2, $3 }' \
+              > "$RUNNER_TEMP/diff.txt"
+            echo "files differing from $COMPARE_TO: $(wc -l < "$RUNNER_TEMP/diff.txt")"
+            cat "$RUNNER_TEMP/diff.txt"
+            {
+              echo ""
+              echo "Files differing from \`$COMPARE_TO\` ($(wc -l < "$RUNNER_TEMP/diff.txt")):"
+              echo '```'
+              cat "$RUNNER_TEMP/diff.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ---------------------------------------------------------------------------
   # dis-sim — the DIS PDU generator's image
@@ -191,12 +313,9 @@ jobs:
   # fixture to publish.
   #
   # TRIGGERS: the Dockerfile lives in openddil-customer-bundle-example, so
-  # this repo's `paths` filter cannot see a change to it. The daily schedule
-  # is what covers that -- exactly the unwired-source-repo case it was added
-  # for. Wiring a repository_dispatch from that repo would need a
-  # BUNDLE_REBUILD_PAT secret there (contents:write on THIS repo); until that
-  # secret exists, a notify workflow would fail on every push, so the
-  # schedule is the wiring.
+  # this repo's `paths` filter cannot see a change to it. With the schedule
+  # removed, a change there is published by the next master push of this repo
+  # or a manual dispatch.
   #
   # SINGLE PLATFORM, ON PURPOSE. linux/amd64 only, because `load: true` is
   # what makes the verification step below possible and load is
@@ -205,7 +324,11 @@ jobs:
   # Giving it an arm64 child means adding `platforms:` and giving up a
   # pre-publish proof that the dependency is really in there -- and the proof
   # is worth more than an architecture nothing in the lab uses.
+  #
+  # MASTER ONLY. It pushes :1.0 and :latest, so a pull request, a branch
+  # dispatch or a tag run skips it rather than publish from a branch.
   build-dis-sim:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout openddil-customer-bundle-example

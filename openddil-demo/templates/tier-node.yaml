@@ -658,7 +658,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
           ) "root" $root) | nindent 8 }}
       containers:
@@ -790,6 +790,10 @@ spec:
               value: {{ $root.Values.effectors.terminalTimeoutSeconds | quote }}
             - name: MUNITION_TRACK_SILENCE_S
               value: {{ $root.Values.munitionTracks.silenceSeconds | quote }}
+            {{- $changeOnly := include "openddil.telemetryChangeOnlyEnv" $root }}
+            {{- if $changeOnly }}
+            {{- $changeOnly | nindent 12 }}
+            {{- end }}
             {{- if $root.Values.edgeAssignment.configMap }}
             {{- include "openddil.edgeAssignmentEnv" $root | nindent 12 }}
             {{- end }}
@@ -878,8 +882,12 @@ spec:
             # the atlas image in this file).
             - name: DATABASE_URL
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)?sslmode=$(PGSSLMODE)"
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "ELECTRIC_SECRET" "key" $tier.id) | nindent 12 }}
+            {{- else }}
             - name: ELECTRIC_INSECURE
               value: "true"
+            {{- end }}
             {{- with (dig "maxShapes" $tier.kind nil ($root.Values.electric | default dict)) }}
             - name: ELECTRIC_MAX_SHAPES
               value: {{ . | toString | quote }}
@@ -1129,6 +1137,10 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 4 }}
 ---
+{{- with (include "openddil.pepHandleState.pvc" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{ . }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1142,6 +1154,9 @@ spec:
   # second replica would refuse valid resumptions. Failing closed is the
   # right direction; scaling out needs shared storage.
   replicas: 1
+{{- with (include "openddil.pepHandleState.strategy" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 2 }}
+{{- end }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 6 }}
@@ -1150,8 +1165,14 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-pep-%s" $tier.id) "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list
             $tier.id
             ($tier.publicOrigin | default "")
             (ternary $root.Values.releasability.oidc.clientSecret "" (not (not (and $root.Values.releasability.oidc.enabled $tier.publicOrigin))))
@@ -1165,12 +1186,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/gateway" "dst" "app")
-            (dict "src" "contracts/ontology" "dst" "ontology")
-            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
-            (dict "src" "contracts/baselines" "dst" "baselines")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -1179,6 +1195,12 @@ spec:
             # THIS TIER'S Electric, which is the whole point.
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-tier-electric-%s%s:3000" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
+            {{- with (include "openddil.pepShapeEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" $tier.id) | nindent 12 }}
+            {{- end }}
             # THIS TIER'S OWN PDP — and this line is the difference between a
             # degraded mode and an outage.
             #
@@ -1348,6 +1370,10 @@ spec:
               # anywhere to say why.
               value: {{ include "openddil.tierCookieSecure" (dict "origin" $tier.publicOrigin) | quote }}
             {{- end }}
+            {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+{{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 12 }}
+{{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -1377,6 +1403,9 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+{{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 12 }}
+{{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
@@ -1392,6 +1421,9 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+{{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-tier-pep-%s" $root.Release.Name $tier.id))) }}
+{{- . | nindent 8 }}
+{{- end }}
 {{- if not $tier.hasChildren }}
 ---
 # ===========================================================================
@@ -1400,7 +1432,7 @@ spec:
 # ===========================================================================
 {{ include "openddil.declarationIntake" (dict "root" $root "name" (printf "tier-declaration-intake-%s" $tier.id) "component" (printf "tier-declaration-intake-%s" $tier.id) "pepComponent" (printf "tier-pep-%s" $tier.id) "broker" $broker "brokerId" $tier.id) }}
 {{- end }}
-{{- if $root.Values.releasability.lockDownElectric }}
+{{- if include "openddil.electricLockdown" $root }}
 ---
 # BYPASS PREVENTION AT THE TIER. Slice 1's policy named the ROOT's
 # electric-sync and left every tier's Electric uncovered — so a tier node
@@ -1580,7 +1612,7 @@ spec:
           root reads to decide something, a tier reading the same store must
           read too.
         */ -}}
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/ontology" "dst" "ontology")
             (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
@@ -1675,8 +1707,10 @@ metadata:
     # "asset-cm-state" is this tier's own writer of the same topic name
     # the root cm-service produces (hub.yaml), onto THIS TIER'S OWN broker
     # rather than hq. CODE DEFAULT, not a value this chart sets. Plus
-    # tactical-events, emitted by the same service.
-    openddil.io/produces-topics: {{ printf "%s/asset-cm-state %s/tactical-events" $tier.id $tier.id | quote }}
+    # tactical-events, emitted by the same service, and one record per
+    # closed failure episode (failure-episodes) with its refusals
+    # (failure-episodes-withheld), on the same broker.
+    openddil.io/produces-topics: {{ printf "%s/asset-cm-state %s/failure-episodes %s/failure-episodes-withheld %s/tactical-events" $tier.id $tier.id $tier.id $tier.id | quote }}
 spec:
   replicas: 1
   selector:
@@ -1698,7 +1732,7 @@ spec:
         # decoration — without them the service produces meaningless CM
         # output. Its deployment surface diverged from fusion's even though
         # the two are structural twins at the code layer.
-        {{- include "openddil.bundleInit" (dict "paths" (list
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" (list
             (dict "src" "contracts/gen/python" "dst" "proto")
             (dict "src" "contracts/baselines" "dst" "baselines")
           ) "root" $root) | nindent 8 }}
@@ -1800,8 +1834,12 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" (printf "tier-cm-intake-%s" $tier.id) "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "contracts/proto"          "dst" "proto")
+            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
+          ) }}
       annotations:
-        # HASHES THE BUNDLE IMAGE REFERENCE (or Release.Revision when
+        # HASHES THE CONTENT OF THE BUNDLE FILES THIS POD COPIES (or the bundle reference + Release.Revision when
         # unpinned), not this pod's own rendered spec — same mechanism
         # openddil.policyChecksum gives the identity pods, extended here
         # because cm-intake.yaml ships as a static bundle file this
@@ -1810,17 +1848,14 @@ spec:
         # on stale config exactly the way edge-hq-bridge's connect-config
         # comment describes for a chart-generated file. This is the same
         # staleness hazard for a bundle-shipped one.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "tier-cm-intake" $tier.id)) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list "tier-cm-intake" $tier.id)) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "contracts/proto"          "dst" "proto")
-            (dict "src" "demo/cm-intake.yaml"       "dst" "connect.yaml")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
@@ -2137,8 +2172,19 @@ spec:
       # rolled on upgrade: measured 2026-09-30, all three tier Topaz pods were
       # still on the 2026-09-26 bundle digest while their PEPs had just pulled
       # 2026-09-30's (policy files happened to be identical that night).
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+          ) }}
+{{- $checksumPaths := concat $bundlePaths (list
+            (dict "src" (printf "demo/policy/%s.yaml" $root.Values.releasability.policyVariant))
+            (dict "src" "demo/policy/destinations.yaml")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        # The policy-loader init container reads the variant corpus and
+        # destinations.yaml from the bundle outside bundleInit, so those two
+        # files are in the checksum too ($checksumPaths).
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $checksumPaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
         {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
         checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
@@ -2162,12 +2208,9 @@ spec:
       # auditable because every decision records the policy and corpus
       # versions that produced it.
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
-            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         - name: policy-loader
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -2310,7 +2353,7 @@ spec:
         # TO SEE A RELOAD: this container logs "policy-sync: <name> updated ...",
         # then topaz logs WARN "Processed file watch event." with err.
         - name: policy-sync
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT

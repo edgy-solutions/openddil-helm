@@ -1,0 +1,31 @@
+# Copy this file to .github/workflows/release.yml in an image repo and set
+# `images` to that repo's GHCR package names.
+#
+# - A dispatch run is a dry run by default: it resolves and prints the plan,
+#   tags nothing and creates no release. From a branch it can only be a dry
+#   run; `commit` names the commit whose builds it resolves.
+# - A tag push (v1.2.3, v1.2.3-rc1, or <image>/v1.2.3) tags for real: it adds
+#   the version tag to the digest already built from the tagged commit, and
+#   creates the GitHub release with each digest in the notes.
+# - The repo's existing build workflow is unchanged and keeps pushing
+#   sha-* / latest on its own. A release never rebuilds and never moves latest.
+name: release
+on:
+  push:
+    tags: ['v*', '*/v*']
+  workflow_dispatch:
+    inputs:
+      expected: {description: 'image=sha256:… lines', required: false, default: ''}
+      dry_run: {type: boolean, default: true}
+      commit: {description: 'dry run only: resolve the builds of this commit', required: false, default: ''}
+permissions:
+  contents: write
+  packages: write
+jobs:
+  retag:
+    uses: edgy-solutions/openddil-helm/.github/workflows/release-retag.yml@master
+    with:
+      images: "REPLACE: package names"
+      expected: ${{ inputs.expected || '' }}
+      dry_run: ${{ inputs.dry_run || false }}
+      commit: ${{ inputs.commit || '' }}

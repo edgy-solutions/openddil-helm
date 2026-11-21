@@ -140,6 +140,11 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "topaz-hq" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+          ) }}
+{{- $checksumPaths := include "openddil.topazHqChecksumPaths" $root | fromJsonArray }}
       annotations:
         # Roll the pod when the policy CONTENT changes, not on every helm
         # revision. The bundle image is a rolling tag, so without this a helm
@@ -149,7 +154,10 @@ spec:
         # openddil.policyChecksum for what's hashed and the unpinned
         # fallback that keeps this component's old every-upgrade behavior
         # until `bundle.image.digest` is set.
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
+        # The policy-loader init container reads the variant corpus and
+        # destinations.yaml from the bundle outside bundleInit, so those two
+        # files are in the checksum too ($checksumPaths).
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $checksumPaths "extra" (include "openddil.topazPolicyExtra" $root | fromJsonArray)) | sha256sum | quote }}
         {{- if and (include "openddil.usersLayerActive" $root) (not $root.Values.releasability.liveReload.enabled) }}
         {{- /* both layer strings, as before the helper narrowed to releasability.yaml */}}
         checksum/ontology-deployment: {{ include "openddil.topazLayerChecksum" $root | quote }}
@@ -169,10 +177,7 @@ spec:
         # A silent rename during transport is exactly how a reviewed file and
         # a running file drift apart, so: same content, different name, said
         # out loud here and in users.yaml's header.
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
-            (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         # THE ENTITLEMENTS CORPUS, SELECTED BY ENV RATHER THAN BY TEMPLATE.
         #
         # A separate init container from the one above, for one reason: the
@@ -193,7 +198,7 @@ spec:
         # silent rename in transport is how a reviewed file and a running file
         # drift apart.
         - name: policy-loader
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -321,7 +326,7 @@ spec:
         # TO SEE A RELOAD: this container logs "policy-sync: <name> updated ...",
         # then topaz logs WARN "Processed file watch event." with err.
         - name: policy-sync
-          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $root.Values.bundle.image.digest "root" $root) }}
+          image: {{ include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" (include "openddil.bundleLoaderDigest" (dict "root" $root "paths" $checksumPaths)) "root" $root) }}
           imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" $root.Values.bundle.image.pullPolicy "root" $root) }}
           env:
             - name: OPENDDIL_POLICY_VARIANT
@@ -406,6 +411,10 @@ spec:
   selector:
     {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 4 }}
 ---
+{{- with (include "openddil.pepHandleState.pvc" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{ . }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -421,6 +430,9 @@ spec:
   # right direction, but confusingly. Scaling out needs shared handle storage;
   # Slice 1 says so rather than pretending the component is stateless.
   replicas: 1
+{{- with (include "openddil.pepHandleState.strategy" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 2 }}
+{{- end }}
   selector:
     matchLabels:
       {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 6 }}
@@ -429,8 +441,14 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "pep" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/gateway" "dst" "app")
+            (dict "src" "contracts/ontology" "dst" "ontology")
+            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
+            (dict "src" "contracts/baselines" "dst" "baselines")
+          ) }}
       annotations:
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list
             (ternary $root.Values.releasability.oidc.clientSecret "" $root.Values.releasability.oidc.enabled)
           ) (ternary (list (toJson $root.Values.cmReports.faultCatalog)) (list) $root.Values.cmReports.enabled))) | sha256sum | quote }}
         {{- with (include "openddil.ontologyDeploymentAnnotation" $root) }}
@@ -442,12 +460,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/gateway" "dst" "app")
-            (dict "src" "contracts/ontology" "dst" "ontology")
-            (dict "src" "demo/ontology" "dst" "ontology" "overlay" true)
-            (dict "src" "contracts/baselines" "dst" "baselines")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: pep
           image: {{ include "openddil.thirdPartyImage" (dict "repository" $root.Values.releasability.pep.image.repository "tag" $root.Values.releasability.pep.image.tag "digest" $root.Values.releasability.pep.image.digest "root" $root) }}
@@ -459,6 +472,12 @@ spec:
           env:
             - name: OPENDDIL_ELECTRIC_URL
               value: {{ printf "http://%s-electric-sync%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.electric.port | quote }}
+            {{- with (include "openddil.pepShapeEnv" $root) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- if include "openddil.electricSecure" $root }}
+            {{- include "openddil.electricSecretRef" (dict "root" $root "name" "OPENDDIL_ELECTRIC_SECRET" "key" "hub") | nindent 12 }}
+            {{- end }}
             # THE EGRESS PANE -- PA. egress.yaml's egress-pane-api Service
             # renders under the same `releasability.enabled` condition this
             # whole PEP does, so the two arrive together; see hub.yaml's
@@ -597,6 +616,15 @@ spec:
             - name: OPENDDIL_EXERCISE_CONTROL_URL
               value: {{ printf "http://%s-exercise-control%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.exerciseControl.port | quote }}
             {{- end }}
+            {{- include "openddil.pepExtraEnv" $root | nindent 12 }}
+            {{- if $root.Values.releasability.pep.sourceBands }}
+            # Set here, not through releasability.pep.env, which refuses OPENDDIL_* names.
+            - name: OPENDDIL_SOURCE_BANDS_PATH
+              value: /etc/openddil/bands/source-bands.json
+            {{- end }}
+{{- with (include "openddil.pepHandleState.env" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
           ports:
             - containerPort: 8080
               name: http
@@ -626,6 +654,14 @@ spec:
               mountPath: /etc/openddil
               readOnly: true
             {{- end }}
+            {{- if $root.Values.releasability.pep.sourceBands }}
+            - name: pep-source-bands
+              mountPath: /etc/openddil/bands
+              readOnly: true
+            {{- end }}
+{{- with (include "openddil.pepHandleState.mount" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 12 }}
+{{- end }}
       volumes:
         - name: bundle-shared
           emptyDir:
@@ -641,6 +677,28 @@ spec:
         {{- with (include "openddil.baselinesLayerVolume" $root) }}
         {{- . | nindent 8 }}
         {{- end }}
+        {{- if $root.Values.releasability.pep.sourceBands }}
+        - name: pep-source-bands
+          configMap:
+            name: {{ $root.Release.Name }}-pep-source-bands-{{ $root.Values.releasability.pep.sourceBands | sha256sum | trunc 10 }}
+        {{- end }}
+{{- with (include "openddil.pepHandleState.volume" (dict "root" $root "name" (printf "%s-pep" $root.Release.Name))) }}
+{{- . | nindent 8 }}
+{{- end }}
+{{- if $root.Values.releasability.pep.sourceBands }}
+---
+# Optional per-source band table for the PEP (releasability.pep.sourceBands). Rendered only when the value is
+# non-empty. The name carries a short hash of the content, so a changed value is a new name and rolls the PEP.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $root.Release.Name }}-pep-source-bands-{{ $root.Values.releasability.pep.sourceBands | sha256sum | trunc 10 }}
+  labels:
+    {{- include "openddil.labels" $root | nindent 4 }}
+immutable: true
+data:
+  source-bands.json: {{ $root.Values.releasability.pep.sourceBands | quote }}
+{{- end }}
 {{- if and $root.Values.cmReports.enabled $root.Values.cmReports.faultCatalog }}
 ---
 # The per-platform-variant catalog the PEP will check a report's fault
@@ -940,9 +998,12 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" "keycloak" "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
+          ) }}
       annotations:
         {{- /* the session mode, TTL, idle and max are baked into the realm import (SSO lifetimes); without them here a change to any never rolls Keycloak or re-imports the realm */}}
-        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
+        checksum/policy: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (concat (list $root.Values.releasability.oidc.clientSecret (include "openddil.sessionChecksumItems" $root) (include "openddil.keycloakTierClients" $root)) (ternary (list (toJson $root.Values.picture.serviceClients)) (list) $root.Values.picture.enabled) (ternary (list (include "openddil.keycloakExternalClients" $root)) (list) (and $root.Values.releasability.oidc.enabled (not (empty $root.Values.releasability.keycloak.externalClients)))) (ternary (list (include "openddil.realmUsersOverlay" $root)) (list) (ne (include "openddil.realmUsersOverlay" $root) "")))) | sha256sum | quote }}
         checksum/theme: {{ include "openddil.keycloakThemeData" $root | sha256sum | quote }}
         {{- if include "openddil.anyIdentityReplica" $root }}
         # ADR-0045 next increment, item 6: the digest of the realm inputs this
@@ -957,9 +1018,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/policy/realm-openddil.json" "dst" "bundle-realm/realm-openddil.json")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
         {{- if include "openddil.realmUsersOverlay" $root }}
         # DEPLOYMENT-LAYER REALM USERS (releasability.deploymentLayer.realmUsersJson).
         # Merged here, before prepare-realm, because merging JSON arrays is not
@@ -1118,7 +1177,7 @@ spec:
           emptyDir:
             sizeLimit: 16Mi
 {{- end }}
-{{- if $root.Values.releasability.lockDownElectric }}
+{{- if include "openddil.electricLockdown" $root }}
 ---
 # BYPASS PREVENTION. Without this the PEP is a suggestion: any pod in the
 # namespace — including a browser reaching a port-forward — can talk to
@@ -1146,6 +1205,8 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.electric.port }}
+{{- end }}
+{{- if $root.Values.releasability.lockDownElectric }}
 ---
 # BYPASS PREVENTION, SAME REASON, SECOND SURFACE -- PA. Without this, the
 # egress pane (egress.yaml's egress-pane-api) is reachable by any pod in the

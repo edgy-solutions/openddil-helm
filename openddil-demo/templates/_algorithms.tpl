@@ -5,7 +5,8 @@ Declared analytic units (values: algorithms).
                                    missing or mismatched chart copy of a
                                    declaration, or an override that the
                                    declaration does not allow
-  openddil.algorithms.paramsJson   ALGORITHM_PARAMS_JSON: {unit: overrides}
+  openddil.algorithms.paramsJson   ALGORITHM_PARAMS_JSON: {unit: overrides}; element_bands.bands is
+                                   elementState.healthBands
   openddil.algorithms.enabledCsv   ALGORITHMS_ENABLED
   openddil.algorithms.outputTopics distinct output topics of enabled units
   openddil.algorithms.stateTables  Faust table of each enabled unit
@@ -34,12 +35,16 @@ copies the same file.
 {{- end }}
 
 {{- define "openddil.algorithms.paramsJson" -}}
+{{- $root := . -}}
 {{- $alg := .Values.algorithms | default dict -}}
 {{- $units := $alg.units | default dict -}}
 {{- $out := dict -}}
 {{- range (include "openddil.algorithms.enabledList" . | fromYamlArray) -}}
 {{- $ud := index $units . | default dict -}}
-{{- $p := $ud.params | default dict -}}
+{{- $p := deepCopy ($ud.params | default dict) -}}
+{{- /* element_bands takes its bands from elementState.healthBands, the one
+   place the chart declares them (validate refuses a bands override here). */ -}}
+{{- if eq . "element_bands" }}{{ $_ := set $p "bands" (include "openddil.elementState.bandsJson" $root | fromJson) }}{{ end -}}
 {{- if $p }}{{ $_ := set $out . $p }}{{ end -}}
 {{- end -}}
 {{- toJson $out -}}
@@ -78,10 +83,10 @@ copies the same file.
 {{- /* 2. the enabled list */ -}}
 {{- $enabled := $alg.enabled -}}
 {{- if not (kindIs "slice" $enabled) -}}
-{{- fail (printf "algorithms.enabled must be a non-empty list of unit names, got %s; the runner refuses an empty list, so set it to [wear]" (kindOf $enabled)) -}}
+{{- fail (printf "algorithms.enabled must be a non-empty list of unit names, got %s; the runner refuses an empty list, so set it to the six units [element_bands, element_rollup, posture, thermal, trends, wear]" (kindOf $enabled)) -}}
 {{- end -}}
 {{- if not $enabled -}}
-{{- fail "algorithms.enabled must not be empty; the runner refuses an empty list at startup, so set it to [wear]" -}}
+{{- fail "algorithms.enabled must not be empty; the runner refuses an empty list at startup, so set it to the six units [element_bands, element_rollup, posture, thermal, trends, wear]" -}}
 {{- end -}}
 {{- if ne (len (uniq $enabled)) (len $enabled) -}}
 {{- fail (printf "algorithms.enabled has a duplicate entry: %s" (join "," $enabled)) -}}
@@ -93,7 +98,7 @@ copies the same file.
 {{- end -}}
 {{- /* 3. a chart copy per enabled unit */ -}}
 {{- if not . -}}
-{{- fail "algorithms.enabled must not hold an empty name (--set algorithms.enabled={} gives [\"\"]); the runner refuses an empty list at startup, so set it to [wear]" -}}
+{{- fail "algorithms.enabled must not hold an empty name (--set algorithms.enabled={} gives [\"\"]); the runner refuses an empty list at startup, so set it to the six units [element_bands, element_rollup, posture, thermal, trends, wear]" -}}
 {{- end -}}
 {{- $path := printf "files/algorithms/%s/unit.yaml" . -}}
 {{- if not ($root.Files.Get $path) -}}
@@ -129,6 +134,9 @@ copies the same file.
 {{- fail (printf "algorithms.units.%s.params must be a map, got %s" $u (kindOf $p)) -}}
 {{- end -}}
 {{- $declared := (index $decls $u).params | default dict -}}
+{{- if and (eq $u "element_bands") (hasKey $p "bands") -}}
+{{- fail "algorithms.units.element_bands.params.bands is not set here: the chart passes elementState.healthBands as the element_bands unit's bands, so change those" -}}
+{{- end -}}
 {{- range $name, $v := $p -}}
 {{- /* 7. only declared names */ -}}
 {{- if not (hasKey $declared $name) -}}

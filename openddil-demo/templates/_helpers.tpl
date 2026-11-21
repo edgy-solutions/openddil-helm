@@ -168,13 +168,18 @@ Usage:
       mountPath: /ontology
       subPath: ontology
 
+Optional `pin` (true on Deployments and StatefulSets, never on Jobs): the loader
+image digest comes from openddil.bundleLoaderDigest.
+
 Each entry: src is the path under /bundle/ in the bundle image; dst is
 the top-level name under /shared/ in the emptyDir. Main container then
 subPath-mounts /shared/<dst> at the target absolute path.
 */}}
 {{- define "openddil.bundleInit" -}}
+{{- $loaderDigest := .root.Values.bundle.image.digest -}}
+{{- if .pin -}}{{- $loaderDigest = include "openddil.bundleLoaderDigest" (dict "root" .root "paths" .paths) -}}{{- end -}}
 - name: bundle-loader
-  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "digest" .root.Values.bundle.image.digest "root" .root) }}
+  image: {{ include "openddil.image" (dict "name" .root.Values.bundle.image.name "tag" .root.Values.bundle.image.tag "digest" $loaderDigest "root" .root) }}
   imagePullPolicy: {{ include "openddil.pullPolicy" (dict "policy" .root.Values.bundle.image.pullPolicy "root" .root) }}
   command:
     - sh
@@ -320,8 +325,133 @@ checksum/dis-condition-baselines: {{ . | sha256sum | quote }}
 {{- end }}
 
 {{/*
+openddil.bundleLoaderDigest -- the digest a Deployment's or StatefulSet's
+bundle-loader image names. Takes
+(dict "root" $root "paths" <the list of dicts passed to openddil.bundleInit>).
+Returns the empty string when bundle.image.digest is empty, as today.
+
+The loader image names the OLDEST earlier bundle from which this workload's
+files are unchanged, so a bundle bump leaves its pod template byte-identical
+unless a file it copies changed. bundle.contentDigestHistory lists earlier
+bundles' content digests, oldest first, in the shape of bundle.contentDigests.
+Only a contiguous run back from the newest history entry counts: the walk
+stops at the first entry whose digest for any src in `paths` differs from the
+current one. A src absent from an entry never matches, so missing data moves
+the loader to a newer bundle (a restart, the safe direction).
+
+Rules: outside PINNED mode (digest empty, or contentDigests.bundleDigest not
+equal to it) or with empty `paths`, the current digest is returned and the
+history is ignored. Otherwise every history entry is validated (a sha256
+digest, no duplicates, none equal to the current digest) and a bad one fails
+the render naming its index. Jobs never use this: they take the current
+bundle, so a schema migration is always the newest.
+
+Every digest listed in the history must stay pullable from the registry for
+as long as it is listed: a pod rescheduled onto a new node pulls it again.
+*/}}
+{{- define "openddil.bundleLoaderDigest" -}}
+{{- $root := .root -}}
+{{- $paths := .paths | default list -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- $cand := $digest -}}
+{{- if and $digest $paths (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- $hist := $root.Values.bundle.contentDigestHistory | default list -}}
+{{- $seen := dict -}}
+{{- range $i, $e := $hist -}}
+{{- $bd := toString $e.bundleDigest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $bd) -}}{{- fail (printf "bundle.contentDigestHistory[%d].bundleDigest %q is not sha256:<64 hex>" $i $bd) -}}{{- end -}}
+{{- if eq $bd (toString $digest) -}}{{- fail (printf "bundle.contentDigestHistory[%d] equals the current bundle.image.digest" $i) -}}{{- end -}}
+{{- if hasKey $seen $bd -}}{{- fail (printf "bundle.contentDigestHistory[%d] repeats the digest of entry %v" $i (get $seen $bd)) -}}{{- end -}}
+{{- $_ := set $seen $bd $i -}}
+{{- end -}}
+{{- $run := true -}}
+{{- range $k := until (len $hist) -}}
+{{- if $run -}}
+{{- $e := index $hist (sub (sub (len $hist) 1) $k) -}}
+{{- $ep := $e.paths | default dict -}}
+{{- $ok := true -}}
+{{- range $p := $paths -}}
+{{- $ev := index $ep $p.src -}}
+{{- if or (not $ev) (ne (toString $ev) (toString (index ($cd.paths | default dict) $p.src))) -}}{{- $ok = false -}}{{- end -}}
+{{- end -}}
+{{- if $ok -}}{{- $cand = $e.bundleDigest -}}{{- else -}}{{- $run = false -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $cand -}}
+{{- end }}
+
+{{/*
+openddil.bundleContent -- the bundle-derived lines of a checksum input, for
+the bundle paths ONE Deployment copies. Takes
+(dict "root" $root "paths" <the list of dicts passed to openddil.bundleInit>).
+A Deployment's checksum must cover only what it mounts: hashing the bundle
+reference rolled every Deployment on every bundle bump, including ones that
+mount nothing from the bundle.
+
+Two modes:
+  - PINNED: bundle.image.digest is set AND bundle.contentDigests.bundleDigest
+    equals it, so the digests in bundle.contentDigests.paths were read from
+    this very image. One line `bundle:<src>=<digest>` per entry of `paths`, in
+    list order. A src with no digest fails the render, naming the src: a
+    silent gap would be a path that never rolls its pods.
+  - FALLBACK (anything else): `bundleImage=<the resolved bundle reference>`,
+    plus `revision=<Release.Revision>` when bundle.image.digest is empty (a
+    tag can move under an unchanged reference). This is the behaviour before
+    content digests existed.
+An empty `paths` renders nothing in either mode.
+
+Not covered: a bundle-loader that is not pinned (a Job's, or any caller that
+omits `pin`) still names the current bundle reference. A Deployment or
+StatefulSet's loader names the digest from openddil.bundleLoaderDigest, which
+follows bundle.contentDigestHistory: with no history, or outside PINNED mode,
+that is the current bundle and a bump still changes its pod template. Digests
+in the history must stay pullable from the registry for as long as they are
+listed. The bundle build emitting these digests (rather than a values file) is
+the follow-up.
+*/}}
+{{- define "openddil.bundleContent" -}}
+{{- $root := .root -}}
+{{- $paths := .paths | default list -}}
+{{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- if $paths -}}
+{{- if and $digest (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- range $p := $paths -}}
+{{- $d := index ($cd.paths | default dict) $p.src -}}
+{{- if not $d -}}{{- fail (printf "bundle.contentDigests.paths has no digest for %s: the content digests do not cover it" $p.src) -}}{{- end }}
+bundle:{{ $p.src }}={{ $d }}
+{{ end -}}
+{{- else -}}
+{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
+bundleImage={{ $bundleImage }}
+{{ if not $digest -}}
+revision={{ $root.Release.Revision }}
+{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Paths hashed by topaz-hq's checksum/policy: its two bundleInit files plus the
+variant corpus files the policy loader reads. topaz-hq's checksum/policy and the
+egress gate/intake checksum/registries (liveReload off) share this list so they
+roll on the same upgrades. Takes the chart root; returns JSON.
+*/}}
+{{- define "openddil.topazHqChecksumPaths" -}}
+{{- toJson (list
+  (dict "src" "demo/policy/.manifest"          "dst" "policy/.manifest")
+  (dict "src" "demo/policy/releasability.rego" "dst" "policy/releasability.rego")
+  (dict "src" (printf "demo/policy/%s.yaml" .Values.releasability.policyVariant))
+  (dict "src" "demo/policy/destinations.yaml")
+) -}}
+{{- end }}
+
+{{/*
 Content input for the identity pods' `checksum/policy` annotation
-(topaz-hq, pep, keycloak, tier-pep — see each pod template's WHY comment).
+(topaz-hq, pep, keycloak, tier-pep — see each pod template's WHY comment)
+and the intake pods' `checksum/bundle` / the egress `checksum/registries`.
 Pipe the result through `sha256sum` at the call site, same as every other
 checksum/* annotation in this chart.
 
@@ -334,13 +464,15 @@ happened. This replaces "did a revision happen" with "did the content an
 identity pod actually loads change".
 
 Usage:
-  checksum/policy: {{ "{{" }} include "openddil.policyChecksum" (dict "root" $root "extra" (list ...)) | sha256sum {{ "}}" }}
+  checksum/policy: {{ "{{" }} include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list ...)) | sha256sum {{ "}}" }}
 
 Input, for every call site:
-  - the fully resolved bundle-image reference, via the SAME openddil.image
-    include openddil.bundleInit resolves it with (name/tag/digest/registry)
-    — not re-derived, so the two can never disagree about what "the
-    bundle" means.
+  - `.paths` (REQUIRED, may be (list)): the bundleInit paths THIS Deployment
+    mounts, the very variable passed to openddil.bundleInit. Rendered by
+    openddil.bundleContent: the content digest of each path when the bundle
+    is pinned and the chart has its digests, else the bundle reference (see
+    there). So the checksum covers the Deployment's own bundle files, not
+    the bundle reference. A Deployment that mounts nothing passes (list).
   - `.extra`, a list of strings the CALLER supplies: every value under
     `.Values.releasability` (and, for tier-pep, the tier's own id and
     publicOrigin) that pod actually consumes and that is NOT already
@@ -355,21 +487,19 @@ different door. A tag-only bundle reference can point at new content
 without the reference TEXT changing at all, which is the exact hazard
 above; content-addressing needs content to address, and a tag is not
 content. So when `bundle.image.digest` is empty, `.Release.Revision` is
-folded into the input too, i.e. an unpinned install keeps rolling
-identity pods on every upgrade exactly like the revision-stamped
-annotation this replaces. Pinning `bundle.image.digest` is how an install
-opts in to rolling on content instead of on revision.
+folded into the input too (by openddil.bundleContent's fallback), i.e. an
+unpinned install keeps rolling identity pods on every upgrade exactly like
+the revision-stamped annotation this replaces. Pinning
+`bundle.image.digest` and supplying `bundle.contentDigests` is how an
+install opts in to rolling on content instead of on revision.
 */}}
 {{- define "openddil.policyChecksum" -}}
-{{- $root := .root -}}
-{{- $digest := $root.Values.bundle.image.digest -}}
-{{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
-bundleImage={{ $bundleImage }}
+{{- if not (hasKey . "paths") -}}
+{{- fail "policyChecksum needs paths: the bundleInit paths this Deployment mounts, or (list)" -}}
+{{- end -}}
+{{- include "openddil.bundleContent" (dict "root" .root "paths" .paths) -}}
 {{- range $i, $v := (.extra | default list) }}
 extra[{{ $i }}]={{ $v }}
-{{- end }}
-{{- if not $digest }}
-revision={{ $root.Release.Revision }}
 {{- end -}}
 {{- end }}
 
@@ -965,23 +1095,37 @@ release with no replica renders exactly what it did before.
 {{- end }}
 
 {{/*
-openddil.realmVersion -- the digest of the realm's INPUTS the chart can see:
-the content-addressed bundle that carries the realm artefact, plus the
-deployment-layer users overlay. Takes the chart root. It moves whenever the
-realm can have moved, and may move when it did not (a bundle change
-elsewhere): a false roll, never a false match. A per-file realm digest
-stamped by the bundle build is the follow-up.
-
-An unpinned bundle (no bundle.image.digest) is not content-addressed, so the
-Release.Revision is folded in and the version moves every revision, the same
-rule openddil.policyChecksum applies.
+openddil.realmVersion -- the digest of the realm's INPUTS the chart can see.
+Takes the chart root. Output: `sha256:` + the first 16 hex of the input.
+  - PINNED (bundle.image.digest equals bundle.contentDigests.bundleDigest):
+    the realm file's content digest (`demo/policy/realm-openddil.json=<digest>`
+    from bundle.contentDigests.paths, failing the render if absent) plus the
+    deployment-layer users overlay. A bundle bump that leaves the realm file
+    alone leaves the version alone.
+  - OTHERWISE: the bundle reference plus the overlay, plus the Release.Revision
+    when unpinned (the rule openddil.policyChecksum applies). It may move when
+    the realm did not (a bundle change elsewhere): a false roll, never a
+    false match.
+It must not take per-tier inputs: scripts/check-realm-drift.sh compares it
+across tiers. The digests come from values for now; the bundle build
+emitting them is the follow-up.
 */}}
 {{- define "openddil.realmVersion" -}}
 {{- $root := . -}}
 {{- $digest := $root.Values.bundle.image.digest -}}
+{{- $cd := $root.Values.bundle.contentDigests | default dict -}}
+{{- $overlay := include "openddil.realmUsersOverlay" $root -}}
+{{- $in := "" -}}
+{{- if and $digest (eq (toString $cd.bundleDigest) (toString $digest)) -}}
+{{- $src := "demo/policy/realm-openddil.json" -}}
+{{- $d := index ($cd.paths | default dict) $src -}}
+{{- if not $d -}}{{- fail (printf "bundle.contentDigests.paths has no digest for %s: the content digests do not cover it" $src) -}}{{- end -}}
+{{- $in = printf "%s=%s\n%s" $src $d $overlay -}}
+{{- else -}}
 {{- $bundleImage := include "openddil.image" (dict "name" $root.Values.bundle.image.name "tag" $root.Values.bundle.image.tag "digest" $digest "root" $root) -}}
-{{- $in := printf "%s\n%s" $bundleImage (include "openddil.realmUsersOverlay" $root) -}}
+{{- $in = printf "%s\n%s" $bundleImage $overlay -}}
 {{- if not $digest -}}{{- $in = printf "%s\nrevision=%v" $in $root.Release.Revision -}}{{- end -}}
+{{- end -}}
 sha256:{{ $in | sha256sum | trunc 16 }}
 {{- end }}
 
@@ -1533,7 +1677,7 @@ ignores unit strings.
 
 {{/*
 openddil.projectorGroupIds -- the "openddil-projector" service's fixed
-15-topic consumer-group set (SPEC-consumer-declarations.md Part A).
+consumer-group set (SPEC-consumer-declarations.md Part A): 19 groups.
 
 CODE DEFAULT, NOT SHIPPED IN THIS CHART. projector-{{ edge.id }} (edge.yaml,
 non-tier-managed edges only) and projector-hq (hub.yaml) both run the same
@@ -1552,9 +1696,16 @@ from this chart.
 Per-edge projectors also carry the parts-availability mapping (the root
 config is shared), but their broker has no such topic, so that group sits
 idle there, same as the regional rollups.
+
+projector-failure-episodes and projector-failure-episodes-withheld come
+with the failure-episodes mappings in the projector's baked config. They
+are declared with the image that carries them, not before: a group listed
+here that the running image lacks is a declared group nobody runs.
+scripts/tests/test_projector_groups_render.sh holds this list against
+the rendered annotations and, given PROJECTOR_CONFIG, against that file.
 */}}
 {{- define "openddil.projectorGroupIds" -}}
-projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
+projector-asset-correlation projector-asset-declaration projector-asset-element-inventory projector-asset-element-telemetry projector-asset-fielding projector-capability-state projector-cm-state projector-effector-launch projector-failure-episodes projector-failure-episodes-withheld projector-logistics-status projector-munition-track projector-parts-availability projector-region-fleet-summary projector-region-top-factors projector-region-wear-trends projector-tactical-events projector-telemetry-latest projector-telemetry-windows
 {{- end }}
 
 {{/*
@@ -1566,19 +1717,6 @@ Usage: include "openddil.faustChangelogTopic" (dict "appId" ... "table" ...)
 */}}
 {{- define "openddil.faustChangelogTopic" -}}
 {{- printf "%s-%s-changelog" .appId .table -}}
-{{- end }}
-
-{{/*
-openddil.faustEdgeTables -- the code-default Faust table name faust-edge's app
-keeps: the one holding each asset's latest decoded state. CODE DEFAULT baked
-into the faust-edge app's own table definition (not visible in this chart,
-which has no Faust source to read it from) -- confirmed from a live topic
-census of the resulting changelog topic, not invented here. The tables of
-declared units (the wear unit's prognostics_accumulators) are read from their
-declarations by openddil.algorithms.stateTables and appended by edge.yaml.
-*/}}
-{{- define "openddil.faustEdgeTables" -}}
-- asset_state
 {{- end }}
 
 {{/*
@@ -1715,6 +1853,18 @@ mappings:
     # SHORTER window than a leaf, not a longer one: the region is where the
     # volume lands and where the shape is read from.
     retention_hours: {{ if $tier.hasChildren }}{{ $root.Values.eventRetention.regionHours }}{{ else }}{{ $root.Values.eventRetention.edgeHours }}{{ end }}
+  {{- if not $tier.hasChildren }}
+  # The owning tier's copy of the per-element band transitions. The topic is
+  # on no bridge or uplink list, so only the asset-level bandcount on
+  # tactical-events crosses.
+  - topic: element-band-events
+    handler: tactical_events
+    table: tactical_events
+    consumer_group: tier-projector-element-band-events-{{ $tier.id }}
+    decode_as: cloudevents.json
+    mode: append
+    retention_hours: {{ $root.Values.eventRetention.edgeHours }}
+  {{- end }}
   # DIS Fire/Detonation launch records. mode: custom,
   # same as the root default's entry (openddil-projector
   # src/config/projector_config.yaml) -- the handler owns its own Postgres
@@ -1773,6 +1923,20 @@ mappings:
     consumer_group: tier-projector-element-inventory-{{ $tier.id }}
     decode_as: json
     mode: upsert
+  # Closed failure episodes, projected at the tier that produced them.
+  # First write wins (custom handler, ON CONFLICT DO NOTHING); never pruned.
+  - topic: failure-episodes
+    handler: failure_episodes
+    table: failure_episodes
+    consumer_group: tier-projector-failure-episodes-{{ $tier.id }}
+    decode_as: json
+    mode: custom
+  - topic: failure-episodes-withheld
+    handler: failure_episodes_withheld
+    table: failure_episodes_withheld
+    consumer_group: tier-projector-failure-episodes-withheld-{{ $tier.id }}
+    decode_as: json
+    mode: custom
 {{- if $tier.hasChildren }}
   #
   # AN INTERMEDIATE PROJECTS ITS OWN ROLLUPS. The eight mappings above
@@ -2237,11 +2401,14 @@ drift=0
 # partitions, and a mismatch must not fail the hook (a failed hook leaves
 # the release pending-upgrade). The hook's log is deleted on success, so
 # scripts/check-topic-partitions.sh is the durable report.
+# failure-episodes and failure-episodes-withheld are delete with infinite retention, not compact.
+# The key is the asset id, and compaction would keep only each asset's latest episode. The topic
+# carries a durable record until the projector has written it.
 for spec in \
   "raw-sensor-stream|-p 1 -r 1 -c retention.ms=86400000 -c compression.type=lz4" \
   "ingress-dlq|-p 1 -r 1 -c retention.ms=604800000" \
   "telemetry-latest-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000" \
-  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000" \
+  "tactical-events|-p 4 -r 1 -c retention.ms=2592000000"   "element-band-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "effector-events|-p 4 -r 1 -c retention.ms=2592000000" \
   "munition-tracks|-p 4 -r 1 -c retention.ms=86400000"   "asset-declarations|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1"   "asset-fielding|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-cm-state|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c compression.type=lz4" \
@@ -2261,6 +2428,8 @@ for spec in \
   "asset-registry-events|-p 8 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
   "asset-element-telemetry|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1 -c max.message.bytes=16777216" \
   "asset-element-inventory|-p 1 -r 1 -c cleanup.policy=compact -c min.cleanable.dirty.ratio=0.1 -c segment.ms=60000 -c retention.ms=-1" \
+  "failure-episodes|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
+  "failure-episodes-withheld|-p 4 -r 1 -c cleanup.policy=delete -c retention.ms=-1 -c compression.type=lz4" \
   "link-heartbeat|-p 1 -r 1 -c retention.ms=3600000 -c cleanup.policy=delete" \
 {{- range .extra }}
   {{ . | quote }} \
@@ -2781,6 +2950,32 @@ at the price of shape logs that grow without bound. Every PEP gets the same valu
 {{- end }}
 
 {{/*
+openddil.pepExtraEnv -- releasability.pep.env as env entries, sorted by key.
+Takes the root. A null value is skipped (a later -f null renders as a literal
+null). Fails on a key that is not an env var name, a key the chart sets itself
+on the PEP (LOG_LEVEL, OPENDDIL_*), and a map or list value.
+*/}}
+{{- define "openddil.pepExtraEnv" -}}
+{{- $m := .Values.releasability.pep.env | default dict -}}
+{{- range $k := keys $m | sortAlpha -}}
+{{- $v := get $m $k -}}
+{{- if not (kindIs "invalid" $v) -}}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: not a valid environment variable name" $k) -}}
+{{- end -}}
+{{- if or (eq $k "LOG_LEVEL") (hasPrefix "OPENDDIL_" $k) -}}
+{{- fail (printf "releasability.pep.env.%s: set by the chart; use its own value" $k) -}}
+{{- end -}}
+{{- if or (kindIs "map" $v) (kindIs "slice" $v) -}}
+{{- fail (printf "releasability.pep.env.%s: must be a scalar, not a map or list" $k) -}}
+{{- end }}
+- name: {{ $k }}
+  value: {{ $v | toString | quote }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 openddil.pepElementEnv -- the element-state env every PEP gets: its tier id
 (a metrics label), the metrics port, and the element-shape bounds. Takes
 (dict "root" $root "tier" <tier id>).
@@ -2856,20 +3051,21 @@ spec:
       labels:
         {{- include "openddil.podLabels" $root | nindent 8 }}
         {{- include "openddil.selectorLabels" (dict "component" .component "root" $root) | nindent 8 }}
+{{- $bundlePaths := (list
+            (dict "src" "demo/declaration-intake.yaml" "dst" "connect.yaml")
+          ) }}
       annotations:
         # declaration-intake.yaml ships as a static bundle file the init
         # container copies once at pod start; same staleness hazard and fix as
         # cm-intake.
-        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "extra" (list "declaration-intake" .name)) | sha256sum | quote }}
+        checksum/bundle: {{ include "openddil.policyChecksum" (dict "root" $root "paths" $bundlePaths "extra" (list "declaration-intake" .name)) | sha256sum | quote }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        {{- include "openddil.bundleInit" (dict "paths" (list
-            (dict "src" "demo/declaration-intake.yaml" "dst" "connect.yaml")
-          ) "root" $root) | nindent 8 }}
+        {{- include "openddil.bundleInit" (dict "pin" true "paths" $bundlePaths "root" $root) | nindent 8 }}
       containers:
         - name: connect
           image: "{{ include "openddil.thirdPartyImage" $root.Values.redpandaConnect.image }}"
@@ -3012,8 +3208,95 @@ index is SQLite and needs POSIX locks.
 {{- end }}
 
 {{- define "openddil.electricEnv" -}}
+{{- include "openddil.electricDeletionGuard" . -}}
 - name: ELECTRIC_STORAGE_DIR
   value: /app/persistent
+{{- if .Values.electric.allowShapeDeletion }}
+- name: ELECTRIC_ENABLE_INTEGRATION_TESTING
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
+Refusals for shape deletion: it needs secure mode, and the PEP settings that
+delete by handle need it on. Renders nothing.
+*/}}
+{{- define "openddil.electricDeletionGuard" -}}
+{{- $allow := .Values.electric.allowShapeDeletion -}}
+{{- $rel := .Values.releasability | default dict -}}
+{{- /* Deletion without secure mode would leave DELETE open to every pod. */ -}}
+{{- if and $allow (not (include "openddil.electricSecure" .)) -}}
+{{- fail "electric.allowShapeDeletion needs electric.secure.enabled: shape DELETE must be reachable only by the PEPs" -}}
+{{- end -}}
+{{- /* Upstream deletion with Electric's DELETE off would be answered 405. */ -}}
+{{- if and (eq (toString (dig "elementShapes" "deleteUpstream" "false" $rel)) "true") (not $allow) -}}
+{{- fail "releasability.elementShapes.deleteUpstream needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- /* A rotating PEP deletes retired shapes; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "periodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- /* The idle sweep deletes by handle too; same 405 without the flag. */ -}}
+{{- if and (gt (float64 (toString (dig "pep" "shapeRotation" "idlePeriodSeconds" 0 $rel))) 0.0) (not $allow) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds needs electric.allowShapeDeletion (Electric answers DELETE with 405 without it)" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+PEP env for the shape ceiling, rotation period and idle sweep period. Args: the
+root context. Renders nothing when all are 0, so the PEP env is unchanged by
+default.
+*/}}
+{{- define "openddil.pepShapeEnv" -}}
+{{- $sr := dig "pep" "shapeRotation" dict (.Values.releasability | default dict) -}}
+{{- $period := dig "periodSeconds" 0 $sr -}}
+{{- $ceiling := dig "ceilingSeconds" 0 $sr -}}
+{{- $idle := dig "idlePeriodSeconds" 0 $sr -}}
+{{- /* Both must be numbers of seconds, never negative. */ -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $period)) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $ceiling)) -}}
+{{- fail "releasability.pep.shapeRotation.ceilingSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString $idle)) -}}
+{{- fail "releasability.pep.shapeRotation.idlePeriodSeconds must be a number of seconds >= 0" -}}
+{{- end -}}
+{{- $p := float64 (toString $period) -}}
+{{- $i := float64 (toString $idle) -}}
+{{- /* The time after which a session with no requests has ended: the TTL in
+fixed mode, the inactivity period in sliding mode. The PEP refuses at import
+when idle is not above it. */ -}}
+{{- $oidc := dig "oidc" dict (.Values.releasability | default dict) -}}
+{{- $floorKey := "sessionTtlSeconds" -}}
+{{- if eq (toString (default "fixed" $oidc.sessionMode)) "sliding" -}}
+{{- $floorKey = "sessionIdleSeconds" -}}
+{{- end -}}
+{{- $floor := int (default 900 (get $oidc $floorKey)) -}}
+{{- if and (gt $i 0.0) (le $i (float64 $floor)) -}}
+{{- fail (printf "releasability.pep.shapeRotation.idlePeriodSeconds (%v) must be above the session's inactivity end (%d s, from releasability.oidc.%s)" $idle $floor $floorKey) -}}
+{{- end -}}
+{{- $c := float64 (toString $ceiling) -}}
+{{- /* A period without a ceiling above it has no checked bound. */ -}}
+{{- if and (gt $p 0.0) (le $c 0.0) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- /* The PEP refuses at import when the period is not below the ceiling. */ -}}
+{{- if and (gt $p 0.0) (gt $c 0.0) (ge $p $c) -}}
+{{- fail "releasability.pep.shapeRotation.periodSeconds needs ceilingSeconds above it (the ceiling is the checked bound)" -}}
+{{- end -}}
+{{- if gt $c 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_CEILING_S
+  value: {{ int64 $c | toString | quote }}
+{{- end }}
+{{- if gt $p 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_ROTATE_S
+  value: {{ int64 $p | toString | quote }}
+{{- end }}
+{{- if gt $i 0.0 }}
+- name: OPENDDIL_PEP_SHAPE_IDLE_S
+  value: {{ int64 $i | toString | quote }}
+{{- end }}
 {{- end }}
 
 {{- define "openddil.electricMount" -}}
@@ -3275,4 +3558,192 @@ so the name tracks the data. Takes the root context.
 {{/* The values that shape a session, as one string for checksum annotations. */}}
 {{- define "openddil.sessionChecksumItems" -}}
 {{- list (toString .Values.releasability.oidc.sessionTtlSeconds) (include "openddil.sessionMode" .) (toString .Values.releasability.oidc.sessionIdleSeconds) (toString .Values.releasability.oidc.sessionMaxSeconds) | toJson -}}
+{{- end -}}
+
+{{/*
+ELECTRIC SECURE MODE. Electric requires a secret on /v1/shape when
+ELECTRIC_SECRET is set, and refuses to boot if ELECTRIC_SECRET and
+ELECTRIC_INSECURE are both set, so secure mode swaps one for the other.
+Only the PEP in front of each Electric holds the secret.
+*/}}
+{{- define "openddil.electricSecure" -}}
+{{- if .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/* Name of the Secret holding one key per Electric instance. */}}
+{{- define "openddil.electricSecretName" -}}
+{{- if .Values.electric.secure.existingSecret -}}
+{{ .Values.electric.secure.existingSecret }}
+{{- else -}}
+{{ printf "%s-electric-secret" .Release.Name }}
+{{- end -}}
+{{- end }}
+
+{{/*
+True when the Electric NetworkPolicies render: the older release flag or
+secure mode. Used only for the two Electric policies.
+*/}}
+{{- define "openddil.electricLockdown" -}}
+{{- if or .Values.releasability.lockDownElectric .Values.electric.secure.enabled }}true{{ end -}}
+{{- end }}
+
+{{/*
+The Electric instances this release renders, as a JSON list of keys: "hub"
+plus each rendered tier id (same filter as tier-node.yaml).
+*/}}
+{{- define "openddil.electricInstances" -}}
+{{- $out := list "hub" -}}
+{{- if .Values.tierNode.enabled -}}
+{{- $tn := .Values.tierNode -}}
+{{- range $tier := (include "openddil.tierList" . | fromYamlArray) -}}
+{{- if or (not $tn.tiers) (has $tier.id $tn.tiers) -}}
+{{- $out = append $out $tier.id -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}
+
+{{/* Fails when secure mode has an Electric with no PEP in front of it. */}}
+{{- define "openddil.electricSecureGuard" -}}
+{{- if and .Values.electric.secure.enabled (not .Values.releasability.enabled) -}}
+{{- range $i := (include "openddil.electricInstances" . | fromJsonArray) -}}
+{{- fail (printf "electric.secure.enabled needs a PEP in front of every Electric (releasability.enabled); %s has none" $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entry for an Electric container. Args: dict "root" "key" "name".
+Secure: the secret from the Secret. Otherwise ELECTRIC_INSECURE (name is
+"ELECTRIC_SECRET" or "OPENDDIL_ELECTRIC_SECRET" for the PEP).
+*/}}
+{{- define "openddil.electricSecretRef" -}}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "openddil.electricSecretName" .root | quote }}
+      key: {{ .key | quote }}
+{{- end }}
+
+{{/*
+Metres per platform_variant for the projector's telemetry position deadband,
+as compact JSON: {"<variant>": <m>, ..., "*": <m>}. Only variants that set
+movement.standards.<variant>.positionDeadbandM appear, plus "*" when
+movement.positionDeadbandDefaultM is not null. {} when there are none. Fails
+the render on a value that is not a number >= 0; the message names the variant
+only, never the value.
+*/}}
+{{- define "openddil.telemetryPositionDeadbandJson" -}}
+{{- $out := dict -}}
+{{- range $variant, $std := (.Values.movement.standards | default dict) -}}
+{{- if and (kindIs "map" $std) (hasKey $std "positionDeadbandM") (not (kindIs "invalid" $std.positionDeadbandM)) -}}
+{{- $m := $std.positionDeadbandM -}}
+{{- if not (or (kindIs "float64" $m) (kindIs "int64" $m) (kindIs "int" $m)) -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- if lt (float64 $m) 0.0 -}}
+{{- fail (printf "movement.standards.%s.positionDeadbandM must be a number >= 0" $variant) -}}
+{{- end -}}
+{{- $_ := set $out $variant $m -}}
+{{- end -}}
+{{- end -}}
+{{- $d := .Values.movement.positionDeadbandDefaultM -}}
+{{- if not (kindIs "invalid" $d) -}}
+{{- if not (or (kindIs "float64" $d) (kindIs "int64" $d) (kindIs "int" $d)) -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- if lt (float64 $d) 0.0 -}}
+{{- fail "movement.positionDeadbandDefaultM must be a number >= 0" -}}
+{{- end -}}
+{{- $_ := set $out "*" $d -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end }}
+
+{{/*
+The projector's two change-only env entries, for the caller to nindent into a
+container env list. Renders nothing when projector.telemetryChangeOnly.heartbeatS
+is 0, so the default leaves every projector pod spec as it was. Fails the
+render when heartbeatS is not a number, is below 0, or is above 15.
+*/}}
+{{- define "openddil.telemetryChangeOnlyEnv" -}}
+{{- $h := (.Values.projector.telemetryChangeOnly | default dict).heartbeatS | default 0 -}}
+{{- if not (or (kindIs "float64" $h) (kindIs "int64" $h) (kindIs "int" $h)) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if or (lt (float64 $h) 0.0) (gt (float64 $h) 15.0) -}}
+{{- fail "projector.telemetryChangeOnly.heartbeatS must be a number between 0 and 15" -}}
+{{- end -}}
+{{- if gt (float64 $h) 0.0 -}}
+- name: TELEMETRY_CHANGE_ONLY_HEARTBEAT_S
+  value: {{ $h | quote }}
+- name: TELEMETRY_POSITION_DEADBAND_M
+  value: {{ include "openddil.telemetryPositionDeadbandJson" . | quote }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Opt-in PEP handle-state volume (releasability.pep.handleState). Each helper
+takes (dict "root" $root "name" <Deployment name>) and renders nothing when
+the feature is off, so the default render is unchanged. The Deployment name is
+<release>-pep (hub) or <release>-tier-pep-<id> (tier); the component label is
+that name without the "<release>-" prefix.
+*/}}
+{{- define "openddil.pepHandleState.pvc" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-handle-state" .name }}
+  labels:
+    {{- include "openddil.labels" .root | nindent 4 }}
+    {{- include "openddil.selectorLabels" (dict "component" (trimPrefix (printf "%s-" .root.Release.Name) .name) "root" .root) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $hs.storageClass }}
+  storageClassName: {{ $hs.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $hs.size | default "64Mi" | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.strategy" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+strategy:
+  type: Recreate
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.env" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: OPENDDIL_PEP_HANDLE_STATE_FILE
+  value: /var/lib/openddil-pep/handles.json
+- name: OPENDDIL_PEP_HANDLE_STATE_EVERY_S
+  value: {{ $hs.everySeconds | default 30 | toString | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.mount" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  mountPath: /var/lib/openddil-pep
+{{- end -}}
+{{- end -}}
+
+{{- define "openddil.pepHandleState.volume" -}}
+{{- $hs := .root.Values.releasability.pep.handleState | default dict -}}
+{{- if $hs.enabled -}}
+- name: handle-state
+  persistentVolumeClaim:
+    claimName: {{ printf "%s-handle-state" .name }}
+{{- end -}}
 {{- end -}}
