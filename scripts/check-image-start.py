@@ -34,9 +34,13 @@ How a pod is emulated
   * Main containers run detached with `--network none`; after --wait seconds a
     container still running passes, one that exited 0 passes, one that exited
     non-zero fails unless an entry in the expect file matches it.
+  * A non-zero exit whose final error is an unreachable broker, database or
+    hostname is DEPS: the image got through its imports and configuration and
+    stopped at its first network call, which `--network none` makes certain.
+    DEPS is reported and does not fail the run.
   * Secret env values are the literal `start-check-placeholder`.
 
-Exit status: 0 all pass, 1 any FAIL, 2 bad input or failed render.
+Exit status: 0 no FAIL, 1 any FAIL, 2 bad input or failed render.
 """
 from __future__ import annotations
 
@@ -382,6 +386,41 @@ def match_expect(allowed, image, container, code, log):
     return None
 
 
+EXC_LINE = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception|Refusal)\b[^:]*:")
+ERR_LINE = re.compile(r"\b(ERROR|CRITICAL|FATAL)\b|STARTUP_REFUSED")
+DEP = re.compile(
+    r"name resolution|Name or service not known|Failed to resolve|Unable to bootstrap"
+    r"|could not translate host name|nodename nor servname"
+    r"|unreachable (broker|postgres|store|database)|Broker transport failure"
+    r"|Connection refused|KafkaConnectionError", re.I)
+
+
+def classify_exit(log):
+    """The deciding line of a log when the exit is a dependency stop, else None."""
+    lines = [l for l in log.splitlines() if not l.startswith("%3|")]
+    exc = [l for l in lines if EXC_LINE.match(l)]
+    err = [l for l in lines if ERR_LINE.search(l)]
+    pick = exc[-1] if exc else (err[-1] if err else None)
+    if pick is None:
+        return None
+    pick = pick.strip()
+    return pick if DEP.search(pick) else None
+
+
+def first_errors(log, n=3):
+    out = []
+    for l in log.splitlines():
+        if l.startswith("%3|"):
+            continue
+        if EXC_LINE.match(l) or ERR_LINE.search(l):
+            l = l.strip()
+            if l not in out:
+                out.append(l)
+            if len(out) == n:
+                break
+    return out
+
+
 # --------------------------------------------------------------------------
 # docker
 # --------------------------------------------------------------------------
@@ -594,7 +633,11 @@ def check(workloads, rend, overrides, allowed, wait, docker):
             if e:
                 r.update(verdict="ALLOWED %s" % e["reason"], state="ALLOWED")
             else:
-                r.update(verdict="FAIL exit=%d" % code, state="FAIL")
+                line = classify_exit(full)
+                if line:
+                    r.update(verdict="DEPS exit=%d" % code, state="DEPS", deps_line=line)
+                else:
+                    r.update(verdict="FAIL exit=%d" % code, state="FAIL")
     finally:
         cleanup.run()
     return results
@@ -607,13 +650,14 @@ def check(workloads, rend, overrides, allowed, wait, docker):
 def counts(results):
     n = len(results)
     p = sum(1 for r in results if r["state"] == "PASS")
+    d = sum(1 for r in results if r["state"] == "DEPS")
     a = sum(1 for r in results if r["state"] == "ALLOWED")
     f = sum(1 for r in results if r["state"] == "FAIL")
-    return n, p, a, f
+    return n, p, d, a, f
 
 
 def summary_line(results):
-    return "image-start: units=%d pass=%d allowed=%d fail=%d" % counts(results)
+    return "image-start: units=%d pass=%d deps=%d allowed=%d fail=%d" % counts(results)
 
 
 def table(results):
@@ -697,9 +741,14 @@ def main(argv=None):
         for s in skipped:
             print("  " + s)
     for r in results:
+        if r["state"] == "DEPS":
+            print("--- %s: %s: %s" % (r["unit"], r["verdict"], r["deps_line"][:200]))
+    for r in results:
         if r["state"] == "FAIL":
             tail = r["log"].rstrip().splitlines()[-20:]
             print("\n--- %s: %s (last %d log lines)" % (r["unit"], r["verdict"], len(tail)))
+            for l in first_errors(r["log"]):
+                print("  first error: " + l[:200])
             for line in tail:
                 print(line)
     print()
@@ -711,7 +760,7 @@ def main(argv=None):
         except OSError as e:
             print("image-start: cannot write summary: %s" % e, file=sys.stderr)
             return 2
-    return 1 if counts(results)[3] else 0
+    return 1 if counts(results)[4] else 0
 
 
 if __name__ == "__main__":

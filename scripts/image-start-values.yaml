@@ -36,13 +36,39 @@ picture:
   enabled: true
 
 # --- egress components (all run image: egress) ----------------------------
+# The assembler and forwarder each get one minimal route. With an empty
+# config they subscribe to no topic and exit on a client error, which says
+# nothing about the image. The kind is a stand-in with the x-openddil
+# pointers the assembler requires (owning_tier and episode).
 egress:
+  kinds:
+    StartCheckKind:
+      type: object
+      properties:
+        ref: {type: string}
+        marking: {type: object}
+        tier: {type: string}
+        subject: {type: string}
+        what:
+          type: object
+          properties:
+            part: {type: string}
+            code: {type: string}
+      x-openddil:
+        key: /ref
+        label: /marking
+        owning_tier: /tier
+        episode: {asset: /subject, component: /what/part, fault_code: /what/code}
   assembler:
     enabled: true
+    config:
+      - {name: start-check, kind: StartCheckKind, trigger_topic: start-check-trigger, output_topic: start-check-assembled}
   intake:
     enabled: true
   forwarder:
     enabled: true
+    config:
+      - {name: start-check, sink_topic: start-check-assembled, url: "http://127.0.0.1:9/ingest", kind: StartCheckKind}
   stubSink:
     enabled: true
 

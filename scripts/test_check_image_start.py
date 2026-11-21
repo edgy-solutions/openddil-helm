@@ -183,7 +183,7 @@ def test_selection_skips_third_party_only_pods(env):
     assert "Deployment/web/proxy nginx:1.27" in p.stdout        # skip is listed
     assert "Deployment/thirdparty/cache redis:7" in p.stdout
     assert "Job" not in p.stdout and "hook" not in p.stdout    # Jobs are out of scope
-    assert "units=3 pass=3 allowed=0 fail=0" in p.stdout
+    assert "units=3 pass=3 deps=0 allowed=0 fail=0" in p.stdout
 
 
 def test_env_resolution(env):
@@ -268,7 +268,7 @@ def test_expect_allows_only_on_image_container_exit_and_log(env):
     p = run(env, "--expect", exp, spec=spec)
     assert p.returncode == 0, p.stdout
     assert verdicts(p.stdout)["Deployment/web/app"][3] == "ALLOWED known and tracked"
-    assert "units=3 pass=2 allowed=1 fail=0" in p.stdout
+    assert "units=3 pass=2 deps=0 allowed=1 fail=0" in p.stdout
     # same exit, different log: stays red
     spec["main"]["faust-edge"]["log"] = "Traceback: something else"
     p = run(env, "--expect", exp, spec=spec)
@@ -293,7 +293,7 @@ def test_init_container_failure_is_init_failed(env):
     assert not any(c["argv"][0] == "run" and "-d" in c["argv"] and "faust-edge" in " ".join(c["argv"])
                    for c in docker_calls(env))
     assert "cp: cannot stat" in p.stdout
-    assert "units=3 pass=1 allowed=0 fail=2" in p.stdout
+    assert "units=3 pass=1 deps=0 allowed=0 fail=2" in p.stdout
 
 
 def test_pull_failure(env):
@@ -324,10 +324,10 @@ def test_summary_line_counts_and_markdown(env):
     spec = {"main": {"faust-edge": {"exit": 1, "log": "boom"}, "frontend": {"exit": 0, "log": ""}}}
     p = run(env, "--summary", str(work / "s.md"), spec=spec)
     assert p.returncode == 1
-    assert p.stdout.rstrip().endswith("image-start: units=3 pass=2 allowed=0 fail=1")
+    assert p.stdout.rstrip().endswith("image-start: units=3 pass=2 deps=0 allowed=0 fail=1")
     md = (work / "s.md").read_text()
     assert "| unit | image ref | digest | verdict |" in md
-    assert "units=3 pass=2 allowed=0 fail=1" in md
+    assert "units=3 pass=2 deps=0 allowed=0 fail=1" in md
     assert "sha256:fakefakefake" in md
 
 
@@ -340,3 +340,71 @@ def test_cleanup_removes_containers_and_volumes(env):
     ran = [a[a.index("--name") + 1] for a in calls if a[0] == "run"]
     gone = [a[-1] for a in calls if a[:2] == ["rm", "-f"]]
     assert set(ran) <= set(gone)
+
+
+# --------------------------------------------------------------------------
+# DEPS classification
+# --------------------------------------------------------------------------
+
+_RD = ("%3|1795242874.540|FAIL|rdkafka#producer-1| [thrd:t-redpanda-hq:19092/bootstrap]: "
+       "t-redpanda-hq:19092/bootstrap: Failed to resolve 't-redpanda-hq:19092': "
+       "Temporary failure in name resolution")
+_GATE_ERR = ('2026-11-21 06:34:35,478 ERROR [egress] STARTUP_REFUSED unreachable broker: '
+             'KafkaError{code=_TRANSPORT,val=-195,str="Failed to get metadata: Local: Broker transport failure"}')
+LOG_GATE = "\n".join([_RD, _RD, _GATE_ERR]) + "\n"
+LOG_PANE = ("2026-11-21 06:34:30,000 INFO [pane-api] store connection: postgres://store:5432/db\n"
+            "2026-11-21 06:34:31,000 ERROR [pane-api] STARTUP_REFUSED unreachable postgres: "
+            "[Errno -3] Temporary failure in name resolution\n")
+_SIM_EXC = ("aiokafka.errors.KafkaConnectionError: KafkaConnectionError: Unable to bootstrap from "
+            "[('t-redpanda-hq', 19092, <AddressFamily.AF_UNSPEC: 0>)]")
+LOG_SIM = ("Traceback (most recent call last):\n"
+           '  File "/app/sim.py", line 10, in main\n'
+           "    await producer.start()\n"
+           + _SIM_EXC + "\n"
+           "2026-11-21 06:34:46,669 ERROR [asyncio] Unclosed AIOKafkaProducer\n"
+           "producer: <aiokafka.producer.producer.AIOKafkaProducer object at 0x7f>\n")
+_ASM_EXC = ('cimpl.KafkaException: KafkaError{code=_INVALID_ARG,val=-186,'
+            'str="Failed to set subscription: Local: Invalid argument or configuration"}')
+LOG_ASM = (_RD + "\n" + _RD + "\nTraceback (most recent call last):\n"
+           '  File "/app/asm.py", line 5, in main\n    c.subscribe(t)\n' + _ASM_EXC + "\n")
+_REFUSAL = ("algorithm_runtime.runner.StartupRefusal: ALGORITHMS_ENABLED is unset: "
+            "name the units to run, e.g. ALGORITHMS_ENABLED=wear,thermal")
+LOG_FAUST = ("Traceback (most recent call last):\n"
+             '  File "/app/runner.py", line 9, in run\n    raise StartupRefusal\n' + _REFUSAL + "\n")
+
+
+def _load():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_image_start", SCRIPT)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_classify_exit_dependency_stops():
+    m = _load()
+    assert m.classify_exit(LOG_GATE) == _GATE_ERR
+    assert "unreachable postgres" in m.classify_exit(LOG_PANE)
+    assert m.classify_exit(LOG_SIM) == _SIM_EXC
+
+
+def test_classify_exit_config_refusals_and_noise_are_none():
+    m = _load()
+    assert m.classify_exit(LOG_ASM) is None
+    assert m.classify_exit(LOG_FAUST) is None
+    assert m.classify_exit("2026-11-21 INFO [x] starting\n2026-11-21 INFO [x] ready\n") is None
+
+
+def test_dependency_exit_is_deps_and_refusal_is_fail(env):
+    spec = {"main": {"faust-edge": {"exit": 1, "log": LOG_GATE}}}
+    p = run(env, spec=spec)
+    assert p.returncode == 0, p.stdout
+    assert verdicts(p.stdout)["Deployment/web/app"][3] == "DEPS exit=1"
+    assert "units=3 pass=2 deps=1 allowed=0 fail=0" in p.stdout
+    assert "--- Deployment/web/app: DEPS exit=1: " in p.stdout
+    spec = {"main": {"faust-edge": {"exit": 1, "log": LOG_FAUST}}}
+    p = run(env, spec=spec)
+    assert p.returncode == 1
+    assert verdicts(p.stdout)["Deployment/web/app"][3] == "FAIL exit=1"
+    assert "  first error: " + _REFUSAL in p.stdout
+    assert "units=3 pass=2 deps=0 allowed=0 fail=1" in p.stdout
