@@ -150,7 +150,7 @@ elif mode == "R1":
     check("R1 init order bundle-loader, merge-realm-users, prepare-realm", names.index("bundle-loader") < names.index("merge-realm-users") < names.index("prepare-realm"), names)
     m = init(kc, "merge-realm-users")
     check("R1 merge container runs the script on the staged realm", m["command"][-2:] == ["/bundle-realm/realm-openddil.json", "/subst/realm-users-overlay.json"] and "merge-realm-users.py" in " ".join(m["command"]))
-    check("R1 merge container is the stock python image", m["image"].startswith("python:"), m["image"])
+    check("R1 merge container is the stock python image", m["image"].startswith(("python:", "python@sha256:")), m["image"])
     k0 = workloads(r0)["t-keycloak"]
     check("R1 keycloak checksum/policy changes when set", ann(kc).get("checksum/policy") != ann(k0).get("checksum/policy"))
     check("R1 keycloak checksum/policy changes with the overlay", ann(kc).get("checksum/policy") != ann(workloads(r2)["t-keycloak"]).get("checksum/policy"))
