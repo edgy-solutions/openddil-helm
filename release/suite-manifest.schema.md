@@ -17,13 +17,15 @@ bundle:
   sources: {contracts: <sha>, demo: <sha>, stack: <sha>, tactical-agents: <sha>, helm: <sha>}
 images:
   - {name: projector, image: ghcr.io/edgy-solutions/openddil/projector, digest: sha256:…, repo: edgy-solutions/openddil-projector, commit: <40 hex>, tag: v2.0.0-rc1}
+thirdParty:                  # optional
+  - {name: postgres, image: postgres, tag: "15", digest: sha256:…, pinned: true}
 blockers:                    # free text, public-safe; must be empty when status != proposed
   - "…"
 ```
 
 Rules:
 
-- Exactly these top-level keys; no others.
+- Exactly these top-level keys; no others. `thirdParty` is the one optional key.
 - Every digest matches `^sha256:[0-9a-f]{64}$`; every commit matches `^[0-9a-f]{40}$`
   (`chart.commit` may be `""` while proposed).
 - Image names are unique.
@@ -34,3 +36,11 @@ Rules:
 - `status` other than `proposed` requires empty `blockers` and a set `chart.commit`.
 - A final version (no `-rc`) with `promotedFrom` set must have the same image digests and
   bundle digest as `suite-<promotedFrom>.yaml` beside it, when that file exists.
+- `thirdParty` (optional) lists third-party images the chart can run. Each entry has exactly
+  `name`, `image`, `tag`, `digest`, `pinned`. `pinned: true` means the chart's values name this
+  digest; `pinned: false` means the chart pulls by tag and the digest is what the tag named on
+  the date the manifest was written. Names are unique and differ from every `images` name; `tag`
+  is a non-empty string other than `latest`; `pinned` is a YAML bool.
+- `check_suite_published.py` does not check `thirdParty` against the registry.
+- `thirdParty` holds no openddil-owned images (`ghcr.io/edgy-solutions/openddil/...`); those
+  belong in `images`.
