@@ -1229,6 +1229,7 @@ spec:
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
             {{- include "openddil.pepCompactionEnv" $root | nindent 12 }}
             {{- include "openddil.pepElementEnv" (dict "root" $root "tier" $tier.id) | nindent 12 }}
+            {{- include "openddil.pepLabelRegistryEnv" (dict "root" $root "tier" $tier.id "decl" $tier.labelRegistry) | nindent 12 }}
             # --- asset arrivals (ADR-0050): only a leaf tier (an edge) takes
             # declarations, through its own intake; a region tier owns none.
             {{- if $tier.hasChildren }}

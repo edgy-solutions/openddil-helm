@@ -245,6 +245,9 @@ jobs:
       # releasability.pep.env: the default, an overlay, a null, and the refusals, piped (the render is never saved).
       - name: PEP env render test
         run: bash scripts/tests/test_pep_env_render.sh
+      # The PEP label registry's refresh and staleness, per tier, with the refusals. Piped, never saved.
+      - name: PEP label registry render test
+        run: bash scripts/tests/test_pep_label_registry_render.sh
 
       # The Restate wipe hook refuses while a failure-episodes backfill pod does not read ok. The wipe script is
       # piped from the render into sh against a stub kubectl; nothing rendered is saved.

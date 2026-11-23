@@ -1827,6 +1827,11 @@ tierNode:
   #                  at its own hostname cannot share the root's client.
   #                  When absent the tier is in-cluster only and its PEP
   #                  runs in header mode, which the PEP announces at boot.
+  #   labelRegistry  {refreshSeconds, maxStaleSeconds}. This tier PEP's label-
+  #                  registry refresh interval and maximum staleness, in
+  #                  seconds. Either key may be given alone; the other comes
+  #                  from releasability.pep.labelRegistry, which is also the
+  #                  hub PEP's declaration. See that block for the rules.
   #   identity       {replica: false}. true runs a Keycloak at this tier that
   #                  imports the SAME realm artefact as the root, with this
   #                  tier's client only and credentials only for users whose
@@ -2433,6 +2438,20 @@ releasability:
       digest: "sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
     appVolumeSize: 8Mi
     logLevel: INFO
+    # How the PEP keeps its label registry current, in seconds.
+    #   refreshSeconds   how often the PEP re-reads the registry.
+    #   maxStaleSeconds  the longest it may serve from a copy it has not
+    #                    refreshed; past that it stops serving from it.
+    # Each is a positive number and maxStaleSeconds must be greater than
+    # refreshSeconds; the render fails naming the tier otherwise (the PEP
+    # refuses to import on the same values). This block is the hub PEP's
+    # declaration and the default for any tier that does not declare its own.
+    # A tier declares its own with `labelRegistry:` on its `edges[]` or
+    # `regions[]` entry (or its `tiers[]` entry). Either key may be given
+    # alone; the other comes from this block.
+    labelRegistry:
+      refreshSeconds: 2.5
+      maxStaleSeconds: 5
     # Optional per-source band table for the hub PEP, as JSON text. Empty (the default) means off: nothing
     # renders and the env is not set. When non-empty, a ConfigMap whose name carries a short hash of the content
     # is rendered with key source-bands.json, mounted read-only at /etc/openddil/bands in the pep container, and
