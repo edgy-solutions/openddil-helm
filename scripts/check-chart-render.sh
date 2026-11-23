@@ -2680,7 +2680,9 @@ echo
 # registry.invalid/. Scope control: FAIL unless a reset-runner ref was seen
 # (the check must see the image it exists for) and at least 5 own refs were.
 # Compatibility: a non-empty resetJob.image.repository is used verbatim, in
-# BOTH the job.json pod spec and the images-pullable hook.
+# BOTH the job.json pod spec and the images-pullable hook. The compat render
+# sets the tag and an empty digest itself, so the expected ref doesn't depend
+# on the chart's default reset-runner tag or digest.
 echo "guard 28: every OpenDDIL image follows global.imageRegistry"
 G28_DIR="$(mktemp -d)"
 G28_ARGS=(--set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true
@@ -2692,7 +2694,9 @@ G28_ARGS=(--set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true
   --set exerciseControl.resetJob.enabled=true)
 render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid > "$G28_DIR/reg.yaml"
 render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid \
-  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner > "$G28_DIR/compat.yaml"
+  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner \
+  --set exerciseControl.resetJob.image.tag=latest \
+  --set exerciseControl.resetJob.image.digest= > "$G28_DIR/compat.yaml"
 cat > "$G28_DIR/check.py" <<'G28PY'
 import sys, json, yaml
 PREFIX = "edgy-solutions/openddil/"
