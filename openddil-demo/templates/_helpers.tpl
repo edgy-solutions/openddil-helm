@@ -760,6 +760,7 @@ Usage:
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
       "identity" (default dict .identity)
+      "labelRegistry" (default dict .labelRegistry)
       "directIngest" (default true .directIngest)
       "region" (default "" .region)) -}}
 {{- end }}
@@ -784,6 +785,7 @@ Usage:
       "label" (default .id .label)
       "publicOrigin" (default "" .publicOrigin)
       "identity" (default dict .identity)
+      "labelRegistry" (default dict .labelRegistry)
       "directIngest" (default false .directIngest)
       "region" .id) -}}
 {{- end }}
@@ -3014,6 +3016,41 @@ openddil.pepElementEnv -- the element-state env every PEP gets: its tier id
   value: {{ $es.graceS | quote }}
 - name: OPENDDIL_PEP_HOLDER_IDLE_S
   value: {{ $es.holderIdleS | quote }}
+{{- end }}
+
+{{/*
+openddil.pepLabelRegistryEnv -- the PEP's label-registry refresh interval and
+maximum staleness, in seconds. Takes (dict "root" $root "tier" <tier id>
+"decl" <the tier's labelRegistry dict, or empty>). The declaration is merged
+over releasability.pep.labelRegistry key by key, then checked: each value is a
+number, refreshSeconds > 0, maxStaleSeconds > refreshSeconds. The PEP refuses
+to import on anything else, so the render refuses first, naming the tier.
+*/}}
+{{- define "openddil.pepLabelRegistryEnv" -}}
+{{- $tier := .tier -}}
+{{- $blk := default dict .root.Values.releasability.pep.labelRegistry -}}
+{{- $decl := default dict .decl -}}
+{{- $vals := dict -}}
+{{- range $k := list "refreshSeconds" "maxStaleSeconds" -}}
+{{- $v := get $blk $k -}}
+{{- if and (hasKey $decl $k) (not (kindIs "invalid" (get $decl $k))) -}}{{- $v = get $decl $k -}}{{- end -}}
+{{- if not (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) -}}
+{{- fail (printf "tier %s: labelRegistry.%s must be a number of seconds, got %s (%s)" $tier $k (toString $v) (kindOf $v)) -}}
+{{- end -}}
+{{- $_ := set $vals $k (float64 $v) -}}
+{{- end -}}
+{{- $r := get $vals "refreshSeconds" -}}
+{{- $m := get $vals "maxStaleSeconds" -}}
+{{- if le $r 0.0 -}}
+{{- fail (printf "tier %s: labelRegistry.refreshSeconds must be greater than 0, got %v" $tier $r) -}}
+{{- end -}}
+{{- if le $m $r -}}
+{{- fail (printf "tier %s: labelRegistry.maxStaleSeconds (%v) must be greater than refreshSeconds (%v)" $tier $m $r) -}}
+{{- end -}}
+- name: OPENDDIL_LABEL_REGISTRY_REFRESH_S
+  value: {{ $r | toString | quote }}
+- name: OPENDDIL_LABEL_REGISTRY_MAX_STALE_S
+  value: {{ $m | toString | quote }}
 {{- end }}
 
 {{/*
