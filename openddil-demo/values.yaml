@@ -282,7 +282,7 @@ postgresHq:
   image:
     repository: postgres
     tag: "15"
-    digest: ""
+    digest: "sha256:c961aa287d8698297cb26cdfadfbe9fd2cbaf77e53cfffe9636e8d8a1e4d842c"
     pullPolicy: IfNotPresent
   auth:
     username: postgres
@@ -1860,7 +1860,7 @@ tierNode:
       # Same shape as every other image block, so a mirrored deployment can
       # pin this one too. scripts/check-mirror-coverage.sh fails if any
       # rendered reference has no digest to carry.
-      digest: ""
+      digest: "sha256:c961aa287d8698297cb26cdfadfbe9fd2cbaf77e53cfffe9636e8d8a1e4d842c"
       pullPolicy: IfNotPresent
     auth:
       username: openddil
@@ -2430,7 +2430,7 @@ releasability:
       # openddil image to build, no wheels to resolve at start-up.
       repository: python
       tag: "3.11-slim"
-      digest: ""
+      digest: "sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
     appVolumeSize: 8Mi
     logLevel: INFO
     # Optional per-source band table for the hub PEP, as JSON text. Empty (the default) means off: nothing
