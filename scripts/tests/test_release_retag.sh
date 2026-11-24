@@ -125,6 +125,34 @@ else
     grep -q 'differ' "$TMP/o" && pass "manifest: a promoted final with a different digest fails" || fail "manifest: failed, but not for the digest difference"
   else fail "manifest: a promoted final with a different digest passed"; fi
 
+  # ---- thirdParty ----
+  V2="$ROOT/release/suite-v2.0.0.yaml"
+  if $PY "$CHK" "$V2"; then pass "manifest: release/suite-v2.0.0.yaml passes"
+  else fail "manifest: suite-v2.0.0.yaml fails"; fi
+  tp_case() { # label, python statement mutating m, grep pattern
+    $PY - "$V2" "$TMP/m-tp.yaml" "$2" <<'PY'
+import sys, yaml
+m = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+exec(sys.argv[3])
+open(sys.argv[2], "wb").write(yaml.safe_dump(m, sort_keys=False).encode())
+PY
+    if ! $PY "$CHK" "$TMP/m-tp.yaml" > "$TMP/o"; then
+      grep -q "$3" "$TMP/o" && pass "manifest: $1 fails" || fail "manifest: $1 failed, but not as named: $(cat "$TMP/o")"
+    else fail "manifest: $1 passed"; fi
+  }
+  tp_case "thirdParty entry missing pinned" 'del m["thirdParty"][0]["pinned"]' 'thirdParty\[redpanda\] missing pinned'
+  tp_case "thirdParty pinned as a string" 'm["thirdParty"][0]["pinned"] = "yes"' 'redpanda pinned is not a bool'
+  tp_case "thirdParty openddil-owned image" 'm["thirdParty"][0]["image"] = "ghcr.io/edgy-solutions/openddil/x"' 'openddil-owned'
+  tp_case "thirdParty name equal to an images name" 'm["thirdParty"][0]["name"] = "projector"' 'also an images name'
+  tp_case "an extra unknown top-level key" 'm["extra"] = 1' 'unknown top-level key extra'
+  $PY "$REL/make_notes.py" suite --repo r --tag v2.0.0 --manifest "$V2" > "$TMP/n2"
+  n="$(grep -c '^- .*@ `sha256' "$TMP/n2")"
+  if grep -q 'Third-party images' "$TMP/n2" && [ "$n" = 14 ]; then pass "notes: suite v2.0.0 lists 14 third-party images"
+  else fail "notes: suite v2.0.0 third-party section wrong ($n lines)"; fi
+  $PY "$REL/make_notes.py" suite --repo r --tag v2.0.0-rc1 --manifest "$MANIFEST" > "$TMP/n1"
+  if grep -q 'Third-party' "$TMP/n1"; then fail "notes: rc1 prints a third-party heading"
+  else pass "notes: rc1 prints no third-party heading"; fi
+
   # ---- check_suite_published.py ------------------------------------------
   PUB="$ROOT/scripts/release/check_suite_published.py"
   $PY - "$MANIFEST" "$TMP/pub-ok" "$TMP/pub-bad" <<'PY'
@@ -179,10 +207,142 @@ n="$(grep -n 'crane ' "$WF" | grep -c latest)"
 if [ "$n" = "0" ]; then pass "workflow: no crane command line names latest"
 else fail "workflow: $n crane lines name latest"; fi
 
-if grep -q 'GITHUB_EVENT_NAME" = workflow_dispatch ] && \[ "\$DRY_RUN" = true ]' "$WF" \
-   && grep -q 'the commit input is for dry runs only' "$WF"; then
-  pass "workflow: off a tag, and with a commit input, only a dry run proceeds"
-else fail "workflow: a real run could start off a tag or on a named commit"; fi
+# ---- Parse step, behavioural ------------------------------------------------
+if [ "$HAVE_YAML" -eq 0 ]; then
+  echo "SKIP: PyYAML not installed; Parse step behavioural cases not run"
+else
+  PARSE="$TMP/parse.sh"
+  $PY - "$WF" "$PARSE" <<'PY'
+import sys, yaml
+w = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+st = w["jobs"]["release"]["steps"][0]
+assert st.get("id") == "tag", st
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(st["run"])
+PY
+  [ -s "$PARSE" ] || fail "parse: could not extract the Parse step"
+  C40="$(printf 'c%.0s' $(seq 1 40))"
+  S1="$(printf 'd%.0s' $(seq 1 40))"
+  HEX64="$(printf 'e%.0s' $(seq 1 64))"
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/gh" <<'GH'
+#!/usr/bin/env bash
+# stub: ignores --jq, prints a fixed answer per path
+p="$2"
+R="$GITHUB_REPOSITORY"
+case "$p" in
+  "repos/$R") echo master ;;
+  "repos/$R/git/ref/tags/projector/v2.0.0") echo "tag $STUB_S1" ;;
+  "repos/$R/git/ref/tags/projector/v3.0.0") echo "commit $STUB_C40" ;;
+  "repos/$R/git/ref/tags/projector/v4.0.0") echo "tag $STUB_S1" ;;
+  "repos/$R/git/tags/$STUB_S1") echo "${STUB_PEEL:-commit} $STUB_C40" ;;
+  "repos/$R/commits/"*) echo "$STUB_C40" ;;
+  *) exit 1 ;;
+esac
+GH
+  chmod +x "$TMP/bin/gh"
+  PN=0
+  # parse_case ENV... -> sets RC, POUT (output file), PLOG
+  parse_case() {
+    PN=$((PN + 1))
+    POUT="$TMP/out.$PN"; : > "$POUT"
+    PLOG="$(env -i PATH="$TMP/bin:$PATH" HOME="$TMP" \
+      STUB_S1="$S1" STUB_C40="$C40" \
+      GITHUB_OUTPUT="$POUT" GITHUB_REPOSITORY=o/r GITHUB_SHA="$C" \
+      GITHUB_REF=refs/heads/master GITHUB_REF_NAME=master GITHUB_EVENT_NAME=workflow_dispatch \
+      IMAGES="projector cm-service" EXPECTED="" DRY_RUN=false SUITE_MANIFEST="" COMMIT_IN="" \
+      "$@" bash "$PARSE" 2>&1)"
+    RC=$?
+  }
+  has() { grep -qx "$1" "$POUT"; }
+  EXP="projector=sha256:$HEX64"
+
+  parse_case GITHUB_REF=refs/tags/projector/v2.0.0 GITHUB_REF_NAME=projector/v2.0.0 GITHUB_EVENT_NAME=push
+  if [ $RC -eq 0 ] && has mode=retag && has scope=projector && has version=v2.0.0 \
+     && has reltag=projector/v2.0.0 && has "srcref=$C"; then
+    pass "parse a: tag push projector/v2.0.0"
+  else fail "parse a: tag push (rc=$RC log=$PLOG)"; fi
+
+  parse_case DRY_RUN=true GITHUB_REF=refs/heads/feature GITHUB_REF_NAME=feature
+  if [ $RC -eq 0 ] && has version=v0.0.0-dryrun && has reltag=feature; then
+    pass "parse b: dispatch dry run"
+  else fail "parse b: dry run (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=projector/v2.0.0 EXPECTED="$EXP"
+  if [ $RC -eq 0 ] && has "commit=$C40" && has "srcref=$C40" && has reltag=projector/v2.0.0 \
+     && has scope=projector && has version=v2.0.0 && has mode=retag; then
+    pass "parse c: real dispatch of an annotated tag, peeled"
+  else fail "parse c: real dispatch (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=projector/v3.0.0 EXPECTED="  $EXP  "
+  if [ $RC -eq 0 ] && has "commit=$C40" && has reltag=projector/v3.0.0; then
+    pass "parse c2: real dispatch of a lightweight tag, padded expected"
+  else fail "parse c2: lightweight tag (rc=$RC log=$PLOG)"; fi
+
+  parse_case GITHUB_REF=refs/heads/feature GITHUB_REF_NAME=feature COMMIT_IN=projector/v2.0.0 EXPECTED="$EXP"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'default branch'; then
+    pass "parse d: real dispatch off the default branch refused"
+  else fail "parse d: (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=projector/v9.9.9 EXPECTED="$EXP"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'does not exist'; then
+    pass "parse e: a missing tag refused"
+  else fail "parse e: (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN="$C40" EXPECTED="$EXP"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'names an existing'; then
+    pass "parse f: a sha refused"
+  else fail "parse f: (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=v2.0.0 EXPECTED="$EXP"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'names an existing'; then
+    pass "parse g: a plain suite tag refused"
+  else fail "parse g: (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=projector/v2.0.0 EXPECTED=""
+  r1=$RC; l1="$PLOG"
+  parse_case COMMIT_IN=projector/v2.0.0 EXPECTED="cm-service=sha256:$HEX64"
+  if [ $r1 -eq 1 ] && [ $RC -eq 1 ] && echo "$l1" | grep -q 'needs expected for' && echo "$PLOG" | grep -q 'needs expected for'; then
+    pass "parse h: expected empty or for another image refused"
+  else fail "parse h: (rc=$r1/$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=other/v2.0.0 EXPECTED="other=sha256:$HEX64"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'not in images'; then
+    pass "parse i: an image outside images refused"
+  else fail "parse i: (rc=$RC log=$PLOG)"; fi
+
+  parse_case GITHUB_REF=refs/tags/projector/v2.0.0 GITHUB_REF_NAME=projector/v2.0.0 GITHUB_EVENT_NAME=push COMMIT_IN="$C40"
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'the commit input is for dry runs only'; then
+    pass "parse j: tag push with a commit input refused"
+  else fail "parse j: (rc=$RC log=$PLOG)"; fi
+
+  parse_case COMMIT_IN=projector/v2.0.0 EXPECTED="$EXP" STUB_PEEL=tree
+  if [ $RC -eq 1 ] && echo "$PLOG" | grep -q 'does not point at a commit'; then
+    pass "parse k: a tag peeling to a non-commit refused"
+  else fail "parse k: (rc=$RC log=$PLOG)"; fi
+
+  # m. mutation: remove the guard-1 check from a copy; case d must then pass.
+  sed '/GITHUB_REF" != "refs\/heads\/\$default_branch"/,/^  fi$/d' "$PARSE" > "$TMP/parse-mut.sh"
+  if cmp -s "$PARSE" "$TMP/parse-mut.sh"; then fail "parse m: mutation did not change the script"
+  else
+    SAVE="$PARSE"; PARSE="$TMP/parse-mut.sh"
+    parse_case GITHUB_REF=refs/heads/feature GITHUB_REF_NAME=feature COMMIT_IN=projector/v2.0.0 EXPECTED="$EXP"
+    PARSE="$SAVE"
+    if [ $RC -eq 0 ]; then pass "parse m: mutation: without the default-branch guard, case d would pass"
+    else fail "parse m: mutated script still refused (rc=$RC log=$PLOG)"; fi
+  fi
+
+  # no GITHUB_REF_NAME outside the Parse step
+  m="$($PY - "$WF" <<'PY'
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+start = next(i for i, l in enumerate(lines) if "- name: Parse the tag" in l)
+end = next(i for i, l in enumerate(lines) if "- name: Check out the tagged commit" in l)
+print(sum("GITHUB_REF_NAME" in l for i, l in enumerate(lines) if not start <= i < end))
+PY
+)"
+  if [ "$m" = "0" ]; then pass "workflow: GITHUB_REF_NAME is used only in the Parse step"
+  else fail "workflow: $m lines outside the Parse step use GITHUB_REF_NAME"; fi
+fi
 
 n=0
 for f in "$ROOT/release/caller-template.yml" "$ROOT/.github/workflows/release.yml"; do
