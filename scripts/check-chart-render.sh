@@ -2680,7 +2680,13 @@ echo
 # registry.invalid/. Scope control: FAIL unless a reset-runner ref was seen
 # (the check must see the image it exists for) and at least 5 own refs were.
 # Compatibility: a non-empty resetJob.image.repository is used verbatim, in
-# BOTH the job.json pod spec and the images-pullable hook.
+# BOTH the job.json pod spec and the images-pullable hook. Two compat cases:
+#   compat:  repository + tag=latest + an empty digest -> <repository>:latest
+#            (an explicit tag with no digest is kept as given);
+#   mirror:  repository only -> <repository>@<the chart's reset-runner digest>,
+#            read from values.yaml. A registry mirror pulls the tested digest.
+#            With no digest in values.yaml the case can't measure anything and
+#            FAILs rather than skip.
 echo "guard 28: every OpenDDIL image follows global.imageRegistry"
 G28_DIR="$(mktemp -d)"
 G28_ARGS=(--set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true
@@ -2692,7 +2698,14 @@ G28_ARGS=(--set linkControl.enabled=true --set restate.ephemeralOnUpgrade=true
   --set exerciseControl.resetJob.enabled=true)
 render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid > "$G28_DIR/reg.yaml"
 render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid \
-  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner > "$G28_DIR/compat.yaml"
+  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner \
+  --set exerciseControl.resetJob.image.tag=latest \
+  --set exerciseControl.resetJob.image.digest= > "$G28_DIR/compat.yaml"
+render "${G28_ARGS[@]}" --set global.imageRegistry=registry.invalid \
+  --set exerciseControl.resetJob.image.repository=example.invalid/x/reset-runner > "$G28_DIR/mirror.yaml"
+G28_DIGEST="$("$PY" -c 'import sys, yaml
+i = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["exerciseControl"]["resetJob"]["image"]
+print(i.get("digest") or "")' "$CHART/values.yaml" 2>/dev/null)"
 cat > "$G28_DIR/check.py" <<'G28PY'
 import sys, json, yaml
 PREFIX = "edgy-solutions/openddil/"
@@ -2732,18 +2745,24 @@ if not any("reset-runner" in r for r in own): errs.append("no reset-runner ref s
 if not any("reset-runner" in r for r in job): errs.append("no reset-runner ref in the exercise-reset-job job.json pod spec")
 if len(own) < 5: errs.append("only %d own image ref(s) found (need >= 5)" % len(own))
 print("  %d image ref(s), %d own, %d from job.json" % (len(allrefs), len(own), len(job)))
-man, job, hook = collect(sys.argv[2])
-want = [r for r in sys.argv[3:]]
-for w in want:
-    if w not in job: errs.append("compat: %s missing from the job.json pod spec" % w)
-    if w not in hook: errs.append("compat: %s missing from the images-pullable hook" % w)
+# then (case, render, wanted ref) triples
+cases = sys.argv[2:]
+if not cases or len(cases) % 3: errs.append("usage: reg.yaml (case render.yaml ref)...")
+for case, path, w in zip(cases[0::3], cases[1::3], cases[2::3]):
+    if not w.startswith("example.invalid/x/reset-runner") or w.endswith(("@", ":")):
+        errs.append("%s: no wanted ref to check (got %r)" % (case, w)); continue
+    man, job, hook = collect(path)
+    if w not in job: errs.append("%s: %s missing from the job.json pod spec" % (case, w))
+    if w not in hook: errs.append("%s: %s missing from the images-pullable hook" % (case, w))
 for e in errs: print("  FAIL: " + e)
 sys.exit(1 if errs else 0)
 G28PY
 if ! command -v helm >/dev/null 2>&1 || ! command -v "$PY" >/dev/null 2>&1; then
   echo "  FAIL: helm or python is missing; guard 28 cannot run (a skip would be a silent pass)"; fail=1
 else
-  "$PY" "$G28_DIR/check.py" "$G28_DIR/reg.yaml" "$G28_DIR/compat.yaml" example.invalid/x/reset-runner:latest || fail=1
+  "$PY" "$G28_DIR/check.py" "$G28_DIR/reg.yaml" \
+    compat "$G28_DIR/compat.yaml" example.invalid/x/reset-runner:latest \
+    mirror "$G28_DIR/mirror.yaml" "example.invalid/x/reset-runner@$G28_DIGEST" || fail=1
 fi
 rm -rf "$G28_DIR"
 

@@ -20,10 +20,10 @@ global:
   # Leave empty for in-namespace resolution.
   clusterDomain: ""
   imagePullSecrets: []
-  # Bake-time tag for ALL openddil-owned images (frontend, cm-service,
-  # logistics-fusion, faust-edge, faust-regional, sensor-ingest, projector,
-  # hub-restate-projector, runtime-bundle). Overridable per-service below.
-  imageTag: "latest"
+  # Tag for openddil-owned images that have no digest set. The released
+  # images below are pinned by digest to the v2.0.0 suite
+  # (release/suite-v2.0.0.yaml), and a digest wins over any tag.
+  imageTag: "v2.0.0"
 
 # --- Runtime bundle image ---------------------------------------------------
 # Built from ../bundle/Dockerfile. Bakes openddil-contracts/, openddil-stack/,
@@ -34,7 +34,7 @@ bundle:
   image:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
-    digest: ""            # Non-empty -> <registry>/<prefix>/<name>@<digest>
+    digest: "sha256:fead15909523c5408e4951deb73ac107ebab5cf324eb28bd7b30b8207000be65"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
                           # bypassing tag entirely. Mirror-time digest
                           # pinning lives in a values-pinned.yaml file
                           # emitted by scripts/mirror-to-artifactory.ps1.
@@ -521,7 +521,7 @@ restateHub:
     # over /app/restate_hub.py. See openddil-tactical-agents/hub/.
     name: hub-restate-projector
     tag: ""
-    digest: ""
+    digest: "sha256:9ff13efb630590daf82f8d9280899199d80a56018c70ba0835767129b28608c1"
     pullPolicy: ""
   # Long-running Python consumer — explicit resources so it does not
   # inherit a too-small cluster-default LimitRange and get OOMKilled.
@@ -608,7 +608,7 @@ sensorIngest:
   image:
     name: sensor-ingest
     tag: ""
-    digest: ""
+    digest: "sha256:5212c1b8b19c50dea3b645fb6ae931e97b8b597069345f5125b24a7d7fa04989"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 128Mi }
@@ -769,7 +769,7 @@ faustEdge:
   image:
     name: faust-edge
     tag: ""
-    digest: ""
+    digest: "sha256:0886faed7de5954307a6179912d2221dfa40027142d83f981e73bc57d0f67609"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -820,7 +820,7 @@ projector:
   image:
     name: projector
     tag: ""
-    digest: ""
+    digest: "sha256:330d0efbea9e90af5b5fd3a189c7ac6f818b1666291fd22f96768fd8ba710eb7"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -904,7 +904,7 @@ faustRegional:
   image:
     name: faust-regional
     tag: ""
-    digest: ""
+    digest: "sha256:cbcb9bcee4dda04c557fd6554ea8d1e6a3ba32e00413b66016a11529448918b6"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -948,7 +948,7 @@ cmService:
   image:
     name: cm-service
     tag: ""
-    digest: ""
+    digest: "sha256:20cd9544a36010a2423b872cd46a60f37bb07f3c9e4b241f76f910566ce342d8"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -1038,7 +1038,7 @@ logisticsFusion:
   image:
     name: logistics-fusion-service
     tag: ""
-    digest: ""
+    digest: "sha256:0888c2c84feb41bc9c200e7c112d05520f58bb84ee0477bc8975d24376e2b4d4"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -1056,7 +1056,7 @@ assetRegistry:
   image:
     name: asset-registry-service
     tag: ""
-    digest: ""
+    digest: "sha256:db47dec083a0bf1d126f86a7571b190f26ff2b31f3a773736ab63129d1e9af74"
     pullPolicy: ""
   resources:
     # Light footprint -- one upsert per telemetry event, no in-memory
@@ -1111,7 +1111,7 @@ logisticsSim:
   image:
     name: logistics-sim
     tag: ""
-    digest: ""
+    digest: "sha256:f5eb9edd8c0df9b5e201e9ec5e8917b564e00e3c48773f9b9c910f17f0ea6f04"
     pullPolicy: ""
   resources:
     # Light footprint -- one consumer per edge + one producer + one
@@ -1307,7 +1307,7 @@ frontend:
   image:
     name: frontend
     tag: ""
-    digest: ""
+    digest: "sha256:d66e232901ddaf2988cdb2bbba47b8e53eb46c5362ebef5a8cc2c22934461498"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
@@ -1416,7 +1416,7 @@ egress:
   image:
     name: egress
     tag: ""
-    digest: ""
+    digest: "sha256:f2d70143eb38001d1952386909be840f39e0356a135c2dfe573742ef53662d66"
     pullPolicy: ""
   # The destination is a SUBJECT in the entitlements corpus. Absent from the
   # corpus, the gate refuses every record `destination_unknown`.
@@ -1439,7 +1439,7 @@ egress:
     enabled: false
     image:
       name: tak-server
-      tag: ""
+      tag: "latest"  # not a v2.0.0 release image; kept on its previous tag
       digest: ""
       pullPolicy: ""
     port: 8087
@@ -2563,7 +2563,7 @@ exerciseControl:
     # Follows global.imageRegistry / global.imagePrefix like the other OpenDDIL
     # images. A non-empty `repository` is a full override, kept for
     # compatibility and used verbatim.
-    image: {name: reset-runner, repository: "", tag: latest, digest: "", pullPolicy: IfNotPresent}
+    image: {name: reset-runner, repository: "", tag: v2.0.0, digest: "sha256:714cbfb673fd355ade36d655eeecbf1c5ca76db5317c429dac92d299dd199a61", pullPolicy: IfNotPresent}
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
     # false (default) keeps a person's act: the asset_declaration and asset_correlation

@@ -125,6 +125,34 @@ else
     grep -q 'differ' "$TMP/o" && pass "manifest: a promoted final with a different digest fails" || fail "manifest: failed, but not for the digest difference"
   else fail "manifest: a promoted final with a different digest passed"; fi
 
+  # ---- thirdParty ----
+  V2="$ROOT/release/suite-v2.0.0.yaml"
+  if $PY "$CHK" "$V2"; then pass "manifest: release/suite-v2.0.0.yaml passes"
+  else fail "manifest: suite-v2.0.0.yaml fails"; fi
+  tp_case() { # label, python statement mutating m, grep pattern
+    $PY - "$V2" "$TMP/m-tp.yaml" "$2" <<'PY'
+import sys, yaml
+m = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+exec(sys.argv[3])
+open(sys.argv[2], "wb").write(yaml.safe_dump(m, sort_keys=False).encode())
+PY
+    if ! $PY "$CHK" "$TMP/m-tp.yaml" > "$TMP/o"; then
+      grep -q "$3" "$TMP/o" && pass "manifest: $1 fails" || fail "manifest: $1 failed, but not as named: $(cat "$TMP/o")"
+    else fail "manifest: $1 passed"; fi
+  }
+  tp_case "thirdParty entry missing pinned" 'del m["thirdParty"][0]["pinned"]' 'thirdParty\[redpanda\] missing pinned'
+  tp_case "thirdParty pinned as a string" 'm["thirdParty"][0]["pinned"] = "yes"' 'redpanda pinned is not a bool'
+  tp_case "thirdParty openddil-owned image" 'm["thirdParty"][0]["image"] = "ghcr.io/edgy-solutions/openddil/x"' 'openddil-owned'
+  tp_case "thirdParty name equal to an images name" 'm["thirdParty"][0]["name"] = "projector"' 'also an images name'
+  tp_case "an extra unknown top-level key" 'm["extra"] = 1' 'unknown top-level key extra'
+  $PY "$REL/make_notes.py" suite --repo r --tag v2.0.0 --manifest "$V2" > "$TMP/n2"
+  n="$(grep -c '^- .*@ `sha256' "$TMP/n2")"
+  if grep -q 'Third-party images' "$TMP/n2" && [ "$n" = 14 ]; then pass "notes: suite v2.0.0 lists 14 third-party images"
+  else fail "notes: suite v2.0.0 third-party section wrong ($n lines)"; fi
+  $PY "$REL/make_notes.py" suite --repo r --tag v2.0.0-rc1 --manifest "$MANIFEST" > "$TMP/n1"
+  if grep -q 'Third-party' "$TMP/n1"; then fail "notes: rc1 prints a third-party heading"
+  else pass "notes: rc1 prints no third-party heading"; fi
+
   # ---- check_suite_published.py ------------------------------------------
   PUB="$ROOT/scripts/release/check_suite_published.py"
   $PY - "$MANIFEST" "$TMP/pub-ok" "$TMP/pub-bad" <<'PY'
