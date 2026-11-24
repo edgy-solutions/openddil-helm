@@ -36,7 +36,7 @@ bundle:
   image:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
-    digest: "sha256:fead15909523c5408e4951deb73ac107ebab5cf324eb28bd7b30b8207000be65"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
+    digest: "sha256:e68fa80d5d0856acc37592f7d422c28a94cd06da56bd2dee7174db5a7e5280d8"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
                           # bypassing tag entirely. Mirror-time digest
                           # pinning lives in a values-pinned.yaml file
                           # emitted by scripts/mirror-to-artifactory.ps1.
