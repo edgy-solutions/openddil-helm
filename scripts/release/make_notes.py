@@ -42,6 +42,13 @@ def main():
         for i in m["images"]:
             out.append("| `%s` | `%s` | %s | [%s](https://github.com/%s/commit/%s) | `%s` |"
                        % (i["image"], i["digest"], i["repo"], i["commit"][:7], i["repo"], i["commit"], i["tag"]))
+        if m.get("thirdParty"):
+            out += ["", "## Third-party images", ""]
+            for t in m["thirdParty"]:
+                out.append("- %s: `%s:%s` @ `%s` %s"
+                           % (t["name"], t["image"], t["tag"], t["digest"],
+                              "(pinned by the chart)" if t["pinned"]
+                              else "(pulled by tag; digest as of the manifest)"))
     out += ["", TAIL]
     print("\n".join(out))
 

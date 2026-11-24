@@ -1,0 +1,48 @@
+suite: v2.0.0
+status: tagged
+promotedFrom: ""
+chart: {name: openddil-demo, version: "0.1.166", commit: 876083c1a9ef5cea3d0155f0080999fd8ed83d3f}
+bundle:
+  image: ghcr.io/edgy-solutions/openddil/runtime-bundle
+  digest: sha256:fead15909523c5408e4951deb73ac107ebab5cf324eb28bd7b30b8207000be65
+  loaderPins: []
+  sources:
+    contracts: 3194a6181c301250fa3d5c9dc61f87259b43e682
+    demo: 308788fe2b51643fe302f303c63e9eaf6da1995b
+    stack: 2c911865027e609975ebe36de777d39ed929648f
+    tactical-agents: e675f758a970be0708796d9c6149dd70a2aec8cc
+    helm: 0d12fe286ae164aa571a9f1a1ea2d1ba56df5268
+images:
+  - {name: projector, image: ghcr.io/edgy-solutions/openddil/projector, digest: "sha256:330d0efbea9e90af5b5fd3a189c7ac6f818b1666291fd22f96768fd8ba710eb7", repo: edgy-solutions/openddil-projector, commit: e340f43cf80e1b637a3896633bfee271f27a8b8c, tag: projector/v2.0.0}
+  - {name: cm-service, image: ghcr.io/edgy-solutions/openddil/cm-service, digest: "sha256:20cd9544a36010a2423b872cd46a60f37bb07f3c9e4b241f76f910566ce342d8", repo: edgy-solutions/openddil-cm-service, commit: ec4075a136de82e8a048120cd8a800542280bd97, tag: cm-service/v2.0.0}
+  - {name: asset-registry-service, image: ghcr.io/edgy-solutions/openddil/asset-registry-service, digest: "sha256:db47dec083a0bf1d126f86a7571b190f26ff2b31f3a773736ab63129d1e9af74", repo: edgy-solutions/openddil-stack, commit: 33e5242c79ac226e484c34e855f3792709bd3125, tag: asset-registry-service/v2.0.0}
+  - {name: logistics-fusion-service, image: ghcr.io/edgy-solutions/openddil/logistics-fusion-service, digest: "sha256:0888c2c84feb41bc9c200e7c112d05520f58bb84ee0477bc8975d24376e2b4d4", repo: edgy-solutions/openddil-logistics-fusion-service, commit: fa5e329b03957c6ffc14f1071c4c37d5b3ec30e4, tag: logistics-fusion-service/v2.0.0}
+  - {name: logistics-sim, image: ghcr.io/edgy-solutions/openddil/logistics-sim, digest: "sha256:f5eb9edd8c0df9b5e201e9ec5e8917b564e00e3c48773f9b9c910f17f0ea6f04", repo: edgy-solutions/openddil-logistics-sim, commit: 76d13edf44cf718b332013075ce5af9ca83a5dd3, tag: logistics-sim/v2.0.0}
+  - {name: sensor-ingest, image: ghcr.io/edgy-solutions/openddil/sensor-ingest, digest: "sha256:5212c1b8b19c50dea3b645fb6ae931e97b8b597069345f5125b24a7d7fa04989", repo: edgy-solutions/openddil-sensor-ingest, commit: ab23fb3fcee3d3e505cb0614e3117709e16a51e7, tag: sensor-ingest/v2.0.0}
+  - {name: faust-edge, image: ghcr.io/edgy-solutions/openddil/faust-edge, digest: "sha256:0886faed7de5954307a6179912d2221dfa40027142d83f981e73bc57d0f67609", repo: edgy-solutions/openddil-tactical-agents, commit: dec47731199a76aad345e9df937805cd6b59557b, tag: faust-edge/v2.0.0}
+  - {name: faust-regional, image: ghcr.io/edgy-solutions/openddil/faust-regional, digest: "sha256:cbcb9bcee4dda04c557fd6554ea8d1e6a3ba32e00413b66016a11529448918b6", repo: edgy-solutions/openddil-tactical-agents, commit: 7eb7daf2c494da7d1646f02e30dc44c7a0f437fb, tag: faust-regional/v2.0.0}
+  - {name: hub-restate-projector, image: ghcr.io/edgy-solutions/openddil/hub-restate-projector, digest: "sha256:9ff13efb630590daf82f8d9280899199d80a56018c70ba0835767129b28608c1", repo: edgy-solutions/openddil-tactical-agents, commit: 7eb7daf2c494da7d1646f02e30dc44c7a0f437fb, tag: hub-restate-projector/v2.0.0}
+  - {name: frontend, image: ghcr.io/edgy-solutions/openddil/frontend, digest: "sha256:d66e232901ddaf2988cdb2bbba47b8e53eb46c5362ebef5a8cc2c22934461498", repo: edgy-solutions/openddil-demo, commit: 3c2405250fa3340da36ef39aac47ed7afaa6542f, tag: frontend/v2.0.0}
+  - {name: egress, image: ghcr.io/edgy-solutions/openddil/egress, digest: "sha256:f2d70143eb38001d1952386909be840f39e0356a135c2dfe573742ef53662d66", repo: edgy-solutions/openddil-demo, commit: 3c2405250fa3340da36ef39aac47ed7afaa6542f, tag: egress/v2.0.0}
+  - {name: reset-runner, image: ghcr.io/edgy-solutions/openddil/reset-runner, digest: "sha256:714cbfb673fd355ade36d655eeecbf1c5ca76db5317c429dac92d299dd199a61", repo: edgy-solutions/openddil-helm, commit: 0d12fe286ae164aa571a9f1a1ea2d1ba56df5268, tag: reset-runner/v2.0.0}
+# dis-sim is an optional adapter and tak-server an optional egress sink; neither is released in v2.0.0.
+# Third-party images the chart can run. pinned: true means the chart's values name this digest, so it is what
+# runs. pinned: false means the chart pulls by tag; the digest is what that tag named on 2026-11-23, and a later
+# pull can differ. The two redpanda digests were read from docker.io/redpandadata, which the
+# docker.redpanda.com name serves.
+thirdParty:
+  - {name: redpanda, image: docker.redpanda.com/redpandadata/redpanda, tag: v26.1.7, digest: "sha256:70e28c21d23e222efbe45eb862b65792507c1928675d52ed1aa72ac642ef12da", pinned: false}
+  - {name: redpanda-connect, image: docker.redpanda.com/redpandadata/connect, tag: 4.91.0, digest: "sha256:90eabe80cc4d7f3989f8c6b9f423c72dc148df1e898bd2234ba62d697843bdce", pinned: false}
+  - {name: postgres, image: postgres, tag: "15", digest: "sha256:c961aa287d8698297cb26cdfadfbe9fd2cbaf77e53cfffe9636e8d8a1e4d842c", pinned: true}
+  - {name: electric, image: electricsql/electric, tag: 1.8.1, digest: "sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139", pinned: true}
+  - {name: restate, image: docker.io/restatedev/restate, tag: 1.6.2, digest: "sha256:78858ccbfe3385805ddcf81dc48ae1bea12f63daf0c207da81468ef49a7b10f6", pinned: false}
+  - {name: restate-wipe, image: docker.io/alpine/k8s, tag: 1.31.4, digest: "sha256:9c4976d47656d78cf53a92b0203fc54ac45eae18a2b45001ac221c27da4c8036", pinned: false}
+  - {name: toxiproxy, image: ghcr.io/shopify/toxiproxy, tag: 2.12.0, digest: "sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e", pinned: false}
+  - {name: atlas, image: arigaio/atlas, tag: 0.32.0, digest: "sha256:a7bccf43cf2c0f09d1203096b4727e64d68d0fb924b2b91beb2a4b43eae50b7e", pinned: false}
+  - {name: alpine, image: alpine, tag: "3.20", digest: "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc", pinned: false}
+  - {name: curl, image: curlimages/curl, tag: 8.9.1, digest: "sha256:8addc281f0ea517409209f76832b6ddc2cabc3264feb1ebbec2a2521ffad24e4", pinned: false}
+  - {name: ghostunnel, image: ghostunnel/ghostunnel, tag: v1.11.3, digest: "sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f", pinned: true}
+  - {name: topaz, image: ghcr.io/aserto-dev/topaz, tag: 0.33.16, digest: "sha256:835868c04bdd7129127ea43642ffff7363d0bd26d5e1a37631fa881431054360", pinned: true}
+  - {name: keycloak, image: quay.io/keycloak/keycloak, tag: "26.0", digest: "sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858", pinned: false}
+  - {name: python, image: python, tag: 3.11-slim, digest: "sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce", pinned: true}
+blockers: []

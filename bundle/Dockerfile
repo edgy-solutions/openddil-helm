@@ -42,6 +42,12 @@ COPY openddil-stack/electric  /bundle/stack/electric/
 # openddil-tactical-agents later.
 COPY openddil-tactical-agents/hub/restate_hub.py /bundle/agents/hub/restate_hub.py
 
+# The declared analytic units the faust-edge runner loads (ruling D1: units
+# ship in the bundle, not in the image). The chart mounts this at
+# /opt/openddil/algorithms and keeps a byte copy of each unit.yaml for its
+# render check (scripts/check-algorithm-declarations.sh).
+COPY openddil-tactical-agents/algorithms /bundle/agents/algorithms/
+
 # ----- openddil-demo configs ----------------------------------------------
 # ONLY what the chart actually loads. Verified against every `"src" "demo/..."`
 # in openddil-demo/templates/ — the chart reads exactly three paths from here.

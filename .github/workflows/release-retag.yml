@@ -12,7 +12,14 @@ name: Release by retag
 # resolves each image's build of `commit` (default: the branch head), reports
 # per image whether this repo's token can list package versions and which
 # digest a release would name, and continues past an image with no build. It
-# tags nothing and creates no release. A real run needs a tag.
+# tags nothing and creates no release.
+#
+# Real run by dispatch: for an image whose <image>/vX.Y.Z tag sits on an old
+# commit that a tag push cannot run, dispatch the caller from the default
+# branch with the tag name in `commit`. Three guards, each fatal: the dispatch
+# must run from the default branch; `commit` must be an existing <image>/vX.Y.Z
+# tag of an image in `images` (an annotated tag is peeled to its commit); and
+# `expected` must carry <image>=sha256:<64 hex> for that image.
 #
 # Suite mode (plain v* tag with suite_manifest set): tags nothing. Reads
 # release/suite-<version>.yaml from the tagged commit, checks it, checks that
@@ -40,7 +47,7 @@ on:
         type: string
         default: ""
       commit:
-        description: "Dry run only: resolve the builds of this commit instead of the ref's"
+        description: "Dry run: resolve the builds of this commit. Real dispatch from the default branch: an existing <image>/vX.Y.Z tag"
         type: string
         default: ""
 
@@ -66,34 +73,95 @@ jobs:
         run: |
           set -euo pipefail
           images="$(printf '%s' "$IMAGES" | tr -s ' \n\r\t' '    ' | sed 's/^ //; s/ $//')"
-          ref="$GITHUB_REF_NAME"
           vre='v[0-9]+\.[0-9]+\.[0-9]+(-rc\.?[0-9]+)?'
           mode=retag
-          if [[ "$ref" =~ ^($vre)$ ]]; then
-            version="$ref"
-            scope="$images"
-            if [ -n "$SUITE_MANIFEST" ]; then mode=suite; scope=""; fi
-          elif [[ "$ref" =~ ^([a-z0-9-]+)/($vre)$ ]]; then
-            img="${BASH_REMATCH[1]}"
-            version="${BASH_REMATCH[2]}"
-            case " $images " in
-              *" $img "*) scope="$img" ;;
-              *) echo "::error::image-scoped tag names $img, which is not in images ($images)"; exit 1 ;;
-            esac
-            if [ "$img" = latest ]; then echo "::error::image name latest is refused"; exit 1; fi
+          reltag=""
+          srcref="$GITHUB_SHA"
+          commit=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            ref="$GITHUB_REF_NAME"
+            if [[ "$ref" =~ ^($vre)$ ]]; then
+              version="$ref"
+              scope="$images"
+              if [ -n "$SUITE_MANIFEST" ]; then mode=suite; scope=""; fi
+            elif [[ "$ref" =~ ^([a-z0-9-]+)/($vre)$ ]]; then
+              img="${BASH_REMATCH[1]}"
+              version="${BASH_REMATCH[2]}"
+              case " $images " in
+                *" $img "*) scope="$img" ;;
+                *) echo "::error::image-scoped tag names $img, which is not in images ($images)"; exit 1 ;;
+              esac
+              if [ "$img" = latest ]; then echo "::error::image name latest is refused"; exit 1; fi
+            else
+              echo "::error::tag '$ref' is not vX.Y.Z[-rcN] or <image>/vX.Y.Z[-rcN]"
+              exit 1
+            fi
+            reltag="$ref"
+            if [ -n "$COMMIT_IN" ] && [ "$DRY_RUN" != true ]; then
+              echo "::error::on a tag push the commit input is for dry runs only; a real run releases the tagged commit"
+              exit 1
+            fi
           elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
             version="v0.0.0-dryrun"
             scope="$images"
+            reltag="$GITHUB_REF_NAME"
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Real run by dispatch: retag an existing <image>/vX.Y.Z tag.
+            default_branch="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+            if [ "$GITHUB_REF" != "refs/heads/$default_branch" ]; then
+              echo "::error::a real dispatch runs only from the default branch ($default_branch), not $GITHUB_REF"
+              exit 1
+            fi
+            if [[ "$COMMIT_IN" =~ ^([a-z0-9-]+)/($vre)$ ]]; then
+              img="${BASH_REMATCH[1]}"
+              version="${BASH_REMATCH[2]}"
+            else
+              echo "::error::a real dispatch names an existing <image>/vX.Y.Z tag in the commit input, not '$COMMIT_IN'"
+              exit 1
+            fi
+            case " $images " in
+              *" $img "*) scope="$img" ;;
+              *) echo "::error::a real dispatch names an existing <image>/vX.Y.Z tag in the commit input; $img is not in images ($images)"; exit 1 ;;
+            esac
+            if [ "$img" = latest ]; then echo "::error::image name latest is refused"; exit 1; fi
+            if ! obj="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$COMMIT_IN" --jq '.object.type+" "+.object.sha')"; then
+              echo "::error::tag $COMMIT_IN does not exist"
+              exit 1
+            fi
+            otype="${obj%% *}"
+            osha="${obj#* }"
+            if [ "$otype" = tag ]; then
+              if ! obj="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$osha" --jq '.object.type+" "+.object.sha')"; then
+                echo "::error::annotated tag $COMMIT_IN cannot be read"
+                exit 1
+              fi
+              otype="${obj%% *}"
+              osha="${obj#* }"
+            fi
+            if [ "$otype" != commit ] || [ -z "$osha" ]; then
+              echo "::error::tag $COMMIT_IN does not point at a commit (found $otype)"
+              exit 1
+            fi
+            has_expected=false
+            while IFS= read -r eline; do
+              eline="$(printf '%s' "$eline" | tr -d '[:space:]')"
+              if [[ "$eline" =~ ^$img=sha256:[0-9a-f]{64}$ ]]; then has_expected=true; fi
+            done <<< "$EXPECTED"
+            if [ "$has_expected" != true ]; then
+              echo "::error::a real dispatch needs expected for $img (a line $img=sha256:<64 hex>)"
+              exit 1
+            fi
+            commit="$osha"
+            srcref="$osha"
+            reltag="$COMMIT_IN"
           else
-            echo "::error::ref '$ref' is not vX.Y.Z[-rcN] or <image>/vX.Y.Z[-rcN]. Off a tag, only a dispatch with dry_run true runs."
+            echo "::error::ref '$GITHUB_REF' is not a tag. Off a tag, only a dispatch runs."
             exit 1
           fi
-          if [ -n "$COMMIT_IN" ] && [ "$DRY_RUN" != true ]; then
-            echo "::error::the commit input is for dry runs only; a real run releases the tagged commit"
-            exit 1
+          if [ -z "$commit" ]; then
+            commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/${COMMIT_IN:-$GITHUB_SHA}" --jq .sha)"
+            [ -n "$commit" ] || { echo "::error::commit ${COMMIT_IN:-$GITHUB_SHA} not found"; exit 1; }
           fi
-          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/${COMMIT_IN:-$GITHUB_SHA}" --jq .sha)"
-          [ -n "$commit" ] || { echo "::error::commit ${COMMIT_IN:-$GITHUB_SHA} not found"; exit 1; }
           case "$version" in *latest*) echo "::error::version names latest"; exit 1 ;; esac
           prerelease=false
           case "$version" in *-rc*) prerelease=true ;; esac
@@ -103,13 +171,16 @@ jobs:
             echo "mode=$mode"
             echo "prerelease=$prerelease"
             echo "commit=$commit"
+            echo "reltag=$reltag"
+            echo "srcref=$srcref"
           } >> "$GITHUB_OUTPUT"
-          echo "mode=$mode version=$version scope=[$scope] commit=$commit dry_run=$DRY_RUN"
+          echo "mode=$mode version=$version scope=[$scope] commit=$commit dry_run=$DRY_RUN reltag=$reltag"
 
       - name: Check out the tagged commit
         uses: actions/checkout@v4
         with:
           path: src
+          ref: ${{ steps.tag.outputs.srcref }}
           persist-credentials: false
 
       # The tools come from the default branch of the openddil-helm repo, which
@@ -253,14 +324,15 @@ jobs:
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           MODE: ${{ steps.tag.outputs.mode }}
+          RELTAG: ${{ steps.tag.outputs.reltag }}
         run: |
           set -euo pipefail
           if [ "$MODE" = suite ]; then
             python3 tools/scripts/release/make_notes.py suite --repo "$GITHUB_REPOSITORY" \
-              --tag "$GITHUB_REF_NAME" --manifest "src/release/suite-$VERSION.yaml" > notes.md
+              --tag "$RELTAG" --manifest "src/release/suite-$VERSION.yaml" > notes.md
           else
             python3 tools/scripts/release/make_notes.py retag --repo "$GITHUB_REPOSITORY" \
-              --tag "$GITHUB_REF_NAME" --results results.jsonl > notes.md
+              --tag "$RELTAG" --results results.jsonl > notes.md
           fi
           cat notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
@@ -269,14 +341,15 @@ jobs:
         if: env.DRY_RUN != 'true'
         env:
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          RELTAG: ${{ steps.tag.outputs.reltag }}
         run: |
           set -euo pipefail
           cd src
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --notes-file ../notes.md
+          if gh release view "$RELTAG" >/dev/null 2>&1; then
+            gh release edit "$RELTAG" --notes-file ../notes.md
           else
             flag=""
             [ "$PRERELEASE" = true ] && flag="--prerelease"
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            gh release create "$RELTAG" --verify-tag --title "$RELTAG" \
               --notes-file ../notes.md $flag
           fi

@@ -11,7 +11,7 @@ on:
     inputs:
       expected: {description: 'image=sha256:… lines', required: false, default: ''}
       dry_run: {type: boolean, default: true}
-      commit: {description: 'dry run only: resolve the builds of this commit', required: false, default: ''}
+      commit: {description: 'dry run: resolve the builds of this commit; real run from the default branch: an existing <image>/vX.Y.Z tag', required: false, default: ''}
 permissions:
   contents: write
   packages: write

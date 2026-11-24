@@ -20,10 +20,12 @@ global:
   # Leave empty for in-namespace resolution.
   clusterDomain: ""
   imagePullSecrets: []
-  # Bake-time tag for ALL openddil-owned images (frontend, cm-service,
-  # logistics-fusion, faust-edge, faust-regional, sensor-ingest, projector,
-  # hub-restate-projector, runtime-bundle). Overridable per-service below.
-  imageTag: "latest"
+  # Tag for openddil-owned images that have no digest set. The released
+  # images below are pinned by digest to the v2.0.0 suite
+  # (release/suite-v2.0.0.yaml), and a digest wins over any tag. Two are
+  # pinned past v2.0.0 for the algorithm units: faust-edge (sha-3edd233) and
+  # runtime-bundle (the build that adds agents/algorithms).
+  imageTag: "v2.0.0"
 
 # --- Runtime bundle image ---------------------------------------------------
 # Built from ../bundle/Dockerfile. Bakes openddil-contracts/, openddil-stack/,
@@ -34,7 +36,7 @@ bundle:
   image:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
-    digest: ""            # Non-empty -> <registry>/<prefix>/<name>@<digest>
+    digest: "sha256:e68fa80d5d0856acc37592f7d422c28a94cd06da56bd2dee7174db5a7e5280d8"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
                           # bypassing tag entirely. Mirror-time digest
                           # pinning lives in a values-pinned.yaml file
                           # emitted by scripts/mirror-to-artifactory.ps1.
@@ -282,7 +284,7 @@ postgresHq:
   image:
     repository: postgres
     tag: "15"
-    digest: ""
+    digest: "sha256:c961aa287d8698297cb26cdfadfbe9fd2cbaf77e53cfffe9636e8d8a1e4d842c"
     pullPolicy: IfNotPresent
   auth:
     username: postgres
@@ -521,7 +523,7 @@ restateHub:
     # over /app/restate_hub.py. See openddil-tactical-agents/hub/.
     name: hub-restate-projector
     tag: ""
-    digest: ""
+    digest: "sha256:9ff13efb630590daf82f8d9280899199d80a56018c70ba0835767129b28608c1"
     pullPolicy: ""
   # Long-running Python consumer — explicit resources so it does not
   # inherit a too-small cluster-default LimitRange and get OOMKilled.
@@ -608,7 +610,7 @@ sensorIngest:
   image:
     name: sensor-ingest
     tag: ""
-    digest: ""
+    digest: "sha256:5212c1b8b19c50dea3b645fb6ae931e97b8b597069345f5125b24a7d7fa04989"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 128Mi }
@@ -769,46 +771,65 @@ faustEdge:
   image:
     name: faust-edge
     tag: ""
-    digest: ""
+    digest: "sha256:fc9404e1ccba071f8df251d8eb0ba705ccf1c2313d6cc7dbef50bd040a93bb50"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
-  # WAS "demo-visibility overrides", and the visibility lasted about an hour.
-  #
-  # ENGINE_LIFE_TOTAL_HOURS was "1". Engine hours are wall-clock since the
-  # asset was first observed (ADR-0020: DIS carries no engine-on signal, so
-  # observed time stands in), so every asset passed one hour of "total life"
-  # in its first hour and stayed pegged. Measured 2026-09-06: 647.3 observed
-  # hours against a 1-hour life, consumed/total clamped to 1.0, 0% remaining,
-  # wear reported at exactly 100.0% — for all 14 assets, on both axes.
-  #
-  # A fleet reading 14/14 CRITICAL is what a demo audience reads as broken,
-  # and the tuning that produced it was chosen to make degradation VISIBLE.
-  # It made the first hour visible and every hour after it identical.
-  #
-  # These are now the values coefficients.py itself declares. That is a
-  # deliberate choice of DECLARED defaults over invented ones: per ADR-0020
-  # and the coefficients file's own header, real calibration is the
-  # AFSim or co-located-simulator phase, and a number picked here to produce a pleasing
-  # spread would be authored fiction wearing a physical unit.
-  #
-  # ⚠ WHAT THIS DOES NOT FIX, because numbers cannot:
-  #   * Engine hours are IDENTICAL for every asset by construction, so that
-  #     axis can show no distribution at any coefficient. A real fleet has
-  #     assets at different points in their life; this model starts every
-  #     asset at zero the moment OpenDDIL first sees it. Prior service life
-  #     is a SOURCE fact and has no home yet.
-  #   * The wear models are platform-agnostic. Track km spans 1,282 to
-  #     32,334 across this fleet because aircraft accrue "track" wear from
-  #     distance flown. One global track life cannot be right for both a
-  #     tank and an MQ-9, so the spread below is arithmetic rather than
-  #     engineering until the coefficients are per-platform.
-  prognosticsEnv:
-    TRACK_LIFE_TOTAL_KM:      "5000"
-    ENGINE_LIFE_TOTAL_HOURS:  "5000"
-    TERRAIN_TOTAL_DEG_KM:     "100000"
-    BARREL_LIFE_TOTAL_ROUNDS: "1000"
+
+algorithms:
+  # Declared analytic units the faust-edge runner loads from the bundle
+  # (/bundle/agents/algorithms/<unit>/). Each name needs a chart copy of its
+  # declaration at files/algorithms/<unit>/unit.yaml (render check).
+  # All six run, as the in-line code did before the units: posture owns
+  # asset_state and telemetry-latest-state, trends and element_rollup the
+  # windows, element_bands the band crossings, thermal the runaway events and
+  # wear derived-sustainment. Leaving one out stops its output.
+  # element_bands' bands are elementState.healthBands, not set here.
+  enabled: [element_bands, element_rollup, posture, thermal, trends, wear]
+  units:
+    thermal:
+      # Declared defaults (algorithms/thermal/unit.yaml); override a param here by name.
+      params: {}
+    wear:
+      # Overrides of declared params only; an unknown name, wrong type or a value
+      # outside the declared minimum/maximum fails the render. Empty = declared defaults.
+      params: {}
+      #
+      # These numbers are now the wear declaration's defaults
+      # (algorithms/wear/unit.yaml in openddil-tactical-agents), so the override
+      # map is empty. History of the numbers, from the retired faust-edge prognostics env map:
+      #
+      # WAS "demo-visibility overrides", and the visibility lasted about an hour.
+      #
+      # ENGINE_LIFE_TOTAL_HOURS was "1". Engine hours are wall-clock since the
+      # asset was first observed (ADR-0020: DIS carries no engine-on signal, so
+      # observed time stands in), so every asset passed one hour of "total life"
+      # in its first hour and stayed pegged. Measured 2026-09-06: 647.3 observed
+      # hours against a 1-hour life, consumed/total clamped to 1.0, 0% remaining,
+      # wear reported at exactly 100.0% — for all 14 assets, on both axes.
+      #
+      # A fleet reading 14/14 CRITICAL is what a demo audience reads as broken,
+      # and the tuning that produced it was chosen to make degradation VISIBLE.
+      # It made the first hour visible and every hour after it identical.
+      #
+      # They are the values the old engine's coefficients file declared, carried
+      # into the declaration unchanged. That is a deliberate choice of DECLARED
+      # defaults over invented ones: per ADR-0020, real calibration is the
+      # AFSim or co-located-simulator phase, and a number picked here to produce a pleasing
+      # spread would be authored fiction wearing a physical unit.
+      #
+      # ⚠ WHAT THIS DOES NOT FIX, because numbers cannot:
+      #   * Engine hours are IDENTICAL for every asset by construction, so that
+      #     axis can show no distribution at any coefficient. A real fleet has
+      #     assets at different points in their life; this model starts every
+      #     asset at zero the moment OpenDDIL first sees it. Prior service life
+      #     is a SOURCE fact and has no home yet.
+      #   * The wear models are platform-agnostic. Track km spans 1,282 to
+      #     32,334 across this fleet because aircraft accrue "track" wear from
+      #     distance flown. One global track life cannot be right for both a
+      #     tank and an MQ-9, so the spread is arithmetic rather than
+      #     engineering until the params are per-platform.
 
 projector:
   telemetryChangeOnly:
@@ -820,7 +841,7 @@ projector:
   image:
     name: projector
     tag: ""
-    digest: ""
+    digest: "sha256:330d0efbea9e90af5b5fd3a189c7ac6f818b1666291fd22f96768fd8ba710eb7"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -904,7 +925,7 @@ faustRegional:
   image:
     name: faust-regional
     tag: ""
-    digest: ""
+    digest: "sha256:cbcb9bcee4dda04c557fd6554ea8d1e6a3ba32e00413b66016a11529448918b6"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -948,7 +969,7 @@ cmService:
   image:
     name: cm-service
     tag: ""
-    digest: ""
+    digest: "sha256:20cd9544a36010a2423b872cd46a60f37bb07f3c9e4b241f76f910566ce342d8"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -1038,7 +1059,7 @@ logisticsFusion:
   image:
     name: logistics-fusion-service
     tag: ""
-    digest: ""
+    digest: "sha256:0888c2c84feb41bc9c200e7c112d05520f58bb84ee0477bc8975d24376e2b4d4"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -1056,7 +1077,7 @@ assetRegistry:
   image:
     name: asset-registry-service
     tag: ""
-    digest: ""
+    digest: "sha256:db47dec083a0bf1d126f86a7571b190f26ff2b31f3a773736ab63129d1e9af74"
     pullPolicy: ""
   resources:
     # Light footprint -- one upsert per telemetry event, no in-memory
@@ -1111,7 +1132,7 @@ logisticsSim:
   image:
     name: logistics-sim
     tag: ""
-    digest: ""
+    digest: "sha256:f5eb9edd8c0df9b5e201e9ec5e8917b564e00e3c48773f9b9c910f17f0ea6f04"
     pullPolicy: ""
   resources:
     # Light footprint -- one consumer per edge + one producer + one
@@ -1307,7 +1328,7 @@ frontend:
   image:
     name: frontend
     tag: ""
-    digest: ""
+    digest: "sha256:d66e232901ddaf2988cdb2bbba47b8e53eb46c5362ebef5a8cc2c22934461498"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
@@ -1416,7 +1437,7 @@ egress:
   image:
     name: egress
     tag: ""
-    digest: ""
+    digest: "sha256:f2d70143eb38001d1952386909be840f39e0356a135c2dfe573742ef53662d66"
     pullPolicy: ""
   # The destination is a SUBJECT in the entitlements corpus. Absent from the
   # corpus, the gate refuses every record `destination_unknown`.
@@ -1439,7 +1460,7 @@ egress:
     enabled: false
     image:
       name: tak-server
-      tag: ""
+      tag: "latest"  # not a v2.0.0 release image; kept on its previous tag
       digest: ""
       pullPolicy: ""
     port: 8087
@@ -1860,7 +1881,7 @@ tierNode:
       # Same shape as every other image block, so a mirrored deployment can
       # pin this one too. scripts/check-mirror-coverage.sh fails if any
       # rendered reference has no digest to carry.
-      digest: ""
+      digest: "sha256:c961aa287d8698297cb26cdfadfbe9fd2cbaf77e53cfffe9636e8d8a1e4d842c"
       pullPolicy: IfNotPresent
     auth:
       username: openddil
@@ -2430,7 +2451,7 @@ releasability:
       # openddil image to build, no wheels to resolve at start-up.
       repository: python
       tag: "3.11-slim"
-      digest: ""
+      digest: "sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
     appVolumeSize: 8Mi
     logLevel: INFO
     # Optional per-source band table for the hub PEP, as JSON text. Empty (the default) means off: nothing
@@ -2563,7 +2584,7 @@ exerciseControl:
     # Follows global.imageRegistry / global.imagePrefix like the other OpenDDIL
     # images. A non-empty `repository` is a full override, kept for
     # compatibility and used verbatim.
-    image: {name: reset-runner, repository: "", tag: latest, digest: "", pullPolicy: IfNotPresent}
+    image: {name: reset-runner, repository: "", tag: v2.0.0, digest: "sha256:714cbfb673fd355ade36d655eeecbf1c5ca76db5317c429dac92d299dd199a61", pullPolicy: IfNotPresent}
     extraArgs: []              # appended verbatim to the reset args
     haltBeforePhase: ""        # non-empty -> RESET_HALT_BEFORE_PHASE (the script's injected halt; red checks only)
     # false (default) keeps a person's act: the asset_declaration and asset_correlation
