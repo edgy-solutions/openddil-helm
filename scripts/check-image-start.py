@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import math
 import json
 import os
 import re
@@ -54,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from fractions import Fraction
 
 import yaml
 
@@ -210,7 +212,57 @@ def field_value(path, workload_name):
     return "start-check"
 
 
-def resolve_env(c, rend, workload_name):
+_QTY = re.compile(r"^([+-]?(?:\d+\.?\d*|\.\d+))(?:([eE][+-]?\d+)|(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei))?$")
+_SUFFIX = {"m": Fraction(1, 1000), "k": Fraction(10**3), "M": Fraction(10**6),
+           "G": Fraction(10**9), "T": Fraction(10**12), "P": Fraction(10**15),
+           "E": Fraction(10**18)}
+_SUFFIX.update({s: Fraction(2 ** (10 * i)) for i, s in enumerate(("Ki", "Mi", "Gi", "Ti", "Pi", "Ei"), 1)})
+
+
+def parse_quantity(q):
+    """Kubernetes quantity string to an exact Fraction."""
+    mt = _QTY.match(str(q).strip())
+    if not mt:
+        raise ConfigError("bad resource quantity %r" % (q,))
+    num, exp, suf = mt.groups()
+    v = Fraction(num)
+    if exp:
+        v *= Fraction(10) ** int(exp[1:])
+    elif suf:
+        v *= _SUFFIX[suf]
+    return v
+
+
+def resource_field_value(ref, c, pod):
+    """Value a resourceFieldRef env var gets in a real pod: the container's
+    limit or request divided by the divisor, rounded up. "1" when no value is
+    set (Kubernetes would use node allocatable, which the check cannot know)."""
+    name = ref.get("containerName")
+    target = c
+    if name:
+        target = None
+        for key in ("containers", "initContainers"):
+            for x in (pod or {}).get(key) or []:
+                if x.get("name") == name:
+                    target = x
+                    break
+            if target is not None:
+                break
+        if target is None:
+            raise ConfigError("resourceFieldRef containerName %s is not in the pod" % name)
+    kind, _, res = str(ref.get("resource", "")).partition(".")
+    if kind not in ("limits", "requests") or res not in ("cpu", "memory", "ephemeral-storage"):
+        raise ConfigError("unsupported resourceFieldRef resource %r" % ref.get("resource"))
+    value = ((target.get("resources") or {}).get(kind) or {}).get(res)
+    if value is None:
+        return "1"
+    div = parse_quantity(ref.get("divisor") or "1")
+    if div <= 0:
+        raise ConfigError("resourceFieldRef divisor must be positive")
+    return str(math.ceil(parse_quantity(value) / div))
+
+
+def resolve_env(c, rend, workload_name, pod=None):
     """Ordered list of (name, value). envFrom first, then env, each able to
     use $(VAR) of what came before."""
     pairs, known = [], {}
@@ -253,7 +305,7 @@ def resolve_env(c, rend, workload_name):
         elif "fieldRef" in vf:
             put(n, field_value(vf["fieldRef"].get("fieldPath", ""), workload_name))
         elif "resourceFieldRef" in vf:
-            put(n, "1")
+            put(n, resource_field_value(vf["resourceFieldRef"], c, pod))
         else:
             put(n, "start-check")
     return pairs
@@ -508,7 +560,7 @@ class Pod:
 
 
 def container_args(c, w, pod, ref, rend, label):
-    env = resolve_env(c, rend, w["name"])
+    env = resolve_env(c, rend, w["name"], pod=w["spec"])
     cmd, args = resolve_command(c, env)
     a = ["--network", "none", "--label", "startcheck.image=%s" % label]
     a += user_args(c, w["spec"])
@@ -686,7 +738,7 @@ def print_plan(workloads, rend, overrides, skipped):
                 print("  image:   %s" % effective_ref(c["image"], overrides))
                 print("  command: %s" % json.dumps((c.get("command") or []) + (c.get("args") or [])))
                 try:
-                    names = [p[0] for p in resolve_env(c, rend, w["name"])]
+                    names = [p[0] for p in resolve_env(c, rend, w["name"], pod=w["spec"])]
                     print("  env:     %s" % " ".join(names))
                 except ConfigError as e:
                     print("  env:     UNRESOLVED %s" % e)

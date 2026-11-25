@@ -198,7 +198,7 @@ def test_env_resolution(env):
     assert e["POD_NS"] == "default"
     assert e["POD_IP"] == "127.0.0.1"
     assert e["NODE"] == "start-check"
-    assert e["CPU"] == "1"
+    assert e["CPU"] == "1"                            # no value set: the fixture container has no resources
     assert e["GREETING"] == "hello"                   # envFrom configMapRef
     assert "token" not in e                           # envFrom secretRef, Secret not in the render
     a = call["argv"]
@@ -408,3 +408,33 @@ def test_dependency_exit_is_deps_and_refusal_is_fail(env):
     assert verdicts(p.stdout)["Deployment/web/app"][3] == "FAIL exit=1"
     assert "  first error: " + _REFUSAL in p.stdout
     assert "units=3 pass=2 deps=0 allowed=0 fail=1" in p.stdout
+
+
+@pytest.mark.parametrize("resource,value,divisor,expected", [
+    ("limits.memory", "512Mi", "1Mi", "512"),
+    ("limits.cpu", "500m", "1m", "500"),
+    ("limits.cpu", "500m", None, "1"),
+    ("limits.memory", "1Gi", "1Mi", "1024"),
+    ("limits.memory", "100M", "1Mi", "96"),
+    ("requests.memory", "256Mi", "1Mi", "256"),
+    ("limits.cpu", "2", None, "2"),
+])
+def test_resource_field_ref_resolves_like_kubernetes(resource, value, divisor, expected):
+    m = _load()
+    kind, _, res = resource.partition(".")
+    c = {"name": "app", "resources": {kind: {res: value}}}
+    ref = {"resource": resource}
+    if divisor:
+        ref["divisor"] = divisor
+    assert m.resource_field_value(ref, c, {"containers": [c]}) == expected
+
+
+def test_resource_field_ref_names_another_container_or_refuses_unknown():
+    m = _load()
+    a = {"name": "app", "resources": {"limits": {"memory": "64Mi"}}}
+    b = {"name": "side", "resources": {"limits": {"memory": "128Mi"}}}
+    pod = {"containers": [a, b]}
+    ref = {"resource": "limits.memory", "divisor": "1Mi", "containerName": "side"}
+    assert m.resource_field_value(ref, a, pod) == "128"
+    with pytest.raises(m.ConfigError):
+        m.resource_field_value(dict(ref, containerName="nope"), a, pod)
