@@ -1,0 +1,109 @@
+# Hand-written render used by test_check_image_start.py. Not helm output.
+# No Secret object on purpose: the check only needs key names from items.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: app-cm}
+data:
+  conf.yaml: |
+    key: value
+  other.txt: other-body
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: env-cm}
+data:
+  GREETING: hello
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web}
+spec:
+  template:
+    spec:
+      securityContext: {runAsUser: 1000}
+      volumes:
+        - name: cfg
+          configMap:
+            name: app-cm
+            items:
+              - {key: conf.yaml, path: sub/conf.yaml}
+        - name: cfgall
+          configMap: {name: app-cm}
+        - name: sec
+          secret:
+            secretName: app-secret
+            items:
+              - {key: token, path: token}
+              - {key: password, path: nested/password}
+        - name: scratch
+          emptyDir: {}
+      initContainers:
+        - name: loader
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle:latest
+          command: [sh, -c, "cp -r /bundle/x /out"]
+          volumeMounts:
+            - {name: scratch, mountPath: /out}
+      containers:
+        - name: app
+          image: ghcr.io/edgy-solutions/openddil/faust-edge:latest
+          command: [python, -m, runner]
+          args: ["--name=$(LITERAL)", "--cost=$$5"]
+          workingDir: /srv
+          securityContext: {runAsUser: 2000, runAsGroup: 3000, readOnlyRootFilesystem: true}
+          envFrom:
+            - configMapRef: {name: env-cm}
+            - secretRef: {name: app-secret}
+          env:
+            - {name: LITERAL, value: plain}
+            - {name: COMBINED, value: "pre-$(LITERAL)-$(GREETING)-post"}
+            - name: FROM_CM
+              valueFrom: {configMapKeyRef: {name: env-cm, key: GREETING}}
+            - name: FROM_SECRET
+              valueFrom: {secretKeyRef: {name: app-secret, key: token}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NS
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: NODE
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: CPU
+              valueFrom: {resourceFieldRef: {resource: limits.cpu}}
+          volumeMounts:
+            - {name: cfg, mountPath: /etc/app, readOnly: true}
+            - {name: cfgall, mountPath: /etc/other.txt, subPath: other.txt}
+            - {name: sec, mountPath: /etc/secret, readOnly: true}
+            - {name: scratch, mountPath: /out}
+        - name: proxy
+          image: nginx:1.27
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: thirdparty}
+spec:
+  template:
+    spec:
+      containers:
+        - name: cache
+          image: redis:7
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: ui}
+spec:
+  template:
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/edgy-solutions/openddil/frontend:latest
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: hook}
+spec:
+  template:
+    spec:
+      containers:
+        - name: job
+          image: ghcr.io/edgy-solutions/openddil/projector:latest
