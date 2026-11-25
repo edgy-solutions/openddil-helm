@@ -1,0 +1,3 @@
+{{- /* Renders nothing. Exists so openddil.algorithms.validate runs on every
+   render, with or without a faust-edge consumer enabled. */ -}}
+{{- include "openddil.algorithms.validate" . -}}
