@@ -1278,6 +1278,8 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- $t = concat $t (list "asset-declarations" "asset-fielding") -}}
 {{- /* The per-element tree stays at the owning edge; its rollup rides asset-telemetry-windows. */ -}}
 {{- $t = concat $t (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-capability-snapshot" "asset-telemetry-windows" "asset-element-inventory" "derived-sustainment") -}}
+{{- /* A managed edge's closed failure episodes carry up to its parent, whose projector already reads this topic. Withheld episodes (failure-episodes-withheld) stay at the tier. */ -}}
+{{- $t = append $t "failure-episodes" -}}
 {{- else -}}
 {{- /* ADR-0050: fielding lands on the fielded-to edge's broker at every edge, so an
        edge with no tier must bridge it too or the record is stranded there. */ -}}
@@ -1287,7 +1289,38 @@ at the owning edge, only the window, which carries the element rollup, travels u
 {{- end }}
 
 {{- define "openddil.tierUplinkTopics" -}}
-{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "munition-tracks" "asset-declarations" "asset-fielding" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat") -}}
+{{- join "," (list "asset-logistics-status" "asset-cm-state" "telemetry-latest-state" "asset-telemetry-windows" "tactical-events" "effector-events" "munition-tracks" "asset-declarations" "asset-fielding" "region-fleet-summary" "region-top-factors" "region-wear-trends" "link-heartbeat" "failure-episodes") -}}
+{{- end }}
+
+{{/*
+openddil.reportsCarriedUp -- renders "true" when a tier's closed failure
+episodes reach it from below and carry on up, else nothing. True only for a
+tier with a parent, with at least one managed child, whose own uplink list
+carries failure-episodes AND whose every managed child relays it. Computed
+from the relay lists themselves so the flag cannot claim a path the chart did
+not wire. Withheld episodes are never relayed and stay at the tier that
+refused them.
+
+Usage: include "openddil.reportsCarriedUp" (dict "tier" $tier "root" $root)
+*/}}
+{{- define "openddil.reportsCarriedUp" -}}
+{{- $tier := .tier -}}
+{{- $root := .root -}}
+{{- if and $tier.parent $tier.hasChildren (has "failure-episodes" (splitList "," (include "openddil.tierUplinkTopics" $root))) -}}
+{{- $kids := 0 -}}
+{{- $ok := true -}}
+{{- $tid := $tier.id | toString -}}
+{{- range (include "openddil.tierList" $root | fromYamlArray) -}}
+{{- if include "openddil.isTierManaged" (dict "id" .id "root" $root) -}}
+{{- $p := include "openddil.effectiveParent" (dict "tier" . "root" $root) | fromYaml -}}
+{{- if eq ($p.host | toString) $tid -}}
+{{- $kids = add $kids 1 -}}
+{{- if not (has "failure-episodes" (splitList "," (include "openddil.relayTopics" (dict "tier" . "root" $root)))) -}}{{- $ok = false -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $ok (gt (int $kids) 0) -}}true{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*

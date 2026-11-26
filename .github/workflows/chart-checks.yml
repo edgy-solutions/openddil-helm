@@ -251,6 +251,9 @@ jobs:
       # releasability.pep.env: the default, an overlay, a null, and the refusals, piped (the render is never saved).
       - name: PEP env render test
         run: bash scripts/tests/test_pep_env_render.sh
+      # Closed failure episodes carry up through the tiers; tier PEPs and frontends reach the hub egress pane. Piped, never saved.
+      - name: Reports carry-up render test
+        run: bash scripts/tests/test_reports_carry_up_render.sh
 
       # The Restate wipe hook refuses while a failure-episodes backfill pod does not read ok. The wipe script is
       # piped from the render into sh against a stub kubectl; nothing rendered is saved.
