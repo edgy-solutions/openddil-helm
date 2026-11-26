@@ -48,7 +48,7 @@ spec:
         # stayed green, no pod complained, and the health axis simply never
         # populated. A dependency that fails safely still has to be declared.
         - name: bundle-loader
-          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:e68fa80d5d0856acc37592f7d422c28a94cd06da56bd2dee7174db5a7e5280d8
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:155b3a68d923ff4726de05e793edd496dc5e8fc187d1bb298f309bc33e4e8942
           imagePullPolicy: IfNotPresent
           command:
             - sh
