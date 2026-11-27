@@ -48,7 +48,7 @@ spec:
         # stayed green, no pod complained, and the health axis simply never
         # populated. A dependency that fails safely still has to be declared.
         - name: bundle-loader
-          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:0e0202a9a478d2fb2f59411a5c312364b67b5b9ef6bf3e6c555f09bb0c4312a6
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:526d32707fb1dd1f51b39287761f81041171ad899dde0c1b069992a32a1c1da2
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -273,7 +273,7 @@ spec:
         # stayed green, no pod complained, and the health axis simply never
         # populated. A dependency that fails safely still has to be declared.
         - name: bundle-loader
-          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:0e0202a9a478d2fb2f59411a5c312364b67b5b9ef6bf3e6c555f09bb0c4312a6
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:526d32707fb1dd1f51b39287761f81041171ad899dde0c1b069992a32a1c1da2
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -498,7 +498,7 @@ spec:
         # stayed green, no pod complained, and the health axis simply never
         # populated. A dependency that fails safely still has to be declared.
         - name: bundle-loader
-          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:0e0202a9a478d2fb2f59411a5c312364b67b5b9ef6bf3e6c555f09bb0c4312a6
+          image: ghcr.io/edgy-solutions/openddil/runtime-bundle@sha256:526d32707fb1dd1f51b39287761f81041171ad899dde0c1b069992a32a1c1da2
           imagePullPolicy: IfNotPresent
           command:
             - sh
