@@ -24,7 +24,7 @@ global:
   # images below are pinned by digest to the v2.0.0 suite
   # (release/suite-v2.0.0.yaml), and a digest wins over any tag. These are
   # pinned past v2.0.0: faust-edge (sha-f672242), cm-service (the :latest
-  # build of commit 5bb2175), frontend and egress (sha-4db7382), and
+  # build of commit 5bb2175), frontend and egress (sha-01b5ae4), and
   # runtime-bundle (the build that adds agents/algorithms).
   imageTag: "v2.0.0"
 
@@ -1329,7 +1329,7 @@ frontend:
   image:
     name: frontend
     tag: ""
-    digest: "sha256:eb973d2748b3730b144648ef4eef7c475e8d8678e2a8dc2d0f22080a8289fa3e"
+    digest: "sha256:efaa74eff0c68fac6d5c742b2920554faf6cc9ba9fe4a470eb05ce514fe9cfe0"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
@@ -1438,7 +1438,7 @@ egress:
   image:
     name: egress
     tag: ""
-    digest: "sha256:fe95080714eb0e039ea94c8aa6547ba5f06b7e348485591a302f9dab39ba1959"
+    digest: "sha256:e6c552036ba69bcc94573214de7b438023278581f3dfa48eaa79dd7ab6d0d2f1"
     pullPolicy: ""
   # The destination is a SUBJECT in the entitlements corpus. Absent from the
   # corpus, the gate refuses every record `destination_unknown`.
