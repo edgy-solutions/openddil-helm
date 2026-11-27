@@ -993,6 +993,10 @@ spec:
             # deployment having a gate with nothing behind it.
             - name: OPENDDIL_SESSION_GATE
               value: {{ ternary "on" "off" (and $root.Values.releasability.oidc.enabled (not (empty $tier.publicOrigin))) | quote }}
+            # The /egress/ route goes to this tier's own PEP, the same
+            # wiring the hub frontend has (see hub.yaml).
+            - name: OPENDDIL_EGRESS_PANE_VIA_PEP
+              value: "on"
             {{- end }}
           volumeMounts:
             # The tier's identity, delivered on the channel that actually
@@ -1093,6 +1097,10 @@ data:
                different value. */}}
         "parent": {{ with $tier.parent }}{{ . | quote }}{{ else }}null{{ end }}
       },
+      {{- /* Closed failure episodes below this tier carry up through it: set only where the relay lists wire both halves. */}}
+      {{- if include "openddil.reportsCarriedUp" (dict "tier" $tier "root" $root) }}
+      "reports": {"closesCarriedUp": true},
+      {{- end }}
       {{- /* Same keys as the hub's deployment.json (effectors, movement, and cortex/terrain when set), one definition. */}}
       "effectors": {{ (include "openddil.frontendMoveInputsJson" $root | fromJson).effectors | toJson }},
       {{- /* The measuring tier's declared heartbeat: the frontend derives its stale window from it. Only a tier that runs a link monitor (has children) reads link_status. */}}
@@ -1225,6 +1233,10 @@ spec:
               value: {{ printf "http://%s-tier-topaz-%s%s:8383" $root.Release.Name $tier.id (include "openddil.svcDomain" $root) | quote }}
             - name: OPENDDIL_PEP_PORT
               value: "8080"
+            # The hub's egress pane, the same URL the hub PEP is given: this
+            # tier's PEP filters the pane's answer to the viewer's nations.
+            - name: OPENDDIL_EGRESS_PANE_URL
+              value: {{ printf "http://%s-egress-pane-api%s:%v" $root.Release.Name (include "openddil.svcDomain" $root) $root.Values.egress.paneApi.port | quote }}
             - name: LOG_LEVEL
               value: {{ $root.Values.releasability.pep.logLevel | quote }}
             {{- include "openddil.pepCompactionEnv" $root | nindent 12 }}

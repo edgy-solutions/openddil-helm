@@ -22,8 +22,9 @@ global:
   imagePullSecrets: []
   # Tag for openddil-owned images that have no digest set. The released
   # images below are pinned by digest to the v2.0.0 suite
-  # (release/suite-v2.0.0.yaml), and a digest wins over any tag. Two are
-  # pinned past v2.0.0 for the algorithm units: faust-edge (sha-3edd233) and
+  # (release/suite-v2.0.0.yaml), and a digest wins over any tag. These are
+  # pinned past v2.0.0: faust-edge (sha-f672242), cm-service (the :latest
+  # build of commit 5bb2175), frontend and egress (sha-01b5ae4), and
   # runtime-bundle (the build that adds agents/algorithms).
   imageTag: "v2.0.0"
 
@@ -36,7 +37,7 @@ bundle:
   image:
     name: runtime-bundle
     tag: ""               # Empty -> falls back to global.imageTag
-    digest: "sha256:e68fa80d5d0856acc37592f7d422c28a94cd06da56bd2dee7174db5a7e5280d8"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
+    digest: "sha256:0e0202a9a478d2fb2f59411a5c312364b67b5b9ef6bf3e6c555f09bb0c4312a6"            # Non-empty -> <registry>/<prefix>/<name>@<digest>
                           # bypassing tag entirely. Mirror-time digest
                           # pinning lives in a values-pinned.yaml file
                           # emitted by scripts/mirror-to-artifactory.ps1.
@@ -771,7 +772,7 @@ faustEdge:
   image:
     name: faust-edge
     tag: ""
-    digest: "sha256:fc9404e1ccba071f8df251d8eb0ba705ccf1c2313d6cc7dbef50bd040a93bb50"
+    digest: "sha256:e8e7c935ed5ea831c512870fc08d17133bfced923392197700143cde968b5698"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -969,7 +970,7 @@ cmService:
   image:
     name: cm-service
     tag: ""
-    digest: "sha256:20cd9544a36010a2423b872cd46a60f37bb07f3c9e4b241f76f910566ce342d8"
+    digest: "sha256:b838393093e146a80dd6f1d36d42f41535719650d39082e19c59cdec335985d4"
     pullPolicy: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -1328,7 +1329,7 @@ frontend:
   image:
     name: frontend
     tag: ""
-    digest: "sha256:d66e232901ddaf2988cdb2bbba47b8e53eb46c5362ebef5a8cc2c22934461498"
+    digest: "sha256:efaa74eff0c68fac6d5c742b2920554faf6cc9ba9fe4a470eb05ce514fe9cfe0"
     pullPolicy: ""
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
@@ -1437,7 +1438,7 @@ egress:
   image:
     name: egress
     tag: ""
-    digest: "sha256:f2d70143eb38001d1952386909be840f39e0356a135c2dfe573742ef53662d66"
+    digest: "sha256:e6c552036ba69bcc94573214de7b438023278581f3dfa48eaa79dd7ab6d0d2f1"
     pullPolicy: ""
   # The destination is a SUBJECT in the entitlements corpus. Absent from the
   # corpus, the gate refuses every record `destination_unknown`.

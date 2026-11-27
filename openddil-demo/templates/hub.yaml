@@ -1232,10 +1232,11 @@ spec:
             # $pep_upstream the read path already uses, path unchanged, so
             # the PEP's own /egress/decisions route can ask Topaz for THIS
             # viewer's nations and filter the pane's answer down to them
-            # (gateway/egress_view.py) before the browser ever sees it. Not
-            # set on tier-node.yaml frontends: nginx there substitutes the
-            # __EGRESS_PANE_OFF__ 404 branch instead, because neither a PEP
-            # nor a pane exists at that tier.
+            # (gateway/egress_view.py) before the browser ever sees it. Tier
+            # frontends in tier-node.yaml set it too, under the same
+            # releasability condition: their /egress/ route goes to the
+            # tier's own PEP, which is given the hub pane's URL and filters
+            # the same way.
             - name: OPENDDIL_EGRESS_PANE_VIA_PEP
               value: "on"
           {{- end }}
